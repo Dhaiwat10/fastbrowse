@@ -445,13 +445,19 @@ class CdpPage(Page):
         return str(raw) if raw is not None else ""
 
     async def navigate(self, url: str, load_timeout_seconds: float = 15.0) -> None:
-        """Setup helper (tests, initial task URL): navigate the active tab and wait for it to finish loading."""
+        """Setup helper (tests, initial task URL): navigate the active tab and wait until its document is usable.
+
+        Waiting for `complete` also waits on every image and tracker, which behind a proxy can outlast the page
+        becoming interactive; observation settles the rest.
+        """
         session_id = self._session.active_session_id
-        await self._session.client.send.Page.navigate(params={"url": url}, session_id=session_id)
+        result = await self._session.client.send.Page.navigate(params={"url": url}, session_id=session_id)
+        if error := result.get("errorText"):
+            raise RuntimeError(f"navigation to {url} failed: {error}")
         deadline = asyncio.get_event_loop().time() + load_timeout_seconds
         while asyncio.get_event_loop().time() < deadline:
             state = await self._evaluate(session_id, "document.readyState")
-            if state == "complete":
+            if state in {"interactive", "complete"}:
                 return
             await asyncio.sleep(0.05)
         raise TimeoutError(f"navigation to {url} did not complete within {load_timeout_seconds}s")
