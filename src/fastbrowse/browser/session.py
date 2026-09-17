@@ -75,6 +75,7 @@ class BrowserSession:
         self._artifacts: list[Artifact] = []
         self._dialogs: dict[str, Dialog] = {}
         """Pending JS dialog per tab session id; cleared once handled."""
+        self._dialog_opened = asyncio.Event()
         self._background: set[asyncio.Task[None]] = set()
 
     @property
@@ -137,6 +138,13 @@ class BrowserSession:
             None,
         )
 
+    async def wait_for_dialog(self) -> None:
+        while True:
+            self._dialog_opened.clear()
+            if self.pending_dialog() is not None:
+                return
+            await self._dialog_opened.wait()
+
     async def __aenter__(self) -> Self:
         self._client = CDPClient(self._connection.cdp_url)
         await self._client.start()
@@ -180,14 +188,20 @@ class BrowserSession:
         return target_id
 
     async def _prepare_session(self, session_id: str) -> None:
-        for domain in _ENABLE_DOMAINS:
-            await self.client.send_raw(f"{domain}.enable", session_id=session_id)
-        await self.client.send_raw(
-            "Target.setAutoAttach",
-            {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
-            session_id=session_id,
-        )
-        await self.client.send.Fetch.enable(params={"patterns": list(DOWNLOAD_PATTERNS)}, session_id=session_id)
+        # These domains are independent, but all must be ready before the session can be used.
+        async with asyncio.TaskGroup() as tasks:
+            for domain in _ENABLE_DOMAINS:
+                tasks.create_task(self.client.send_raw(f"{domain}.enable", session_id=session_id))
+            tasks.create_task(
+                self.client.send_raw(
+                    "Target.setAutoAttach",
+                    {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
+                    session_id=session_id,
+                )
+            )
+            tasks.create_task(
+                self.client.send.Fetch.enable(params={"patterns": list(DOWNLOAD_PATTERNS)}, session_id=session_id)
+            )
 
     def _register_events(self) -> None:
         client = self.client
@@ -262,6 +276,7 @@ class BrowserSession:
         self._dialogs[session_id] = Dialog(
             kind=event["type"], message=event["message"], default_prompt=event.get("defaultPrompt")
         )
+        self._dialog_opened.set()
 
     async def handle_dialog(self, accept: bool, prompt_text: str | None = None) -> None:
         session_id = next(

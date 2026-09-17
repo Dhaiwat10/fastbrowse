@@ -150,16 +150,30 @@ async def decide(
 def offered_operations(
     observation: Observation, controls: Sequence[Control], context: StepContext
 ) -> tuple[Operation, ...]:
+    return _offered_operations(observation, _index_controls(controls), context)
+
+
+def _index_controls(controls: Sequence[Control]) -> dict[Operation, tuple[Control, ...]]:
+    indexed: dict[Operation, list[Control]] = {}
+    for control in controls:
+        for operation in control.operations:
+            indexed.setdefault(operation, []).append(control)
+    return {operation: tuple(candidates) for operation, candidates in indexed.items()}
+
+
+def _offered_operations(
+    observation: Observation, indexed: Mapping[Operation, tuple[Control, ...]], context: StepContext
+) -> tuple[Operation, ...]:
     if observation.dialog is not None:
         return (Operation.DIALOG, Operation.ESCALATE)
     available: list[Operation] = []
     for operation in Operation:
         match operation:
             case Operation.CLICK | Operation.FILL | Operation.SELECT | Operation.ENTER:
-                if any(operation in c.operations for c in controls):
+                if operation in indexed:
                     available.append(operation)
             case Operation.UPLOAD:
-                if context.has_attachments and any(operation in c.operations for c in controls):
+                if context.has_attachments and operation in indexed:
                     available.append(operation)
             case Operation.SWITCH_TAB:
                 if len(observation.tabs) > 1:
@@ -179,7 +193,8 @@ def offered_operations(
 def build_request(
     observation: Observation, controls: Sequence[Control], context: StepContext, config: Config
 ) -> _Request:
-    offered = offered_operations(observation, controls, context)
+    indexed = _index_controls(controls)
+    offered = _offered_operations(observation, indexed, context)
     instructions: JsonValue = {"task": context.task, "subgoal": context.subgoal, "rules": NEXT_ACTION}
     questions: dict[str, Question] = {
         "operation": ChoiceQuestion(
@@ -193,7 +208,7 @@ def build_request(
     for operation in offered:
         if operation not in TARGETED:
             continue
-        candidates = tuple(c for c in controls if operation in c.operations)
+        candidates = indexed[operation]
         head = f"{operation.value}_target"
         if len(candidates) <= limit:
             targets[operation] = candidates
@@ -337,6 +352,10 @@ def _target_question(
 ) -> ChoiceQuestion:
     return ChoiceQuestion(
         instructions=json.dumps({"task": context.task, "operation": operation.value, "rules": [NEXT_ACTION, rules]}),
+        # Sending only the label and pointing Jev at the shared state for the rest is two thirds smaller
+        # on a dense page, and it was tried. It bought no measured latency, because the request was never
+        # the slow part, and a criterion the model has to go and look up is a worse criterion: the choice
+        # is what this whole design rests on, so it gets the attributes in front of it.
         criteria={c.id: _element(c) for c in candidates},
     )
 
