@@ -562,35 +562,42 @@ class Agent:
         state.ledger.record(check.cost)
         accepted = check.verdict is DoneVerdict.ACCEPT
         drafting: asyncio.Task[Generation[ComposedAnswer]] | None = None
-        if check.verdict is DoneVerdict.VERIFY:
-            # Write the answer while the verifier is still deciding. Both read the same finished notes,
-            # and every accepted run wants an answer, so the whole cost of guessing wrong is one
-            # discarded call on the branch that was going back to work anyway.
-            if state.plan.answer_expected:
-                drafting = asyncio.create_task(
-                    compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
+        # Whoever still holds the draft when this returns is responsible for it. `finally` covers the
+        # paths that are not a decision at all: the verifier raising, `until` raising, the caller
+        # cancelling the run. An orphaned compose would otherwise keep calling a model and billing a
+        # ledger for a run that has already produced its result.
+        try:
+            if check.verdict is DoneVerdict.VERIFY:
+                # Write the answer while the verifier is still deciding. Both read the same finished
+                # notes, and every accepted run wants an answer, so the whole cost of guessing wrong is
+                # one discarded call on the branch that was going back to work anyway.
+                if state.plan.answer_expected:
+                    drafting = asyncio.create_task(
+                        compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
+                    )
+                verdict = await llm_verify(
+                    self._llm,
+                    state.task,
+                    state.plan,
+                    fresh,
+                    await self._screenshots(),
+                    state.notes,
+                    state.steps,
+                    ledger=state.ledger,
                 )
-            verdict = await llm_verify(
-                self._llm,
-                state.task,
-                state.plan,
-                fresh,
-                await self._screenshots(),
-                state.notes,
-                state.steps,
-                ledger=state.ledger,
-            )
-            state.ledger.record(verdict.cost)
-            accepted = verdict.data.complete and not verdict.data.missing
-        if accepted and until is not None:
-            accepted = await until((self._raw_observation or fresh).url)
-        if not accepted:
+                state.ledger.record(verdict.cost)
+                accepted = verdict.data.complete and not verdict.data.missing
+            if accepted and until is not None:
+                accepted = await until((self._raw_observation or fresh).url)
+            if not accepted:
+                unmet = ", ".join(check.unmet) or "completion not confirmed"
+                await self._recover(state, observation, f"DONE rejected: {unmet}")
+                return None
+            handed, drafting = drafting, None
+            return await self._conclude(state, output_schema, handed)
+        finally:
             if drafting is not None:
-                drafting.cancel()
-            unmet = ", ".join(check.unmet) or "completion not confirmed"
-            await self._recover(state, observation, f"DONE rejected: {unmet}")
-            return None
-        return await self._conclude(state, output_schema, drafting)
+                await _discard(drafting)
 
     async def _answer(
         self, state: _RunState, drafting: asyncio.Task[Generation[ComposedAnswer]] | None
@@ -625,7 +632,15 @@ class Agent:
         answering = self._answer(state, drafting) if state.plan.answer_expected else None
         extracting = self._extraction(state, output_schema) if output_schema is not None else None
         if answering is not None and extracting is not None:
-            (answer, verified), extraction = await asyncio.gather(answering, extracting)
+            first, second = asyncio.create_task(answering), asyncio.create_task(extracting)
+            try:
+                (answer, verified), extraction = await asyncio.gather(first, second)
+            finally:
+                # gather reports the first failure and leaves its sibling running, which would go on
+                # calling a model after the run had already failed or hit its budget.
+                for task in (first, second):
+                    if not task.done():
+                        await _discard(task)
         elif answering is not None:
             answer, verified = await answering
             extraction = None
@@ -680,6 +695,16 @@ class Agent:
             error=error,
             resume_token=resume_token,
         )
+
+
+async def _discard[T](task: asyncio.Task[T]) -> None:
+    """Cancel abandoned work and wait for it to stop, so nothing bills a run that has already ended.
+
+    Waiting is the point. Cancellation is a request, and a task that has already entered an HTTP call
+    does not stop until it is next at an await, so returning without joining leaves the call in flight.
+    """
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 def _require(target: Control | None) -> Control:

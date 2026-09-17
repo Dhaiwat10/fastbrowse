@@ -13,6 +13,7 @@ import hashlib
 import json
 import time
 from collections.abc import Coroutine
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, assert_never, cast
@@ -376,26 +377,32 @@ class CdpPage(Page):
         list that had not loaded. That is what stalled `wiki-godel` at an uncertain next step with the
         query typed and nothing chosen. The wait is one round trip, resolves as soon as options appear
         and returns at once for a field that has no popup to wait for.
+
+        The wait is best effort by construction. Typing into a search box can submit it, and a
+        navigation discards the renderer promise we are awaiting, so a fill that worked would fail on
+        the wait that was only there to help it. A page that moved on has answered the question.
         """
-        await self._evaluate(
-            session_id,
-            "new Promise(resolve => { const e = window.__fastbrowse?.nodes.get("
-            f"{local_id}); "
-            "const owned = () => { const id = e.getAttribute('aria-controls') || e.getAttribute('aria-owns'); "
-            "return id ? e.ownerDocument.getElementById(id) : null; }; "
-            "const expects = !!e && (e.getAttribute('role') === 'combobox' || e.type === 'search' "
-            "|| !!e.getAttribute('aria-autocomplete') || !!owned()); "
-            "if (!expects) { resolve(false); return; } "
-            "const listed = () => e.getAttribute('aria-expanded') === 'true' "
-            "|| !!owned()?.querySelector('[role=\"option\"], li, td') "
-            '|| !!e.ownerDocument.querySelector(\'[role="listbox"] [role="option"]\'); '
-            "if (listed()) { resolve(true); return; } "
-            "const stop = ok => { observer.disconnect(); clearTimeout(timer); resolve(ok); }; "
-            "const observer = new MutationObserver(() => { if (listed()) stop(true); }); "
-            "observer.observe(e.ownerDocument.body, {childList: true, subtree: true, attributes: true, "
-            "attributeFilter: ['aria-expanded']}); "
-            f"const timer = setTimeout(() => stop(false), {_SUGGESTION_SECONDS * 1000}); }})",
-        )
+        with suppress(Exception):
+            await self._evaluate(
+                session_id,
+                "new Promise(resolve => { const e = window.__fastbrowse?.nodes.get("
+                f"{local_id}); "
+                "const owned = () => { const id = e.getAttribute('aria-controls') || e.getAttribute('aria-owns'); "
+                "return id ? e.ownerDocument.getElementById(id) : null; }; "
+                "const expects = !!e && (e.getAttribute('role') === 'combobox' || e.type === 'search' "
+                "|| !!e.getAttribute('aria-autocomplete') || !!owned()); "
+                "if (!expects) { resolve(false); return; } "
+                # A popup that is open is not a popup that is populated, and an empty one is exactly what we
+                # are waiting to stop seeing, so expansion on its own does not end the wait.
+                "const listed = () => !!owned()?.querySelector('[role=\"option\"], li, td') "
+                '|| !!e.ownerDocument.querySelector(\'[role="listbox"] [role="option"]\'); '
+                "if (listed()) { resolve(true); return; } "
+                "const stop = ok => { observer.disconnect(); clearTimeout(timer); resolve(ok); }; "
+                "const observer = new MutationObserver(() => { if (listed()) stop(true); }); "
+                "observer.observe(e.ownerDocument.body, {childList: true, subtree: true, attributes: true, "
+                "attributeFilter: ['aria-expanded']}); "
+                f"const timer = setTimeout(() => stop(false), {_SUGGESTION_SECONDS * 1000}); }})",
+            )
 
     async def _select(
         self, target: tuple[str, str, int, list[object] | None] | None, option: str
@@ -604,8 +611,13 @@ class CdpPage(Page):
                 # here in the same task rejects a field that is in fact focused. Poll instead of guessing.
                 "return new Promise(resolve => { "
                 f"const deadline = Date.now() + {_FOCUS_SETTLE_SECONDS * 1000}; "
-                "const check = () => { if (e.ownerDocument.hasFocus()) { " + prepare + "resolve(true); return; } "
-                "if (Date.now() > deadline || !e.isConnected) { resolve(false); return; } "
+                # Every condition is rechecked on the tick that succeeds. Waiting for the focus signal
+                # means focus can move while we wait, and reporting success on a stale activeElement
+                # would authorize the caller to send keystrokes to whatever holds focus now.
+                "const check = () => { if (!e.isConnected || e.getRootNode().activeElement !== e) "
+                "{ resolve(false); return; } "
+                "if (e.ownerDocument.hasFocus()) { " + prepare + "resolve(true); return; } "
+                "if (Date.now() > deadline) { resolve(false); return; } "
                 f"setTimeout(check, 10); }}; check(); }}); }})({local_id})",
             )
         )
