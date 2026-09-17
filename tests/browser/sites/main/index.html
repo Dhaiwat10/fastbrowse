@@ -44,6 +44,10 @@
   <h2>Hydrating field</h2>
   <input id="hydrating" type="text" placeholder="Hydrating field" />
 
+  <h2>Rejecting field</h2>
+  <input id="rejecting" type="text" placeholder="Rejecting field" />
+  <input id="decoy" type="text" placeholder="Decoy field" value="godel" />
+
   <h2>Upload</h2>
   <input id="file-input" type="file" />
   <pre id="upload-sha"></pre>
@@ -87,10 +91,19 @@
       const old = e.target;
       if (old.dataset.hydrated) return;
       const fresh = old.cloneNode();
+      fresh.removeAttribute('id');  // as Wikipedia's does, so identity cannot rest on the id
       fresh.dataset.hydrated = 'true';
       fresh.value = old.value;
       old.replaceWith(fresh);
       fresh.focus();
+    });
+    document.getElementById('rejecting').addEventListener('beforeinput', e => {
+      // Refuses the value, replaces itself with an empty copy, and focuses a field already holding it.
+      e.preventDefault();
+      const old = e.target;
+      const fresh = old.cloneNode();
+      old.replaceWith(fresh);
+      document.getElementById('decoy').focus();
     });
     document.getElementById('file-input').addEventListener('change', async e => {
       const file = e.target.files[0];

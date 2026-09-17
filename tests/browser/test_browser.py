@@ -264,7 +264,9 @@ async def test_capture_offsets_slice_exactly_to_each_block(loaded_page: CdpPage)
     assert any(link.href == "https://example.com/docs" for link in links)
 
 
-async def test_fill_succeeds_when_the_field_is_replaced_while_typing(loaded_page: CdpPage) -> None:
+async def test_fill_succeeds_when_the_field_is_replaced_while_typing(
+    loaded_page: CdpPage, browser_session: BrowserSession
+) -> None:
     """Wikipedia's search box swaps itself for a hydrated copy mid-insertion; the text still landed."""
     obs = await loaded_page.observe()
     field = find(obs, "Hydrating field")
@@ -273,3 +275,12 @@ async def test_fill_succeeds_when_the_field_is_replaced_while_typing(loaded_page
 
     obs2 = await loaded_page.observe()
     assert find(obs2, "Hydrating field").value == "godel"
+    assert await eval_value(browser_session, browser_session.active_session_id, "!document.getElementById('hydrating')")
+
+
+async def test_fill_fails_when_another_field_holds_the_text_we_could_not_insert(loaded_page: CdpPage) -> None:
+    """The replacement must be the target's own: a decoy holding the same text does not vouch for it."""
+    obs = await loaded_page.observe()
+    field = find(obs, "Rejecting field")
+    result = await loaded_page.act(Action(operation=Operation.FILL, target_id=field.id, text="godel"), obs)
+    assert result.outcome == StepOutcome.FAILED

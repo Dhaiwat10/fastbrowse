@@ -327,6 +327,15 @@ class CdpPage(Page):
             )
         if not await self._focus(session_id, local_id):
             return StepOutcome.FAILED, "target did not receive keyboard focus"
+        await self._evaluate(
+            session_id,
+            # Where the field we are about to type into sits, kept in the page so the check below can tell
+            # a copy that took its place from some other field that happens to hold the same text. Wikipedia
+            # re-renders its search box without carrying the id over, so identity has to be positional.
+            "((e) => { const fb = window.__fastbrowse; if (!fb || !e) return; const r = e.getBoundingClientRect(); "
+            "fb.filled = {doc: e.ownerDocument, tag: e.tagName, x: r.x + r.width / 2, y: r.y + r.height / 2}; })"
+            f"(window.__fastbrowse?.nodes.get({local_id}))",
+        )
         # A secret must be checked and inserted in one renderer task: CDP insertText would leave a
         # navigation/focus race between checking the origin and dispatching the secret to the page.
         script = (
@@ -355,14 +364,16 @@ class CdpPage(Page):
         landed = await self._evaluate(
             session_id,
             # A framework may swap the field for a hydrated copy while the text is being inserted, which
-            # detaches the node we typed into even though the text landed. The focused field is that copy,
-            # so accept it holding the text; anything else is a genuine rejection of the value.
-            # The focused copy is consulted only once the node we typed into is gone: while it is still
-            # attached, it is the only field that answers for the value, and another field holding the
-            # same text is not evidence that this one took it.
+            # detaches the node we typed into even though the text landed. That copy is accepted only once
+            # ours is gone, and only when it is focused in the same document and now covers the point ours
+            # occupied: a field elsewhere holding the same text is not evidence that ours took it.
             f"((e, text) => {{ const holds = n => !!n && (n.value ?? n.innerText) === text; "
             "if (!e) return false; if (e.isConnected) return holds(e); "
-            "return holds(e.getRootNode?.()?.activeElement ?? document.activeElement); })"
+            "const was = window.__fastbrowse?.filled; if (!was) return false; "
+            "const now = was.doc.activeElement; if (!now || now.tagName !== was.tag) return false; "
+            "const r = now.getBoundingClientRect(); "
+            "const inPlace = was.x >= r.left && was.x <= r.right && was.y >= r.top && was.y <= r.bottom; "
+            "return inPlace && holds(now); })"
             f"(window.__fastbrowse?.nodes.get({local_id}), {json.dumps(text)})",
         )
         return (
