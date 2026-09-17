@@ -35,7 +35,20 @@ Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys. Rows are appended t
 
 ## Results
 
-<!-- results -->
+Two passes of all six live tasks through both arms, 2026-09-17, `google/gemini-3.8-flash` behind Jev:
+
+| | passed | cost | wall clock | cost per task |
+|---|---|---|---|---|
+| fastbrowse on a cloud browser | 12/12 | $0.2512 | 554s | $0.0209 |
+| hosted Browser Use | 12/12 | $4.9225 | 386s | $0.4102 |
+
+**About 20x cheaper and about 40% slower**, at the same score on this set. The cost gap is structural: picking from indexed candidates spends a fraction of the tokens that generating actions from screenshots does, and most of what is left is the LLM rather than Jev (on a representative run, $0.0127 LLM against $0.0024 Jev and $0.0003 browser). The time gap is real and not yet attacked — each step is a round trip, and nothing is speculatively executed.
+
+Six tasks is a smoke test, not a benchmark. Treat these as evidence that the engine works end to end at a known cost, not as a ranking.
+
+The local suite passes 6/6 at about $0.005 a task.
+
+Both suites depend on upstream availability and fail loudly when it is absent: an earlier pass of this same commit scored 0/6 and 10/12 during a Jev `model_unavailable` outage, after the retry budget was exhausted. Re-read a red run before believing it is a regression.
 
 ## External benchmarks
 
