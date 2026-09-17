@@ -28,7 +28,6 @@ class Status(StrEnum):
     BUDGET_EXCEEDED = "budget_exceeded"
     OBSERVATION_LIMIT = "observation_limit"
     """The page could not be represented within Jev's input limits even after reduction."""
-    CANCELLED = "cancelled"
     ERROR = "error"
 
 
@@ -56,13 +55,10 @@ class Decider(StrEnum):
 
 class StepOutcome(StrEnum):
     EXECUTED = "executed"
-    NO_CHANGE = "no_change"
     COVERED = "covered"
     """The target was not the topmost element at its point; nothing was dispatched."""
     STALE = "stale"
     """The page changed between observation and dispatch; nothing was dispatched."""
-    GATED = "gated"
-    """A code gate (authorization, login, secret scope, budget) stopped the action."""
     FAILED = "failed"
 
 
@@ -79,8 +75,6 @@ class Evidence(Frozen):
 
 class ArtifactKind(StrEnum):
     DOWNLOAD = "download"
-    SCREENSHOT = "screenshot"
-    RECORDING = "recording"
 
 
 class Artifact(Frozen):

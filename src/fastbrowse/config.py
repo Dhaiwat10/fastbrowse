@@ -9,16 +9,11 @@ from fastbrowse.models import Frozen
 class Thresholds(Frozen):
     recover_below: float = 0.55
     """Operation/target confidence under this goes to a corrective re-ask, then LLM recovery."""
-    reversible_act_from: float = 0.55
     sensitive_act_from: float = 0.90
     """Minimum confidence for an action code has classified as irreversible (authorization also required)."""
-    prev_failed_below: float = 0.35
-    """`prev_ok` under this counts as a failed step unless a deterministic page diff shows the change."""
     login_required_above: float = 0.70
     irreversible_above: float = 0.50
     done_accept_from: float = 0.85
-    done_verify_from: float = 0.50
-    """`complete` between this and `done_accept_from` is decided by the LLM verifier."""
     claim_problem_above: float = 0.70
     """Any "yes = something is wrong" answer check above this rejects the claim."""
 

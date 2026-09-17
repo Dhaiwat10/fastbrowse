@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import hashlib
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from types import TracebackType
@@ -309,7 +308,3 @@ def _filename_from_disposition(disposition: str) -> str | None:
         if part.lower().startswith("filename="):
             return part.split("=", 1)[1].strip('"')
     return None
-
-
-def sha256_hex(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
