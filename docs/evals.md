@@ -39,16 +39,16 @@ Two passes of all six live tasks through both arms, 2026-09-17, `google/gemini-3
 
 | | passed | cost | wall clock | cost per task |
 |---|---|---|---|---|
-| fastbrowse on a cloud browser | 12/12 | $0.2512 | 554s | $0.0209 |
-| hosted Browser Use | 12/12 | $4.9225 | 386s | $0.4102 |
+| fastbrowse on a cloud browser | 12/12 | $0.2622 | 498s | $0.0219 |
+| hosted Browser Use | 11/12 | $5.0751 | 384s | $0.4229 |
 
-**About 20x cheaper and about 40% slower**, at the same score on this set. The cost gap is structural: picking from indexed candidates spends a fraction of the tokens that generating actions from screenshots does, and most of what is left is the LLM rather than Jev (on a representative run, $0.0127 LLM against $0.0024 Jev and $0.0003 browser). The time gap is real and not yet attacked — each step is a round trip, and nothing is speculatively executed.
+**About 19x cheaper and about 30% slower.** The cost gap is structural: picking from indexed candidates spends a fraction of the tokens that generating actions from screenshots does, and most of what is left is the LLM rather than Jev (on a representative run, $0.0127 LLM against $0.0024 Jev and $0.0003 browser). The time gap is real and not yet attacked — each step is a round trip, and nothing is speculatively executed.
 
-Six tasks is a smoke test, not a benchmark. Treat these as evidence that the engine works end to end at a known cost, not as a ranking.
+**Six tasks is a smoke test, not a benchmark, and a single pass does not separate these arms on correctness.** Across the passes taken while developing this suite, fastbrowse scored 10-12/12 and hosted 11-12/12; the failure above is hosted's own `Task ended unexpectedly`. Read the score as "both arms usually finish these tasks" and the cost column as the real finding.
 
 The local suite passes 6/6 at about $0.005 a task.
 
-Both suites depend on upstream availability and fail loudly when it is absent: an earlier pass of this same commit scored 0/6 and 10/12 during a Jev `model_unavailable` outage, after the retry budget was exhausted. Re-read a red run before believing it is a regression.
+Both suites depend on upstream availability and fail loudly when it is absent: one pass scored 0/6 and 10/12 during a Jev `model_unavailable` outage, after the retry budget was exhausted. Re-read a red run before believing it is a regression.
 
 ## External benchmarks
 
