@@ -84,6 +84,7 @@ class _RunState:
     hint: str | None = None
     unchanged: int = 0
     recoveries: int = 0
+    edited: set[tuple[Operation, str | None]] = field(default_factory=set[tuple[Operation, str | None]])
     last_origin: str | None = None
 
 
@@ -166,17 +167,17 @@ class Agent:
 
     async def _step(self, state: _RunState, observation: Observation, decision: Decision) -> None:
         started = time.monotonic()
+        label = decision.target.label if decision.target else decision.tab_id
         if decision.operation is Operation.READ:
-            outcome, changed = await self._read(state), False
-            progressed = outcome
+            progressed, changed = await self._read(state), False
             act = ActResult(outcome=StepOutcome.EXECUTED, page_changed=False)
         else:
             action = await self._action(state, observation, decision)
             act = await self._page.act(action, observation)
             changed = act.page_changed
-            value_edit = decision.operation in {Operation.FILL, Operation.SELECT, Operation.UPLOAD}
-            progressed = act.outcome is StepOutcome.EXECUTED and (changed or value_edit)
-        label = decision.target.label if decision.target else decision.tab_id
+            progressed = act.outcome is StepOutcome.EXECUTED and (changed or self._first_edit(state, decision, label))
+        if changed:
+            state.edited.clear()
         state.history.append(
             HistoryEntry(operation=decision.operation, target=label, outcome=act.outcome, page_changed=changed)
         )
@@ -195,6 +196,17 @@ class Agent:
         state.unchanged = 0 if progressed else state.unchanged + 1
         if state.unchanged >= self._config.stall.unchanged_actions:
             await self._recover(state, observation, f"{state.unchanged} actions without visible progress")
+
+    @staticmethod
+    def _first_edit(state: _RunState, decision: Decision, label: str | None) -> bool:
+        """A value edit is progress once per target per page state; re-filling the same field is a loop."""
+        if decision.operation not in {Operation.FILL, Operation.SELECT, Operation.UPLOAD}:
+            return False
+        key = (decision.operation, label)
+        if key in state.edited:
+            return False
+        state.edited.add(key)
+        return True
 
     async def _record_step(self, state: _RunState, step: StepResult) -> None:
         state.steps.append(step)
