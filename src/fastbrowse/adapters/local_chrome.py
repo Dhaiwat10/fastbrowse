@@ -31,6 +31,9 @@ def local_chrome() -> Generator[BrowserConnection]:
             [
                 binary,
                 "--headless=new",
+                # Headless defaults to 800x600, where responsive sites collapse their header into a
+                # toggle and the control the agent needs is not in the page at all.
+                "--window-size=1280,900",
                 f"--remote-debugging-port={port}",
                 f"--user-data-dir={profile}",
                 "--no-first-run",
