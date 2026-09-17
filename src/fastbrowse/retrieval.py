@@ -18,7 +18,7 @@ from pydantic.fields import FieldInfo
 from fastbrowse.jev import MAX_CHOICE_OPTIONS, ChoiceAnswer, ChoiceQuestion, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, Message
 from fastbrowse.memory import Fact, Notes, evidence_id
-from fastbrowse.models import CostComponent, CostLine, Evidence, Frozen, LLMPurpose
+from fastbrowse.models import CostLine, Evidence, Frozen, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.telemetry import Ledger
@@ -192,8 +192,6 @@ async def read(
     costs: list[CostLine] = []
     rejected = 0
     for part in chunk(capture, max_chars):
-        if ledger is not None:
-            ledger.reserve(CostComponent.LLM)
         result = await llm.generate(
             LLMPurpose.READ,
             [
@@ -210,6 +208,7 @@ async def read(
                 _read_message(capture, part, question, requirement_ids, notes),
             ],
             _ReadResponse,
+            ledger=ledger,
         )
         if ledger is not None:
             ledger.record(result.cost)
@@ -409,8 +408,6 @@ async def propose_text_fields(
         missing = {name: field for name, field in fields.items() if name not in found}
         if not missing:
             break
-        if ledger is not None:
-            ledger.reserve(CostComponent.LLM)
         result = await llm.generate(
             LLMPurpose.READ,
             [
@@ -426,6 +423,7 @@ async def propose_text_fields(
                 _read_message(capture, part, f"{task}\n\n# Fields\n{wanted}", (), Notes()),
             ],
             _TextProposals,
+            ledger=ledger,
         )
         if ledger is not None:
             ledger.record(result.cost)
@@ -470,8 +468,6 @@ class _AnswerDraft(Frozen):
 async def compose(
     llm: LLMClient, task: str, plan: Plan, notes: Notes, *, ledger: Ledger | None = None
 ) -> Generation[ComposedAnswer]:
-    if ledger is not None:
-        ledger.reserve(CostComponent.LLM)
     result = await llm.generate(
         LLMPurpose.COMPOSE,
         [
@@ -494,6 +490,7 @@ async def compose(
             ),
         ],
         _AnswerDraft,
+        ledger=ledger,
     )
     if ledger is not None:
         ledger.record(result.cost)

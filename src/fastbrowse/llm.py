@@ -6,6 +6,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel
 
 from fastbrowse.models import CostLine, Frozen, LLMPurpose
+from fastbrowse.telemetry import Ledger
 
 
 class Message(Frozen):
@@ -32,6 +33,11 @@ class LLMClient(Protocol):
         schema: type[T],
         *,
         max_output_tokens: int = 2000,
+        ledger: Ledger | None = None,
     ) -> Generation[T]:
-        """Return `schema`-validated data. `purpose` lets callers route models and attribute cost."""
+        """Return `schema`-validated data. `purpose` lets callers route models and attribute cost.
+
+        The client reserves against `ledger` once per HTTP request it makes, because only it knows
+        how many a repair or a re-ask costs; a caller that reserved instead would undercount them.
+        """
         ...

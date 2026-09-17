@@ -24,6 +24,7 @@ from fastbrowse.retrieval import (
     propose_text_fields,
     read,
 )
+from fastbrowse.telemetry import Ledger
 
 
 def capture(*parts: tuple[BlockKind, str]) -> Capture:
@@ -55,7 +56,11 @@ class ScriptedLLM:
         schema: type[T],
         *,
         max_output_tokens: int = 2000,
+        ledger: Ledger | None = None,
     ) -> Generation[T]:
+        # Reserve exactly as the real client does, so a test can see a budget stop a request.
+        if ledger is not None:
+            ledger.reserve(CostComponent.LLM)
         self.calls.append((purpose, tuple(messages)))
         return Generation(
             data=schema.model_validate(self.responses.pop(0)),

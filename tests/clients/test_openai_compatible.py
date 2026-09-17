@@ -6,7 +6,8 @@ from pydantic import JsonValue, TypeAdapter
 
 from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM
 from fastbrowse.llm import LLMError, Message
-from fastbrowse.models import CostBasis, Frozen, LLMPurpose
+from fastbrowse.models import CostBasis, Frozen, Limits, LLMPurpose
+from fastbrowse.telemetry import BudgetExceeded, Ledger
 
 
 class Result(Frozen):
@@ -131,3 +132,36 @@ async def test_http_error_is_not_retried_as_schema_repair() -> None:
                 "key", http=http, base_url="https://llm.test", models={LLMPurpose.PLAN: "planner"}
             ).generate(LLMPurpose.PLAN, [], Result)
     assert calls == 1 and len(str(error.value)) < 500
+
+
+async def test_a_retry_reserves_its_own_call_and_keeps_an_unreadable_attempts_cost() -> None:
+    """A re-ask is a second billable generation: it must spend budget and never lose its cost."""
+    requests = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests <= 2:  # the budgeted call's only attempt, then the unbudgeted call's first
+            return httpx.Response(200, json={"choices": [], "usage": {"cost": 0.02, "prompt_tokens": "invalid"}})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"count":1}'}}], "usage": {"cost": 0.01}},
+        )
+
+    ledger = Ledger(Limits(max_llm_calls=1))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatibleLLM(
+            "key", http=http, base_url="https://llm.test/v1/", models={LLMPurpose.READ: "reader"}
+        )
+        with pytest.raises(BudgetExceeded):
+            await client.generate(LLMPurpose.READ, [Message(role="user", content="Count")], Result, ledger=ledger)
+        assert requests == 1
+
+        result = await client.generate(
+            LLMPurpose.READ, [Message(role="user", content="Count")], Result, ledger=Ledger(Limits())
+        )
+    # The first attempt's usage could not be read, so the total cannot claim to be metered.
+    assert requests == 3
+    assert result.data.count == 1
+    assert result.cost.basis is CostBasis.UNKNOWN
+    assert result.cost.dollars is None

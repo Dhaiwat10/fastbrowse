@@ -10,6 +10,7 @@ from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 from fastbrowse.clients.validation import dollars, json_object, object_value, token_count
 from fastbrowse.llm import Generation, LLMError, Message
 from fastbrowse.models import CostBasis, CostComponent, CostLine, LLMPurpose
+from fastbrowse.telemetry import Ledger
 
 
 def _image_url(content: bytes) -> str:
@@ -42,16 +43,20 @@ def _content(payload: dict[str, JsonValue]) -> str:
 
 
 def _cost(payload: dict[str, JsonValue], purpose: LLMPurpose) -> CostLine:
-    usage = object_value(payload.get("usage", {}))
-    cost = usage.get("cost")
-    return CostLine(
-        component=CostComponent.LLM,
-        purpose=purpose,
-        basis=CostBasis.UNKNOWN if cost is None else CostBasis.METERED,
-        dollars=None if cost is None else dollars(cost),
-        input_tokens=token_count(usage.get("prompt_tokens", 0)),
-        output_tokens=token_count(usage.get("completion_tokens", 0)),
-    )
+    """Never raises: usage we cannot read is an unknown cost, which a dollar cap treats as unaffordable."""
+    try:
+        usage = object_value(payload.get("usage", {}))
+        cost = usage.get("cost")
+        return CostLine(
+            component=CostComponent.LLM,
+            purpose=purpose,
+            basis=CostBasis.UNKNOWN if cost is None else CostBasis.METERED,
+            dollars=None if cost is None else dollars(cost),
+            input_tokens=token_count(usage.get("prompt_tokens", 0)),
+            output_tokens=token_count(usage.get("completion_tokens", 0)),
+        )
+    except (ValueError, TypeError, OverflowError):
+        return CostLine(component=CostComponent.LLM, purpose=purpose, basis=CostBasis.UNKNOWN, dollars=None)
 
 
 def _total_cost(costs: Sequence[CostLine], purpose: LLMPurpose) -> CostLine:
@@ -111,6 +116,7 @@ class OpenAICompatibleLLM:
         schema: type[T],
         *,
         max_output_tokens: int = 2000,
+        ledger: Ledger | None = None,
     ) -> Generation[T]:
         model = self._models.get(purpose)
         if model is None:
@@ -131,9 +137,13 @@ class OpenAICompatibleLLM:
         }
         costs: list[CostLine] = []
         for attempt in range(2):
+            if ledger is not None:
+                ledger.reserve(CostComponent.LLM)
             payload = await self._request(body)
+            # Recorded before the envelope is read: a generation we cannot parse was still billed, and
+            # dropping it would let an unaccounted request pass a dollar cap.
+            costs.append(_cost(payload, purpose))
             try:
-                costs.append(_cost(payload, purpose))
                 content = _content(payload)
             except (ValueError, TypeError, OverflowError) as error:
                 # An empty completion comes back intermittently (a dropped or refused generation); ask once more.

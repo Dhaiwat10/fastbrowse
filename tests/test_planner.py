@@ -4,19 +4,17 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from fastbrowse.llm import Generation, LLMError, Message
+from fastbrowse.llm import Generation, Message
 from fastbrowse.models import (
     CostBasis,
     CostComponent,
     CostLine,
-    Decider,
     LLMPurpose,
     Operation,
-    StepOutcome,
-    StepResult,
 )
 from fastbrowse.page import Control, Observation
-from fastbrowse.planner import Plan, Requirement, RequirementKind, Subgoal, make_plan, replan
+from fastbrowse.planner import Plan, Requirement, RequirementKind, Subgoal, make_plan
+from fastbrowse.telemetry import Ledger
 
 
 def example_plan() -> Plan:
@@ -44,7 +42,11 @@ class PlannerLLM:
         schema: type[T],
         *,
         max_output_tokens: int = 2000,
+        ledger: Ledger | None = None,
     ) -> Generation[T]:
+        # Reserve exactly as the real client does, so a test can see a budget stop a request.
+        if ledger is not None:
+            ledger.reserve(CostComponent.LLM)
         self.calls.append((purpose, tuple(messages)))
         return Generation(data=schema.model_validate_json(self.plan.model_dump_json()), cost=self.cost)
 
@@ -85,25 +87,6 @@ async def test_planning_uses_redacted_markdown_context_and_preserves_cost() -> N
     assert observation().controls[0].value == "SECRET_VALUE"
 
 
-async def test_replan_receives_observed_failure_and_original_obligations() -> None:
-    llm = PlannerLLM()
-    step = StepResult(
-        index=0,
-        operation=Operation.CLICK,
-        decided_by=Decider.JEV,
-        outcome=StepOutcome.COVERED,
-        url="https://shop.test",
-        duration_ms=2,
-        note="modal covers product",
-    )
-    result = await replan(llm, "Find the price", example_plan(), observation(), [step], "Blocked by modal")
-    prompt = llm.calls[0][1][-1].content
-    assert "Blocked by modal" in prompt and "modal covers product" in prompt and "covered" in prompt
-    assert example_plan().model_dump_json() in prompt
-    assert "SECRET_VALUE" not in prompt
-    assert result.data.requirements == example_plan().requirements
-
-
 @pytest.mark.parametrize("reference", ["unknown", ""])
 def test_plan_rejects_dangling_requirement_links(reference: str) -> None:
     with pytest.raises(ValidationError):
@@ -117,9 +100,3 @@ def test_plan_rejects_dangling_requirement_links(reference: str) -> None:
 def test_plan_rejects_duplicate_ids() -> None:
     with pytest.raises(ValidationError, match="unique"):
         Plan(requirements=example_plan().requirements * 2, subgoals=example_plan().subgoals, answer_expected=True)
-
-
-async def test_replan_cannot_erase_original_requirements() -> None:
-    llm = PlannerLLM(Plan(requirements=(), subgoals=(), answer_expected=False))
-    with pytest.raises(LLMError, match="removed or changed"):
-        await replan(llm, "Find the price", example_plan(), observation(), [], "Try a new route")

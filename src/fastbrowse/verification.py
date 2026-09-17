@@ -112,6 +112,8 @@ async def llm_verify(
     screenshots: tuple[bytes, ...],
     notes: Notes,
     steps: Sequence[StepResult],
+    *,
+    ledger: Ledger | None = None,
 ) -> Generation[LLMVerdict]:
     requirements = "\n".join(f"- {r.id}: {r.text}" for r in plan.requirements)
     history = "\n".join(f"- {s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in steps[-12:])
@@ -137,6 +139,7 @@ async def llm_verify(
             ),
         ],
         LLMVerdict,
+        ledger=ledger,
     )
 
 

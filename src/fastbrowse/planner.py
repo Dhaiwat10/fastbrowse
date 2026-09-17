@@ -4,15 +4,15 @@ Callers redact task/history text before this seam; the planner has no secret res
 Sensitive control values are removed defensively even if a browser failed to mask them.
 """
 
-from collections.abc import Sequence
 from enum import StrEnum
 from typing import Self
 
 from pydantic import Field, model_validator
 
-from fastbrowse.llm import Generation, LLMClient, LLMError, Message
-from fastbrowse.models import Frozen, LLMPurpose, StepResult
+from fastbrowse.llm import Generation, LLMClient, Message
+from fastbrowse.models import Frozen, LLMPurpose
 from fastbrowse.page import Observation
+from fastbrowse.telemetry import Ledger
 
 
 class RequirementKind(StrEnum):
@@ -72,7 +72,9 @@ def _observation(observation: Observation) -> str:
     return observation.model_copy(update={"controls": controls}).model_dump_json()
 
 
-async def make_plan(llm: LLMClient, task: str, observation: Observation) -> Generation[Plan]:
+async def make_plan(
+    llm: LLMClient, task: str, observation: Observation, *, ledger: Ledger | None = None
+) -> Generation[Plan]:
     return await llm.generate(
         LLMPurpose.PLAN,
         [
@@ -80,36 +82,5 @@ async def make_plan(llm: LLMClient, task: str, observation: Observation) -> Gene
             Message(role="user", content=f"# Task\n{task}\n\n# Observation\n{_observation(observation)}"),
         ],
         Plan,
+        ledger=ledger,
     )
-
-
-async def replan(
-    llm: LLMClient,
-    task: str,
-    plan: Plan,
-    observation: Observation,
-    history: Sequence[StepResult],
-    reason: str,
-) -> Generation[Plan]:
-    outcomes = "\n".join(step.model_dump_json() for step in history)
-    result = await llm.generate(
-        LLMPurpose.PLAN,
-        [
-            _instructions(),
-            Message(
-                role="user",
-                content=(
-                    f"# Task\n{task}\n\n# Existing plan\n{plan.model_dump_json()}\n\n"
-                    f"# Reason to replan\n{reason}\n\n# Observed history\n{outcomes}\n\n"
-                    f"# Current observation\n{_observation(observation)}\n\n"
-                    "# Revision rules\nPreserve requirement ids and their meaning. Keep all original obligations, "
-                    "including completed ones. Revise subgoals using observed outcomes, never assumed success."
-                ),
-            ),
-        ],
-        Plan,
-    )
-    revised = {requirement.id: requirement for requirement in result.data.requirements}
-    if any(revised.get(requirement.id) != requirement for requirement in plan.requirements):
-        raise LLMError("Replan removed or changed an existing requirement")
-    return result

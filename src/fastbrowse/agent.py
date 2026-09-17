@@ -127,8 +127,7 @@ class Agent:
         state: _RunState | None = None
         try:
             observation = await self._observe()
-            ledger.reserve(CostComponent.LLM)
-            planned = await make_plan(self._llm, task, observation)
+            planned = await make_plan(self._llm, task, observation, ledger=ledger)
             ledger.record(planned.cost)
             state = _RunState(
                 task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planned.data
@@ -417,7 +416,6 @@ class Agent:
         return value
 
     async def _generate_text(self, state: _RunState, observation: Observation, target: Control) -> str:
-        state.ledger.reserve(CostComponent.LLM)
         generation = await self._llm.generate(
             LLMPurpose.FIELD_TEXT,
             [
@@ -437,6 +435,7 @@ class Agent:
                 ),
             ],
             _FieldText,
+            ledger=state.ledger,
         )
         state.ledger.record(generation.cost)
         return generation.data.text
@@ -494,7 +493,6 @@ class Agent:
         state.unchanged = 0
         if state.recoveries > self._config.stall.max_recoveries:
             raise _Stop(Status.STUCK, reason)
-        state.ledger.reserve(CostComponent.LLM)
         steps = "\n".join(f"- {s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in state.steps[-10:])
         generation = await self._llm.generate(
             LLMPurpose.RECOVER,
@@ -516,6 +514,7 @@ class Agent:
                 ),
             ],
             _Recovery,
+            ledger=state.ledger,
         )
         state.ledger.record(generation.cost)
         if generation.data.give_up:
@@ -550,9 +549,15 @@ class Agent:
         state.ledger.record(check.cost)
         accepted = check.verdict is DoneVerdict.ACCEPT
         if check.verdict is DoneVerdict.VERIFY:
-            state.ledger.reserve(CostComponent.LLM)
             verdict = await llm_verify(
-                self._llm, state.task, state.plan, fresh, await self._screenshots(), state.notes, state.steps
+                self._llm,
+                state.task,
+                state.plan,
+                fresh,
+                await self._screenshots(),
+                state.notes,
+                state.steps,
+                ledger=state.ledger,
             )
             state.ledger.record(verdict.cost)
             accepted = verdict.data.complete and not verdict.data.missing
