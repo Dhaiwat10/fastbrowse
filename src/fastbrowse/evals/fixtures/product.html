@@ -1,0 +1,4 @@
+<!doctype html><html><head><title>Product</title></head><body>
+<h1 id="name"></h1><p>Price: <strong id="price"></strong></p><p>In stock. Ships in 2 days.</p>
+<script>const s = new URLSearchParams(location.search); document.getElementById("name").textContent = s.get("name"); document.getElementById("price").textContent = s.get("price");</script>
+</body></html>
