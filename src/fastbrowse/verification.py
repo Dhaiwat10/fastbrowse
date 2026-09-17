@@ -13,7 +13,7 @@ from fastbrowse.config import Thresholds
 from fastbrowse.jev import JevClient, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation, LLMClient, Message
 from fastbrowse.memory import Notes
-from fastbrowse.models import CostLine, Evidence, Frozen, LLMPurpose, StepResult
+from fastbrowse.models import CostComponent, CostLine, Evidence, Frozen, LLMPurpose, StepResult
 from fastbrowse.page import Capture, Observation
 from fastbrowse.planner import Plan, RequirementKind
 from fastbrowse.retrieval import (
@@ -25,6 +25,7 @@ from fastbrowse.retrieval import (
     field_question,
     propose_text_fields,
 )
+from fastbrowse.telemetry import Ledger
 
 
 class DoneVerdict(StrEnum):
@@ -140,15 +141,27 @@ async def llm_verify(
 
 
 async def check_claims(
-    jev: JevClient, composed: ComposedAnswer, notes: Notes, thresholds: Thresholds
+    jev: JevClient, composed: ComposedAnswer, notes: Notes, thresholds: Thresholds, *, ledger: Ledger | None = None
 ) -> tuple[bool, CostLine]:
     """True when no check says a claim is unsupported, contradicted, or a requirement is omitted."""
+    if ledger is not None:
+        ledger.reserve(CostComponent.JEV)
     evaluation = await jev.evaluate({"answer": composed.answer}, claim_check_questions(composed, notes))
+    if ledger is not None:
+        ledger.record(evaluation.cost)
     worst = max((_probability(evaluation.answers, key) for key in evaluation.answers), default=0.0)
     return worst <= thresholds.claim_problem_above and composed.dropped_claims == 0, evaluation.cost
 
 
-async def extract(jev: JevClient, llm: LLMClient, task: str, capture: Capture, schema: type[BaseModel]) -> Extraction:
+async def extract(
+    jev: JevClient,
+    llm: LLMClient,
+    task: str,
+    capture: Capture,
+    schema: type[BaseModel],
+    *,
+    ledger: Ledger | None = None,
+) -> Extraction:
     """Text fields are proposed by the LLM and kept only when quoted verbatim from the page; other scalars are
     copied from the typed spans Jev points at. A field with no supported value fails the extraction.
     """
@@ -157,7 +170,7 @@ async def extract(jev: JevClient, llm: LLMClient, task: str, capture: Capture, s
     text_fields = {name: field for name, field in schema.model_fields.items() if field.annotation is str}
     cost: list[CostLine] = []
     if text_fields:
-        proposed, text_cost = await propose_text_fields(llm, task, capture, text_fields)
+        proposed, text_cost = await propose_text_fields(llm, task, capture, text_fields, ledger=ledger)
         cost.extend(text_cost)
         for name, (value, quoted) in proposed.items():
             values[name] = value
@@ -174,9 +187,13 @@ async def extract(jev: JevClient, llm: LLMClient, task: str, capture: Capture, s
             question = field_question(field, candidates, name=name, task=task, record_fields=tuple(schema.model_fields))
         except ValueError as error:
             return Extraction(data=None, evidence=tuple(evidence), problem=f"{name}: {error}", cost=tuple(cost))
+        if ledger is not None:
+            ledger.reserve(CostComponent.JEV)
         evaluation = await jev.evaluate(
             {"task": task, "page": {"url": capture.url, "title": capture.title}}, {name: question}
         )
+        if ledger is not None:
+            ledger.record(evaluation.cost)
         cost.append(evaluation.cost)
         answer = evaluation.answers.get(name)
         copied = copy_field(answer, candidates) if answer is not None and answer.type == "choice" else None

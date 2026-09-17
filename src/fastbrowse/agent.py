@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, Field, JsonValue
 
 from fastbrowse.config import Config
-from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer
+from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
 from fastbrowse.llm import LLMClient, LLMError, Message
 from fastbrowse.memory import Notes
 from fastbrowse.models import (
@@ -86,7 +86,7 @@ class _RunState:
     unchanged: int = 0
     recoveries: int = 0
     edited: set[tuple[Operation, str | None]] = field(default_factory=set[tuple[Operation, str | None]])
-    last_origin: str | None = None
+    last_page: tuple[str, str] | None = None
 
 
 class Agent:
@@ -108,6 +108,8 @@ class Agent:
         self._on_event = on_event
         self._redactor = Redactor()
         self._secret_on_screen = False
+        self._raw_observation: Observation | None = None
+        self._artifact_start = 0
 
     async def run(
         self,
@@ -121,6 +123,7 @@ class Agent:
         until: UntilCheck | None = None,
     ) -> RunResult:
         ledger = Ledger(limits or Limits())
+        self._artifact_start = len(self._page.artifacts)
         state: _RunState | None = None
         try:
             observation = await self._observe()
@@ -146,12 +149,12 @@ class Agent:
         while True:
             state.ledger.check()
             observation = await self._observe()
-            origin = origin_of(observation.url)
-            context = self._context(state, check_login=origin != state.last_origin and not self._can_sign_in(origin))
-            state.last_origin = origin
-            state.ledger.reserve(CostComponent.JEV)
-            decision = await decide(self._jev, observation, context, self._config)
-            state.ledger.record(*decision.cost)
+            raw = self._raw_observation or observation
+            origin = origin_of(raw.url)
+            page = (raw.url, raw.document_key)
+            context = self._context(state, check_login=page != state.last_page and not self._can_sign_in(origin))
+            state.last_page = page
+            decision = await decide(self._jev, observation, context, self._config, ledger=state.ledger)
             if (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
                 raise _Stop(Status.NEEDS_LOGIN, f"sign-in required at {origin}")
             if decision.confidence < self._config.thresholds.recover_below or decision.operation is Operation.ESCALATE:
@@ -175,7 +178,7 @@ class Agent:
             act = ActResult(outcome=StepOutcome.EXECUTED, page_changed=False)
         else:
             action = await self._action(state, observation, decision)
-            act = await self._page.act(action, observation)
+            act = await self._page.act(action, self._raw_observation or observation)
             changed = act.page_changed
             progressed = act.outcome is StepOutcome.EXECUTED and (changed or self._first_edit(state, decision, label))
         if changed:
@@ -202,13 +205,17 @@ class Agent:
     async def _observe(self) -> Observation:
         """Every observation models see has resolved secret values blanked, wherever the page echoes them."""
         observation = await self._page.observe()
-        self._secret_on_screen = self._redactor.reveals(observation.viewport_text)
+        self._raw_observation = observation
+        self._secret_on_screen = self._redactor.reveals(observation.model_dump_json())
         mask = self._redactor.mask
         controls = tuple(
             control.model_copy(
                 update={
                     "label": mask(control.label),
                     "value": None if control.value is None else mask(control.value),
+                    "href": None if control.href is None else mask(control.href),
+                    "frame_origin": None if control.frame_origin is None else mask(control.frame_origin),
+                    "submit_semantics": None if control.submit_semantics is None else mask(control.submit_semantics),
                     "options": tuple(mask(option) for option in control.options),
                 }
             )
@@ -216,19 +223,48 @@ class Agent:
         )
         return observation.model_copy(
             update={
+                "url": mask(observation.url),
                 "title": mask(observation.title),
                 "viewport_text": mask(observation.viewport_text),
                 "controls": controls,
+                "tabs": tuple(
+                    t.model_copy(update={"url": mask(t.url), "title": mask(t.title)}) for t in observation.tabs
+                ),
+                "dialog": observation.dialog.model_copy(
+                    update={
+                        "message": mask(observation.dialog.message),
+                        "default_prompt": mask(observation.dialog.default_prompt)
+                        if observation.dialog.default_prompt is not None
+                        else None,
+                    }
+                )
+                if observation.dialog
+                else None,
             }
         )
 
     async def _capture(self) -> Capture:
         capture = await self._page.capture()
         text = self._redactor.mask(capture.text)
-        if text == capture.text:
-            return capture
         digest = hashlib.sha256(text.encode()).hexdigest()
-        return capture.model_copy(update={"text": text, "title": self._redactor.mask(capture.title), "sha256": digest})
+        mask = self._redactor.mask
+        return capture.model_copy(
+            update={
+                "text": text,
+                "url": mask(capture.url),
+                "title": mask(capture.title),
+                "sha256": digest,
+                "blocks": tuple(
+                    block.model_copy(
+                        update={
+                            "heading_path": tuple(mask(heading) for heading in block.heading_path),
+                            "href": None if block.href is None else mask(block.href),
+                        }
+                    )
+                    for block in capture.blocks
+                ),
+            }
+        )
 
     async def _screenshots(self) -> tuple[bytes, ...]:
         """No image while a secret shows as page text: pixels cannot be masked like text. Typed fields are masked
@@ -269,15 +305,17 @@ class Agent:
                     target_id=_require(target).id,
                     text=text,
                     secret=self._redactor.reveals(text),
+                    secret_origin=self._target_origin(_require(target)),
                 )
             case Operation.SELECT:
+                raw = self._raw_target(_require(target))
                 option = await self._choose(
                     state,
                     observation,
                     f"Which option should {_require(target).label!r} be set to?",
-                    _require(target).options,
+                    raw.options,
                 )
-                return Action(operation=Operation.SELECT, target_id=_require(target).id, text=option)
+                return Action(operation=Operation.SELECT, target_id=raw.id, text=option)
             case Operation.UPLOAD:
                 if not state.attachments:
                     raise _Stop(Status.NEEDS_INPUT, "the page asks for a file and none was provided")
@@ -289,7 +327,24 @@ class Agent:
                     raise _Stop(Status.NEEDS_INPUT, f"{name} exceeds the upload size limit")
                 return Action(operation=Operation.UPLOAD, target_id=_require(target).id, files=files)
             case Operation.DIALOG:
-                return Action(operation=Operation.DIALOG, accept_dialog=await self._accept_dialog(state, observation))
+                accept = await self._accept_dialog(state, observation)
+                if accept and observation.dialog and observation.dialog.kind in {"confirm", "prompt", "beforeunload"}:
+                    await self._gate_question(
+                        state,
+                        observation,
+                        decision,
+                        observation.dialog.message,
+                        NoulQuestion(
+                            instructions=(
+                                f"Task: {state.task}\nThe agent is about to ACCEPT this {observation.dialog.kind} "
+                                f"dialog: {observation.dialog.message!r}. Would accepting commit an irreversible or "
+                                "externally visible change, such as deleting data, sending a message or spending money?"
+                            ),
+                            true="Acceptance commits a destructive or externally visible change.",
+                            false="Acceptance only navigates, reveals information or edits a reversible draft.",
+                        ),
+                    )
+                return Action(operation=Operation.DIALOG, accept_dialog=accept)
             case Operation.SWITCH_TAB:
                 return Action(operation=Operation.SWITCH_TAB, tab_id=decision.tab_id)
             case Operation.ESCAPE | Operation.SCROLL | Operation.BACK:
@@ -301,20 +356,27 @@ class Agent:
         target = decision.target
         if target is None or not may_be_irreversible(decision.operation, target):
             return
+        await self._gate_question(
+            state, observation, decision, target.label, irreversible_question(state.task, decision.operation, target)
+        )
+
+    async def _gate_question(
+        self, state: _RunState, observation: Observation, decision: Decision, label: str, question: NoulQuestion
+    ) -> None:
         thresholds = self._config.thresholds
         state.ledger.reserve(CostComponent.JEV)
         evaluation = await self._jev.evaluate(
             page_state(observation, state.notes),
-            {"irreversible": irreversible_question(state.task, decision.operation, target)},
+            {"irreversible": question},
         )
         state.ledger.record(evaluation.cost)
         answer = evaluation.answers.get("irreversible")
-        if not isinstance(answer, NoulAnswer) or answer.probability <= thresholds.irreversible_above:
+        if isinstance(answer, NoulAnswer) and answer.probability <= thresholds.irreversible_above:
             return
         if is_authorized(state.authorization) and decision.confidence >= thresholds.sensitive_act_from:
             return
-        token = hashlib.sha256(f"{state.task}|{observation.url}|{target.label}".encode()).hexdigest()[:24]
-        raise _Stop(Status.NEEDS_CONFIRMATION, f"{decision.operation.value} {target.label!r} needs confirmation", token)
+        token = hashlib.sha256(f"{state.task}|{observation.url}|{label}".encode()).hexdigest()[:24]
+        raise _Stop(Status.NEEDS_CONFIRMATION, f"{decision.operation.value} {label!r} needs confirmation", token)
 
     async def _text(self, state: _RunState, observation: Observation, target: Control) -> str:
         secrets = tuple(ref.name for ref in self._secrets.available()) if self._secrets else ()
@@ -331,13 +393,21 @@ class Agent:
         if choice.startswith("input:"):
             return state.inputs[choice.removeprefix("input:")]
         if choice.startswith("secret:"):
-            return await self._secret(choice.removeprefix("secret:"), observation.url)
+            return await self._secret(choice.removeprefix("secret:"), self._target_origin(target))
         return await self._generate_text(state, observation, target)
 
-    async def _secret(self, name: str, url: str) -> str:
-        value = await resolve_secret(self._secrets, name, origin_of(url)) if self._secrets else None
+    def _raw_target(self, target: Control) -> Control:
+        if self._raw_observation is not None:
+            return next(c for c in self._raw_observation.controls if c.id == target.id)
+        return target
+
+    def _target_origin(self, target: Control) -> str:
+        return self._raw_target(target).frame_origin or "null"
+
+    async def _secret(self, name: str, origin: str) -> str:
+        value = await resolve_secret(self._secrets, name, origin) if self._secrets else None
         if value is None:
-            raise _Stop(Status.NEEDS_INPUT, f"secret {name} is not available for {origin_of(url)}")
+            raise _Stop(Status.NEEDS_INPUT, f"secret {name} is not available for {origin}")
         self._redactor.register(name, value)
         return value
 
@@ -372,7 +442,8 @@ class Agent:
         if not options:
             raise _Stop(Status.STUCK, f"no options to answer: {question}")
         keys = {str(i): option for i, option in enumerate(options[: self._config.observation.max_choice_options])}
-        return keys[await self._ask_choice(state, observation, question, dict(keys))]
+        criteria: dict[str, JsonValue] = {key: self._redactor.mask(option) for key, option in keys.items()}
+        return keys[await self._ask_choice(state, observation, question, criteria)]
 
     async def _ask_choice(
         self, state: _RunState, observation: Observation, question: str, criteria: Mapping[str, JsonValue]
@@ -409,10 +480,9 @@ class Agent:
         capture = await self._capture()
         wanted = [r for r in state.notes.unresolved(state.plan) if r.kind is RequirementKind.INFORMATION]
         question = "\n".join(f"- {r.text}" for r in wanted) or state.task
-        state.ledger.reserve(CostComponent.LLM)
-        outcome = await read(self._llm, capture, question, [r.id for r in wanted], state.notes)
-        state.ledger.record(*outcome.cost_lines)
-        return sum(state.notes.add(fact) for fact in outcome.facts) > 0
+        before = len(state.notes.facts)
+        await read(self._llm, capture, question, [r.id for r in wanted], state.notes, ledger=state.ledger)
+        return len(state.notes.facts) > before
 
     async def _recover(self, state: _RunState, observation: Observation, reason: str) -> None:
         state.recoveries += 1
@@ -482,7 +552,7 @@ class Agent:
             state.ledger.record(verdict.cost)
             accepted = verdict.data.complete and not verdict.data.missing
         if accepted and until is not None:
-            accepted = await until(fresh.url)
+            accepted = await until((self._raw_observation or fresh).url)
         if not accepted:
             unmet = ", ".join(check.unmet) or "completion not confirmed"
             await self._recover(state, observation, f"DONE rejected: {unmet}")
@@ -495,18 +565,16 @@ class Agent:
         evidence: list[Evidence] = [fact.evidence for fact in state.notes.facts]
         verified = True
         if state.plan.answer_expected:
-            state.ledger.reserve(CostComponent.LLM)
-            composed = await compose(self._llm, state.task, state.plan, state.notes)
-            state.ledger.record(composed.cost)
+            composed = await compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
             answer = self._redactor.redact(composed.data.answer)
-            state.ledger.reserve(CostComponent.JEV)
-            ok, cost = await check_claims(self._jev, composed.data, state.notes, self._config.thresholds)
-            state.ledger.record(cost)
+            ok, _ = await check_claims(
+                self._jev, composed.data, state.notes, self._config.thresholds, ledger=state.ledger
+            )
             verified = ok
         if output_schema is not None:
-            state.ledger.reserve(CostComponent.JEV)
-            extraction = await extract(self._jev, self._llm, state.task, await self._capture(), output_schema)
-            state.ledger.record(*extraction.cost)
+            extraction = await extract(
+                self._jev, self._llm, state.task, await self._capture(), output_schema, ledger=state.ledger
+            )
             data = extraction.data
             evidence.extend(extraction.evidence)
             verified = verified and extraction.problem is None
@@ -550,7 +618,7 @@ class Agent:
             evidence=evidence,
             steps=tuple(state.steps) if state else (),
             cost=ledger.breakdown(),
-            artifacts=(),
+            artifacts=self._page.artifacts[self._artifact_start :],
             error=error,
             resume_token=resume_token,
         )

@@ -33,6 +33,13 @@ class Ledger:
             case CostComponent.BROWSER | CostComponent.PROXY:
                 pass
         self.check(estimate_dollars)
+        if self.limits.max_dollars is not None and self.breakdown().known_dollars >= self.limits.max_dollars:
+            raise BudgetExceeded(f"spend limit ${self.limits.max_dollars} reached")
+        # Failed requests still consume a call, including retries after an input-size rejection.
+        if component is CostComponent.JEV:
+            self.jev_calls += 1
+        elif component is CostComponent.LLM:
+            self.llm_calls += 1
 
     def check(self, extra_dollars: float = 0.0) -> None:
         limits = self.limits
@@ -49,15 +56,8 @@ class Ledger:
             raise BudgetExceeded(f"step limit {limits.max_steps} reached")
 
     def record(self, *lines: CostLine) -> None:
-        for line in lines:
-            match line.component:
-                case CostComponent.JEV:
-                    self.jev_calls += 1
-                case CostComponent.LLM:
-                    self.llm_calls += 1
-                case CostComponent.BROWSER | CostComponent.PROXY:
-                    pass
-            self.lines.append(line)
+        self.lines.extend(lines)
+        self.check()
 
     def breakdown(self) -> CostBreakdown:
         return CostBreakdown(lines=tuple(self.lines))

@@ -1,0 +1,9 @@
+<!doctype html>
+<title>Inner document</title>
+<p>Same-origin evidence</p>
+<input placeholder="Inner field">
+<button onclick="this.textContent = 'Inner clicked'">Inner button</button>
+<div id="shadow"></div>
+<script>
+  document.getElementById('shadow').attachShadow({mode: 'open'}).innerHTML = '<p>Shadow evidence</p>';
+</script>

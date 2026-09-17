@@ -27,7 +27,7 @@ from cdp_use.cdp.target.events import (
 )
 from cdp_use.client import CDPClient
 
-from fastbrowse.models import ArtifactKind, ArtifactSink
+from fastbrowse.models import Artifact, ArtifactKind, ArtifactSink
 from fastbrowse.models import BrowserConnection as BrowserConnectionModel
 from fastbrowse.page import Dialog, Tab
 
@@ -72,6 +72,8 @@ class BrowserSession:
         self._active_target_id = ""
         self._frame_sessions: dict[str, str] = {}
         """OOPIF frame_id -> session_id, keyed by target id per the plan's `frameId/targetId` guidance."""
+        self._frame_parents: dict[str, str] = {}
+        self._artifacts: list[Artifact] = []
         self._dialogs: dict[str, Dialog] = {}
         """Pending JS dialog per tab session id; cleared once handled."""
         self._background: set[asyncio.Task[None]] = set()
@@ -91,8 +93,23 @@ class BrowserSession:
         return self._tabs[self._active_target_id].session_id
 
     def frame_sessions(self) -> dict[str, str]:
-        """OOPIF frame_id -> session_id currently attached under this session's tabs."""
-        return dict(self._frame_sessions)
+        """Only frame sessions descended from the active tab may contribute observations."""
+
+        def belongs(session_id: str) -> bool:
+            seen: set[str] = set()
+            while session_id in self._frame_parents and session_id not in seen:
+                seen.add(session_id)
+                session_id = self._frame_parents[session_id]
+            return session_id == self.active_session_id
+
+        return {fid: sid for fid, sid in self._frame_sessions.items() if belongs(sid)}
+
+    @property
+    def artifacts(self) -> tuple[Artifact, ...]:
+        return tuple(self._artifacts)
+
+    def frame_parent_session(self, session_id: str) -> str | None:
+        return self._frame_parents.get(session_id)
 
     def tabs(self) -> tuple[Tab, ...]:
         return tuple(
@@ -112,7 +129,14 @@ class BrowserSession:
             self._tabs[target_id].title = title
 
     def pending_dialog(self) -> Dialog | None:
-        return self._dialogs.get(self.active_session_id)
+        return next(
+            (
+                self._dialogs[sid]
+                for sid in (self.active_session_id, *self.frame_sessions().values())
+                if sid in self._dialogs
+            ),
+            None,
+        )
 
     async def __aenter__(self) -> Self:
         self._client = CDPClient(self._connection.cdp_url)
@@ -185,15 +209,16 @@ class BrowserSession:
 
     def _on_attached(self, event: AttachedToTargetEvent, session_id: str | None) -> None:
         info = event["targetInfo"]
-        if info["type"] == "iframe":
+        if info["type"] == "iframe" and session_id is not None:
             self._frame_sessions[info["targetId"]] = event["sessionId"]
+            self._frame_parents[event["sessionId"]] = session_id
             self._spawn(self._enable_frame_domains(event["sessionId"]))
 
     async def _enable_frame_domains(self, session_id: str) -> None:
-        await self.client.send_raw("Runtime.enable", session_id=session_id)
-        await self.client.send_raw("DOM.enable", session_id=session_id)
+        await self._prepare_session(session_id)
 
     def _on_detached(self, event: DetachedFromTargetEvent, session_id: str | None) -> None:
+        self._frame_parents.pop(event["sessionId"], None)
         for frame_id in [fid for fid, sid in self._frame_sessions.items() if sid == event["sessionId"]]:
             del self._frame_sessions[frame_id]
 
@@ -240,7 +265,9 @@ class BrowserSession:
         )
 
     async def handle_dialog(self, accept: bool, prompt_text: str | None = None) -> None:
-        session_id = self.active_session_id
+        session_id = next(
+            sid for sid in (self.active_session_id, *self.frame_sessions().values()) if sid in self._dialogs
+        )
         params: dict[str, bool | str] = {"accept": accept}
         if prompt_text is not None:
             params["promptText"] = prompt_text
@@ -272,7 +299,8 @@ class BrowserSession:
         if len(raw) > self._max_download_bytes:
             return  # bounded size: refuse to hold an oversized body in memory as an artifact
         name = _filename_from_disposition(disposition) or url.rsplit("/", 1)[-1] or "download"
-        await self._artifact_sink.put(ArtifactKind.DOWNLOAD, name, "application/octet-stream", raw)
+        artifact = await self._artifact_sink.put(ArtifactKind.DOWNLOAD, name, "application/octet-stream", raw)
+        self._artifacts.append(artifact)
 
 
 def _filename_from_disposition(disposition: str) -> str | None:

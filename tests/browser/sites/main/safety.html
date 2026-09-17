@@ -1,0 +1,14 @@
+<!doctype html>
+<title>Safety fixtures</title>
+<form id="delete" onsubmit="event.preventDefault(); document.body.dataset.submitted = 'delete'">
+  <input id="account" placeholder="Account name" value="account">
+  <button>Delete account</button>
+</form>
+<input id="other" placeholder="Other field">
+<p>Count: 3</p>
+<button id="echo" onclick="prompt(document.getElementById('other').value, document.getElementById('other').value)">Echo prompt</button>
+<select aria-label="Destination"><option>First</option><option>Second</option></select>
+<input type="file" aria-label="Attachment">
+<button id="confirm" onclick="document.body.dataset.accepted = String(confirm('Delete account?'))">Continue</button>
+<iframe id="same" src="/inner.html"></iframe>
+<div id="cover" style="display:none;position:fixed;inset:0;background:white;z-index:100"></div>

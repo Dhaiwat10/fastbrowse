@@ -23,7 +23,7 @@
   const labelOf = (e, seen = new Set()) => {
     if (!e || seen.has(e)) return '';
     seen.add(e);
-    const root = e.getRootNode instanceof Function ? e.getRootNode() : document;
+    const root = typeof e.getRootNode === 'function' ? e.getRootNode() : document;
     const byId = id => (root.getElementById ? root.getElementById(id) : document.getElementById(id));
     const referenced = (e.getAttribute('aria-labelledby') || '').split(/\s+/)
       .map(id => labelOf(byId(id), seen)).filter(Boolean).join(' ');
@@ -58,7 +58,32 @@
     return null;
   };
 
+  const submitSemantics = e => {
+    const form = e.form;
+    const implicit = ['text', 'search', 'url', 'tel', 'email', 'password', 'date', 'month', 'week',
+      'time', 'datetime-local', 'number'];
+    if (!form || e.tagName !== 'INPUT' || !implicit.includes(e.type)) return null;
+    const submit = [...form.getRootNode().querySelectorAll('button,input')]
+      .find(c => c.form === form && (c.type === 'submit' || c.type === 'image'));
+    if (submit?.matches(':disabled')) return null;
+    if (!submit && [...form.elements].filter(c => c.tagName === 'INPUT' && implicit.includes(c.type)).length > 1)
+      return null;
+    return JSON.stringify({ label: submit ? labelOf(submit) : labelOf(form),
+      method: submit?.getAttribute('formmethod') || form.method,
+      action: submit?.getAttribute('formaction') || form.action,
+      text: form.innerText.slice(0, 2000) });
+  };
+
+  const framePath = doc => {
+    if (doc === document) return null;
+    const owner = doc.defaultView.frameElement;
+    return `${framePath(owner.ownerDocument) || 'root'}/${identity(owner)}`;
+  };
+  registry.framePath = framePath;
+  registry.submitSemantics = submitSemantics;
+
   // Traverse light DOM plus any open shadow roots, and same-origin same-process nested iframes.
+  let inaccessible = 0;
   function* walk(root) {
     for (const e of root.querySelectorAll(SELECTOR)) yield e;
     for (const e of root.querySelectorAll('*')) {
@@ -67,6 +92,7 @@
         let inner = null;
         try { inner = e.contentDocument; } catch { inner = null; }
         if (inner && inner.body) yield* walk(inner);
+        else inaccessible++;
       }
     }
   }
@@ -80,7 +106,8 @@
     return [identity(e), roleOf(e), labelOf(e), reveal(e), e.checked ?? null, e.selectedIndex ?? null,
       e.readOnly ?? null, e.matches(':disabled'), e.getAttribute('aria-disabled'),
       e.getAttribute('aria-expanded'), e.getAttribute('aria-checked'), e.getAttribute('aria-selected'),
-      e.getAttribute('href'), scope?.innerText?.slice(0, 6000) || ''];
+      e.getAttribute('href'), scope?.innerText?.slice(0, 6000) || '',
+      e.ownerDocument.defaultView.origin, e.ownerDocument.defaultView.performance.timeOrigin, submitSemantics(e)];
   };
 
   const controls = [];
@@ -94,6 +121,8 @@
       id, role: rname, label: labelOf(e) || rname, offscreen: y < 0 || y >= innerHeight,
       distance: (y < 0 || y >= innerHeight) ? 1 + Math.abs(y - innerHeight / 2) : 0,
       sensitive: secret(e), input_type: e.type || null,
+      frame_origin: e.ownerDocument.defaultView.origin, frame_path: framePath(e.ownerDocument),
+      submit_semantics: submitSemantics(e),
     };
     if (rname === 'link' && e.href) {
       const u = new URL(e.href, location.href);
@@ -161,9 +190,9 @@
   if (window.__fastbrowseDialog) dialog = window.__fastbrowseDialog;
 
   return {
-    url: location.href, title: document.title, viewport_text,
+    url: location.href, title: document.title, viewport_text, document_key: String(performance.timeOrigin),
     controls: kept.map(({ distance, ...c }) => c), omitted_controls: omitted,
     page_key, guards, scroll_bottom: scrollY + innerHeight >= document.documentElement.scrollHeight - 2,
-    scroll_top: scrollY <= 0,
+    scroll_top: scrollY <= 0, inaccessible_frames: inaccessible,
   };
 })()

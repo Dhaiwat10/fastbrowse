@@ -312,3 +312,60 @@ async def test_text_fields_are_kept_only_when_quoted_verbatim_from_the_page() ->
     assert found.keys() == {"label"}
     value, evidence = found["label"]
     assert value == "0.28.1" and evidence.quote == "httpx 0.28.1"
+
+
+@pytest.mark.parametrize("limit", ["calls", "dollars"])
+@pytest.mark.parametrize("reader", ["read", "fields"])
+async def test_each_chunk_reserves_budget_before_request(limit: str, reader: str) -> None:
+    from fastbrowse.models import Limits
+    from fastbrowse.telemetry import BudgetExceeded, Ledger
+
+    page = capture((BlockKind.PARAGRAPH, "First chunk"), (BlockKind.PARAGRAPH, "Second chunk"))
+    response: JsonValue = {"claims": [], "answered": False} if reader == "read" else {"fields": []}
+    llm = ScriptedLLM([response, response])
+    ledger = Ledger(Limits(max_llm_calls=1) if limit == "calls" else Limits(max_dollars=0.001))
+    with pytest.raises(BudgetExceeded):
+        if reader == "read":
+            await read(llm, page, "Find it", (), Notes(), max_chars=12, ledger=ledger)
+        else:
+            await propose_text_fields(
+                llm, "Find it", page, {"label": Fields.model_fields["label"]}, max_chars=12, ledger=ledger
+            )
+    assert len(llm.calls) == 1
+    assert ledger.llm_calls == 1 and ledger.breakdown().known_dollars == 0.001
+
+
+async def test_extraction_reserves_each_scalar_field() -> None:
+    from fastbrowse.models import Limits
+    from fastbrowse.telemetry import BudgetExceeded, Ledger
+    from fastbrowse.verification import extract
+    from tests.test_policy import ScriptedJev
+
+    class Record(Frozen):
+        first: int
+        second: int
+
+    page = capture((BlockKind.PARAGRAPH, "First: 10. Second: 20."))
+    jev = ScriptedJev({})
+    ledger = Ledger(Limits(max_jev_calls=1))
+    with pytest.raises(BudgetExceeded):
+        await extract(jev, ScriptedLLM([]), "Get both fields", page, Record, ledger=ledger)
+    assert len(jev.requests) == 1 and ledger.jev_calls == 1
+
+
+async def test_composition_and_claims_share_budget() -> None:
+    from fastbrowse.config import Thresholds
+    from fastbrowse.models import Limits
+    from fastbrowse.telemetry import BudgetExceeded, Ledger
+    from fastbrowse.verification import check_claims
+    from tests.test_policy import ScriptedJev
+
+    llm = ScriptedLLM([{"answer": "", "claims": []}])
+    ledger = Ledger(Limits(max_dollars=0.001))
+    composed = await compose(
+        llm, "Find it", Plan(requirements=(), subgoals=(), answer_expected=True), Notes(), ledger=ledger
+    )
+    jev = ScriptedJev({})
+    with pytest.raises(BudgetExceeded):
+        await check_claims(jev, composed.data, Notes(), Thresholds(), ledger=ledger)
+    assert len(llm.calls) == 1 and jev.requests == []

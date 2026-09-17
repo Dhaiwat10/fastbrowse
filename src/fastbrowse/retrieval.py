@@ -18,9 +18,10 @@ from pydantic.fields import FieldInfo
 from fastbrowse.jev import MAX_CHOICE_OPTIONS, ChoiceAnswer, ChoiceQuestion, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, Message
 from fastbrowse.memory import Fact, Notes, evidence_id
-from fastbrowse.models import CostLine, Evidence, Frozen, LLMPurpose
+from fastbrowse.models import CostComponent, CostLine, Evidence, Frozen, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture
 from fastbrowse.planner import Plan, Requirement, RequirementKind
+from fastbrowse.telemetry import Ledger
 
 
 class Chunk(Frozen):
@@ -184,12 +185,15 @@ async def read(
     notes: Notes,
     *,
     max_chars: int = 12000,
+    ledger: Ledger | None = None,
 ) -> ReadOutcome:
     facts: dict[tuple[str, str | None], Fact] = {}
     coverage: list[int] = []
     costs: list[CostLine] = []
     rejected = 0
     for part in chunk(capture, max_chars):
+        if ledger is not None:
+            ledger.reserve(CostComponent.LLM)
         result = await llm.generate(
             LLMPurpose.READ,
             [
@@ -207,6 +211,8 @@ async def read(
             ],
             _ReadResponse,
         )
+        if ledger is not None:
+            ledger.record(result.cost)
         costs.append(result.cost)
         coverage.append(part.index)
         accepted = 0
@@ -384,7 +390,13 @@ class _TextProposals(Frozen):
 
 
 async def propose_text_fields(
-    llm: LLMClient, task: str, capture: Capture, fields: Mapping[str, FieldInfo], *, max_chars: int = 12000
+    llm: LLMClient,
+    task: str,
+    capture: Capture,
+    fields: Mapping[str, FieldInfo],
+    *,
+    max_chars: int = 12000,
+    ledger: Ledger | None = None,
 ) -> tuple[dict[str, tuple[str, Evidence]], tuple[CostLine, ...]]:
     """The LLM names each text value and quotes where it is; code keeps it only if that quote is on the page and
     contains the value verbatim. A text value is often part of a block ("httpx 0.28.1"), which a copy of whole
@@ -397,6 +409,8 @@ async def propose_text_fields(
         missing = {name: field for name, field in fields.items() if name not in found}
         if not missing:
             break
+        if ledger is not None:
+            ledger.reserve(CostComponent.LLM)
         result = await llm.generate(
             LLMPurpose.READ,
             [
@@ -413,6 +427,8 @@ async def propose_text_fields(
             ],
             _TextProposals,
         )
+        if ledger is not None:
+            ledger.record(result.cost)
         costs.append(result.cost)
         for proposal in result.data.fields:
             value = " ".join(proposal.value.split())
@@ -451,7 +467,11 @@ class _AnswerDraft(Frozen):
     claims: tuple[Claim, ...]
 
 
-async def compose(llm: LLMClient, task: str, plan: Plan, notes: Notes) -> Generation[ComposedAnswer]:
+async def compose(
+    llm: LLMClient, task: str, plan: Plan, notes: Notes, *, ledger: Ledger | None = None
+) -> Generation[ComposedAnswer]:
+    if ledger is not None:
+        ledger.reserve(CostComponent.LLM)
     result = await llm.generate(
         LLMPurpose.COMPOSE,
         [
@@ -471,6 +491,8 @@ async def compose(llm: LLMClient, task: str, plan: Plan, notes: Notes) -> Genera
         ],
         _AnswerDraft,
     )
+    if ledger is not None:
+        ledger.record(result.cost)
     known = notes.evidence.keys()
     claims = tuple(claim for claim in result.data.claims if claim.evidence_ids and set(claim.evidence_ids) <= known)
     return Generation(

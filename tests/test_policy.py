@@ -121,3 +121,17 @@ async def test_oversized_request_drops_offscreen_then_gives_up() -> None:
     tiny = Config(tokens=TokenBudget(state_plus_largest_question=1, state_plus_all_questions=1))
     with pytest.raises(ObservationTooLarge):
         await decide(ScriptedJev({}), observation(controls), context(), tiny)
+
+
+@pytest.mark.parametrize("retry", [False, True])
+async def test_each_request_including_groups_and_retries_needs_budget(retry: bool) -> None:
+    from fastbrowse.models import Limits
+    from fastbrowse.telemetry import BudgetExceeded, Ledger
+
+    jev = ScriptedJev({"operation": "click", "click_group": "0"}, reject_offscreen=retry)
+    controls = tuple(button(i, offscreen=retry and i == 0) for i in range(12))
+    config = Config(observation=ObservationLimits(max_choice_options=10, group_size=4))
+    ledger = Ledger(Limits(max_jev_calls=1))
+    with pytest.raises(BudgetExceeded):
+        await decide(jev, observation(controls), context(), config, ledger=ledger)
+    assert len(jev.requests) == 1 and ledger.jev_calls == 1

@@ -10,13 +10,14 @@ from typing import Protocol
 
 from pydantic import Field
 
-from fastbrowse.models import Attachment, Frozen, Operation, StepOutcome
+from fastbrowse.models import Artifact, Attachment, Frozen, Operation, StepOutcome
 
 
 class Control(Frozen):
     id: str
     """Stable within one observation only; a new observation re-issues ids."""
     frame_id: str | None
+    frame_origin: str | None = None
     role: str
     label: str
     operations: frozenset[Operation]
@@ -25,6 +26,8 @@ class Control(Frozen):
     href: str | None = None
     options: tuple[str, ...] = ()
     input_type: str | None = None
+    submit_semantics: str | None = None
+    """The enclosing form's implicit submission, if Enter in this control can submit it."""
     checked: bool | None = None
     selected: bool | None = None
     expanded: bool | None = None
@@ -52,6 +55,8 @@ class Observation(Frozen):
     page_key: str
     """Fingerprint of the observed page; `act` refuses to dispatch when the live page no longer matches."""
     captured_at: datetime
+    document_key: str = ""
+    """Document identity, independent of field edits and scrolling, for access-wall checks."""
     controls: tuple[Control, ...]
     omitted_controls: int = Field(ge=0)
     """Controls present but not offered because of observation limits."""
@@ -101,6 +106,8 @@ class Action(Frozen):
     secret: bool = False
     """`text` is a resolved secret: the page masks the field so it never renders in a screenshot."""
     tab_id: str | None = None
+    secret_origin: str | None = None
+    """Origin authorized by the resolver; the receiving document must still match at insertion."""
     files: tuple[Attachment, ...] = ()
     accept_dialog: bool | None = None
     scroll_down: bool = True
@@ -113,6 +120,9 @@ class ActResult(Frozen):
 
 
 class Page(Protocol):
+    @property
+    def artifacts(self) -> tuple[Artifact, ...]: ...
+
     async def observe(self) -> Observation: ...
 
     async def capture(self) -> Capture: ...

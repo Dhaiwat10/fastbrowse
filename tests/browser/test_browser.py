@@ -70,7 +70,13 @@ async def test_secret_typed_into_text_field_is_masked_but_submitted(
 ) -> None:
     obs = await loaded_page.observe()
     username = find(obs, "Username")
-    action = Action(operation=Operation.FILL, target_id=username.id, text="tok-123", secret=True)
+    action = Action(
+        operation=Operation.FILL,
+        target_id=username.id,
+        text="tok-123",
+        secret=True,
+        secret_origin=username.frame_origin,
+    )
     assert (await loaded_page.act(action, obs)).outcome == StepOutcome.EXECUTED
 
     field = find(await loaded_page.observe(), "Username")
@@ -164,6 +170,7 @@ async def test_download_becomes_artifact_with_checksum(
     artifact = artifact_sink.artifacts[0]
     expected = hashlib.sha256(b"fastbrowse fixture attachment bytes for download checksum test").hexdigest()
     assert artifact.sha256 == expected
+    assert browser_session.artifacts == (artifact,)
 
 
 async def test_cross_origin_iframe_control_is_observed_and_clickable(

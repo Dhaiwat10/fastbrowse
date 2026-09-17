@@ -22,7 +22,7 @@ from cdp_use.cdp.page.commands import CaptureScreenshotParameters
 
 from fastbrowse.browser.session import BrowserSession
 from fastbrowse.config import Config
-from fastbrowse.models import Attachment, Operation, StepOutcome
+from fastbrowse.models import Artifact, Attachment, Operation, StepOutcome
 from fastbrowse.page import Action, ActResult, Block, BlockKind, Capture, Control, Dialog, Observation, Page
 
 _SNAPSHOT_JS = (Path(__file__).with_name("snapshot.js")).read_text()
@@ -73,6 +73,10 @@ class CdpPage(Page):
         self._last: _ObservedState | None = None
         self._blocked_inputs: set[asyncio.Future[object]] = set()
 
+    @property
+    def artifacts(self) -> tuple[Artifact, ...]:
+        return self._session.artifacts
+
     # -- observe / capture -------------------------------------------------------------------------
 
     async def observe(self) -> Observation:
@@ -91,7 +95,7 @@ class CdpPage(Page):
             for c in raw["controls"]:
                 local_id = int(c["id"])
                 control_id = f"{frame_key}:{local_id}"
-                fid = None if frame_key == _MAIN else frame_key
+                fid = f"{frame_key}/{c['frame_path']}" if c.get("frame_path") else frame.frame_id
                 controls.append(_control_from_raw(control_id, fid, c))
                 guard = cast("list[object] | None", frame.raw["guards"].get(str(local_id)))
                 control_state[control_id] = (frame.session_id, frame_key, local_id, guard)
@@ -114,6 +118,7 @@ class CdpPage(Page):
             url=url,
             title=title,
             page_key=page_key,
+            document_key=main.raw["document_key"] if main else "",
             captured_at=datetime.now(UTC),
             controls=tuple(kept),
             omitted_controls=omitted,
@@ -140,7 +145,6 @@ class CdpPage(Page):
 
     async def _snapshot_all_frames(self) -> tuple[dict[str, _FrameObservation], int]:
         result: dict[str, _FrameObservation] = {}
-        inaccessible = 0
         main_session = self._session.active_session_id
         try:
             raw = await self._evaluate(main_session, _SNAPSHOT_JS)
@@ -149,24 +153,31 @@ class CdpPage(Page):
         if raw is not None:
             self._session.set_tab_info(self._session.active_target_id, raw["url"], raw["title"])
             result[_MAIN] = _FrameObservation(None, main_session, _MAIN, raw)
-        else:
-            inaccessible += 1
         for frame_id, session_id in self._session.frame_sessions().items():
             try:
                 raw = await self._evaluate(session_id, _SNAPSHOT_JS)
             except RuntimeError:
                 raw = None
             if raw is None:
-                inaccessible += 1
                 continue
             result[frame_id] = _FrameObservation(frame_id, session_id, frame_id, raw)
-        return result, inaccessible
+        coverage = {frame.session_id: int(frame.raw.get("inaccessible_frames", 0)) for frame in result.values()}
+        return result, self._inaccessible_frames(coverage)
+
+    def _inaccessible_frames(self, coverage: dict[str, int]) -> int:
+        # Each inaccessible child is counted by its parent. Only a successful capture of that
+        # parent's OOPIF resolves it; an unrelated frame cannot hide a failed document.
+        missing = int(self._session.active_session_id not in coverage)
+        for session_id, count in coverage.items():
+            captured_children = sum(self._session.frame_parent_session(child) == session_id for child in coverage)
+            missing += max(0, count - captured_children)
+        return missing
 
     async def capture(self) -> Capture:
         text_parts: list[str] = []
         blocks: list[Block] = []
         offset = 0
-        inaccessible = 0
+        coverage: dict[str, int] = {}
         main_session = self._session.active_session_id
         frame_sources: list[tuple[str | None, str]] = [(None, main_session)]
         frame_sources += [(fid, sid) for fid, sid in self._session.frame_sessions().items()]
@@ -178,8 +189,8 @@ class CdpPage(Page):
             except RuntimeError:
                 raw = None
             if raw is None:
-                inaccessible += 1
                 continue
+            coverage[session_id] = int(raw.get("inaccessible_frames", 0))
             if frame_id is None:
                 title, url = raw["title"], raw["url"]
             for block in raw["blocks"]:
@@ -192,9 +203,9 @@ class CdpPage(Page):
                 offset += 2
                 blocks.append(
                     Block(
-                        source_id=f"{frame_id or _MAIN}:{len(blocks)}",
+                        source_id=f"{frame_id or _MAIN}/{block.get('source_path', '')}:{len(blocks)}",
                         kind=_BLOCK_KIND[block["kind"]],
-                        frame_id=frame_id,
+                        frame_id=f"{frame_id or _MAIN}/{block['frame_path']}" if block.get("frame_path") else frame_id,
                         start=start,
                         end=end,
                         heading_path=tuple(block.get("heading_path", ())),
@@ -209,7 +220,7 @@ class CdpPage(Page):
             sha256=hashlib.sha256(text.encode()).hexdigest(),
             text=text,
             blocks=tuple(blocks),
-            inaccessible_frames=inaccessible,
+            inaccessible_frames=self._inaccessible_frames(coverage),
         )
 
     # -- act ----------------------------------------------------------------------------------------
@@ -245,7 +256,9 @@ class CdpPage(Page):
             case Operation.CLICK:
                 return await self._click(target)
             case Operation.FILL:
-                return await self._fill(target, action.text or "", secret=action.secret)
+                return await self._fill(
+                    target, action.text or "", secret=action.secret, secret_origin=action.secret_origin
+                )
             case Operation.SELECT:
                 return await self._select(target, action.text or "")
             case Operation.ENTER:
@@ -287,7 +300,12 @@ class CdpPage(Page):
         return StepOutcome.EXECUTED, None
 
     async def _fill(
-        self, target: tuple[str, str, int, list[object] | None] | None, text: str, *, secret: bool = False
+        self,
+        target: tuple[str, str, int, list[object] | None] | None,
+        text: str,
+        *,
+        secret: bool = False,
+        secret_origin: str | None = None,
     ) -> tuple[StepOutcome, str | None]:
         if target is None:
             return StepOutcome.FAILED, "fill requires a target"
@@ -297,6 +315,8 @@ class CdpPage(Page):
             return StepOutcome.STALE, "target disconnected"
         if point == "covered":
             return StepOutcome.COVERED, None
+        if secret and not secret_origin:
+            return StepOutcome.FAILED, "secret fill requires an authorized origin"
         if secret:
             # Masked before typing, so no frame renders the value; the snapshot then reports the field sensitive.
             await self._evaluate(
@@ -305,16 +325,41 @@ class CdpPage(Page):
                 f"e.style.setProperty('-webkit-text-security', 'disc', 'important'); }} }})"
                 f"(window.__fastbrowse?.nodes.get({local_id}))",
             )
-        await self._click_point(session_id, point)
-        await self._session.client.send.Input.dispatchKeyEvent(
-            params={"type": "keyDown", "key": "a", "code": "KeyA", "modifiers": 2, "commands": ["selectAll"]},
-            session_id=session_id,
+        if not await self._focus(session_id, local_id):
+            return StepOutcome.FAILED, "target did not receive keyboard focus"
+        # A secret must be checked and inserted in one renderer task: CDP insertText would leave a
+        # navigation/focus race between checking the origin and dispatching the secret to the page.
+        script = (
+            "((id, text, origin) => { const e = window.__fastbrowse?.nodes.get(id); "
+            "if (!e?.isConnected || (origin !== null && e.ownerDocument.defaultView.origin !== origin)) return false; "
+            "const doc = e.ownerDocument; if (e.getRootNode().activeElement !== e) return false; "
+            "if (typeof e.select === 'function') e.select(); else { const range = doc.createRange(); "
+            "range.selectNodeContents(e); const selection = doc.getSelection(); selection.removeAllRanges(); "
+            "selection.addRange(range); } "
+            "return doc.execCommand('insertText', false, text); })"
+            f"({local_id}, {json.dumps(text)}, {json.dumps(secret_origin if secret else None)})"
         )
-        await self._session.client.send.Input.dispatchKeyEvent(
-            params={"type": "keyUp", "key": "a", "code": "KeyA", "modifiers": 2}, session_id=session_id
+        if secret:
+            inserted = await self._evaluate(session_id, script)
+            if not inserted:
+                return StepOutcome.FAILED, "secret origin or focus changed before insertion"
+        else:
+            await self._evaluate(
+                session_id,
+                f"(e => {{ if (typeof e.select === 'function') e.select(); else {{ "
+                "const range = e.ownerDocument.createRange(); range.selectNodeContents(e); "
+                "const selection = e.ownerDocument.getSelection(); selection.removeAllRanges(); "
+                f"selection.addRange(range); }} }})(window.__fastbrowse.nodes.get({local_id}))",
+            )
+            await self._session.client.send.Input.insertText(params={"text": text}, session_id=session_id)
+        landed = await self._evaluate(
+            session_id,
+            f"(e => !!e?.isConnected && (e.value ?? e.innerText) === {json.dumps(text)})"
+            f"(window.__fastbrowse?.nodes.get({local_id}))",
         )
-        await self._session.client.send.Input.insertText(params={"text": text}, session_id=session_id)
-        return StepOutcome.EXECUTED, None
+        return (
+            (StepOutcome.EXECUTED, None) if landed else (StepOutcome.FAILED, "field did not retain the supplied text")
+        )
 
     async def _select(
         self, target: tuple[str, str, int, list[object] | None] | None, option: str
@@ -322,6 +367,11 @@ class CdpPage(Page):
         if target is None:
             return StepOutcome.FAILED, "select requires a target"
         session_id, _frame, local_id, _guard = target
+        point = await self._hit_test(session_id, local_id)
+        if point is None:
+            return StepOutcome.STALE, "target disconnected"
+        if point == "covered":
+            return StepOutcome.COVERED, None
         script = (
             "((id, label) => { const e = window.__fastbrowse?.nodes.get(id); "
             "if (!e?.isConnected || e.tagName !== 'SELECT') return null; "
@@ -349,6 +399,8 @@ class CdpPage(Page):
                 return StepOutcome.STALE, "target disconnected"
             if point == "covered":
                 return StepOutcome.COVERED, None
+            if not await self._focus(session_id, local_id):
+                return StepOutcome.FAILED, "target did not receive keyboard focus"
         code, virtual_key = {"Enter": ("\r", 13), "Escape": ("", 27)}[key]
         await self._input(
             self._session.client.send.Input.dispatchKeyEvent(
@@ -392,6 +444,11 @@ class CdpPage(Page):
         if total > self._config.max_upload_bytes:
             return StepOutcome.FAILED, f"{total} bytes exceeds max_upload_bytes ({self._config.max_upload_bytes})"
         session_id, _frame, local_id, _guard = target
+        point = await self._hit_test(session_id, local_id)
+        if point is None:
+            return StepOutcome.STALE, "target disconnected"
+        if point == "covered":
+            return StepOutcome.COVERED, None
         payload = json.dumps(
             [{"name": f.name, "type": f.mime_type, "data": base64.b64encode(f.content).decode()} for f in files]
         )
@@ -472,22 +529,40 @@ class CdpPage(Page):
 
     # -- shared helpers -------------------------------------------------------------------------------
 
+    async def _focus(self, session_id: str, local_id: int) -> bool:
+        # Background local tabs can report activeElement while routing keyboard input elsewhere.
+        await self._session.client.send.Target.activateTarget(params={"targetId": self._session.active_target_id})
+        return bool(
+            await self._evaluate(
+                session_id,
+                "(id => { const e = window.__fastbrowse?.nodes.get(id); if (!e?.isConnected) return false; "
+                "e.ownerDocument.defaultView.focus(); e.focus({preventScroll: true}); "
+                "return e.getRootNode().activeElement === e && e.ownerDocument.hasFocus(); })"
+                f"({local_id})",
+            )
+        )
+
     async def _hit_test(self, session_id: str, local_id: int) -> tuple[float, float] | Literal["covered"] | None:
         script = (
             "(id => { const e = window.__fastbrowse?.nodes.get(id); "
             "if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled=\"true\"],[inert]') || "
             "!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return null; "
-            "let r = e.getBoundingClientRect(); "
-            "if (r.y + r.height / 2 < 0 || r.y + r.height / 2 >= innerHeight) { "
             "e.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'}); "
-            "r = e.getBoundingClientRect(); } "
-            "const x = r.x + r.width / 2, y = r.y + r.height / 2; "
-            "if (!r.width || !r.height || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null; "
+            "const r = e.getBoundingClientRect(); let x = r.x + r.width / 2, y = r.y + r.height / 2; "
+            "if (!r.width || !r.height) return null; "
             # Descend through open shadow roots: the document-level hit is only the outermost host.
-            "let hit = document.elementFromPoint(x, y); "
+            "let node = e, doc = e.ownerDocument; while (true) { "
+            "const view = doc.defaultView; "
+            "if (x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight) return null; "
+            "let hit = doc.elementFromPoint(x, y); "
             "while (hit?.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); "
             "if (!inner || inner === hit) break; hit = inner; } "
-            "if (!e.contains(hit)) return 'covered'; "
+            "if (!node.contains(hit)) return 'covered'; "
+            "if (doc === document) break; "
+            "node = view.frameElement; if (!node) return null; "
+            "const frame = node.getBoundingClientRect(); "
+            "x = frame.x + (node.clientLeft + x) * frame.width / node.offsetWidth; "
+            "y = frame.y + (node.clientTop + y) * frame.height / node.offsetHeight; doc = node.ownerDocument; } "
             "return [x, y]; })"
             f"({local_id})"
         )
@@ -550,6 +625,7 @@ def _control_from_raw(control_id: str, frame_id: str | None, c: dict[str, Any]) 
     return Control(
         id=control_id,
         frame_id=frame_id,
+        frame_origin=c.get("frame_origin"),
         role=c["role"],
         label=c["label"],
         operations=frozenset(Operation(op) for op in c["operations"]),
@@ -557,6 +633,7 @@ def _control_from_raw(control_id: str, frame_id: str | None, c: dict[str, Any]) 
         href=c.get("href"),
         options=tuple(c.get("options", ())),
         input_type=c.get("input_type"),
+        submit_semantics=c.get("submit_semantics"),
         checked=c.get("checked"),
         selected=c.get("selected"),
         expanded=c.get("expanded"),

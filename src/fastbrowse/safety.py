@@ -25,14 +25,20 @@ def may_be_irreversible(operation: Operation, control: Control | None) -> bool:
     """Cheap first pass; a flagged action is then asked about concretely before it can run."""
     if operation not in _DISPATCHING or control is None:
         return False
-    return bool(_IRREVERSIBLE_WORDS.search(control.label)) or control.input_type == "submit"
+    return (
+        bool(_IRREVERSIBLE_WORDS.search(control.label))
+        or control.input_type == "submit"
+        or (operation is Operation.ENTER and control.submit_semantics is not None)
+    )
 
 
 def irreversible_question(task: str, operation: Operation, control: Control) -> NoulQuestion:
     return NoulQuestion(
         instructions=(
             f"The agent is about to {operation.value} the element labelled {control.label!r} while doing this task: "
-            f"{task}\nWould doing so commit something that cannot be undone, such as spending money, sending a "
+            f"{task}\n"
+            + (f"Enter submits this form: {control.submit_semantics}\n" if operation is Operation.ENTER else "")
+            + "Would doing so commit something that cannot be undone, such as spending money, sending a "
             "message, submitting an application, or deleting or publishing data?"
         ),
         true="It commits an irreversible or externally visible change.",
