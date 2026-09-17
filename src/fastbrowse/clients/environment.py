@@ -16,19 +16,23 @@ from fastbrowse.jev import JevClient
 from fastbrowse.llm import LLMClient
 from fastbrowse.models import LLMPurpose
 
-# Measured, not assumed: `fastbrowse.evals.latency` timed 17 candidates on the two request shapes
-# that dominate a run, and this one was fastest on both by a wide margin (plan 1.6s, read 0.6s,
-# against 5.9s and 1.7s for gemini-3.8-flash). Re-measure before changing it; the ranking moves.
-FAST_LLM = "google/gemini-3.5-flash-lite"
+# The default is the model the live suite scores 12/12 on, not the fastest one. `evals.latency` timed
+# 17 candidates on the two request shapes that dominate a run and gemini-3.5-flash-lite won both by a
+# wide margin (plan 1.6s against 5.9s, read 0.6s against 1.7s), which on the local fixtures was free:
+# 12/12 at 2.9x the speed. Live sites disagreed. Flash-lite scored 8/12, and a run that answers None
+# is not a fast run. Three configurations were measured at 12 runs each and none of them held:
+# fast everywhere 8/12, a stronger planner 7/12, a stronger reader 9/12. Twelve runs cannot say which
+# purpose is responsible, so the default does not guess. Anyone who wants that trade can take it with
+# FASTBROWSE_LLM_MODEL=google/gemini-3.5-flash-lite, which the README documents alongside its cost.
+DEFAULT_LLM = "google/gemini-3.8-flash"
 
-# The plan is the one call that does not only produce output for us: its requirements and subgoals
-# become part of the state every subsequent Jev question is asked against. A vaguer plan makes Jev
-# less certain, and a live run spent that as two `uncertain next step (0.45)` stalls on pages it had
-# already navigated to correctly. So the planner keeps the stronger model and the inner loop, which
-# runs many times per task and only has to read what is in front of it, takes the fast one.
-PLANNER_LLM = "google/gemini-3.8-flash"
+# FIELD_TEXT is the exception, because it is the one purpose that mints nothing a conclusion rests on:
+# it turns "the password" or "Zurich" into the string to type, and a wrong string fails visibly as an
+# action rather than quietly as evidence. Browser Use's jev-ultrafast leans on that same asymmetry,
+# using a small model for its only LLM call, which is this one.
+FIELD_TEXT_LLM = "google/gemini-3.5-flash-lite"
 
-DEFAULT_MODELS = {purpose: FAST_LLM for purpose in LLMPurpose} | {LLMPurpose.PLAN: PLANNER_LLM}
+DEFAULT_MODELS = dict.fromkeys(LLMPurpose, DEFAULT_LLM) | {LLMPurpose.FIELD_TEXT: FIELD_TEXT_LLM}
 
 
 class MissingKeyError(RuntimeError):
