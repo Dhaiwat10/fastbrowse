@@ -1,0 +1,8 @@
+fastbrowse includes code adapted from the following MIT-licensed projects:
+
+- browser-use/jev-ultrafast, Copyright (c) 2026 Browser Use
+- browser-use/browser-harness, Copyright (c) Browser Use
+- browser-use/browser-use, Copyright (c) Browser Use
+
+Each adapted file names its source in a header comment. The original MIT license
+text applies to those portions.
