@@ -48,7 +48,8 @@ class NoulAnswer(Frozen):
 
 class ScoreAnswer(Frozen):
     type: Literal["score"] = "score"
-    score: int
+    score: float
+    """Probability-weighted mean over the levels, so fractional (e.g. 1.3)."""
     probabilities: Mapping[str, float]
     confidence: float = Field(ge=0, le=1)
 
