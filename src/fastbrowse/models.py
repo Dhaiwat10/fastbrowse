@@ -156,6 +156,8 @@ class RunResult(Frozen):
     artifacts: tuple[Artifact, ...]
     error: str | None = None
     resume_token: str | None = None
+    final_url: str | None = None
+    """Where the browser was last observed; what a caller checks when the task was to arrive somewhere."""
 
     @property
     def succeeded(self) -> bool:

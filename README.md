@@ -133,17 +133,24 @@ never counts. [docs/evals.md](docs/evals.md) has what each task proves.
 ## Embed it
 
 ```python
-async with BrowserSession(connection, DirectorySink(path)) as session:
-    page = CdpPage(session, Config())
-    await page.navigate(url)
-    result = await Agent(page, jev, llm, secrets=resolver).run(
-        task, output_schema=MyModel, limits=Limits(max_dollars=0.10)
-    )
+from fastbrowse import run_task
+
+result = await run_task(
+    "Find the cheapest kettle and tell me its price.",
+    start="https://example.com/",
+    browser_api_key=BROWSER_USE_KEY,  # omit for local headless Chrome
+    output_schema=Kettle,
+    limits=Limits(max_dollars=0.10),
+)
 ```
 
-`result.data` holds your `output_schema`, `result.evidence` the quotes behind it, and `result.cost`
-itemizes Jev, LLM, browser and proxy spend, each marked metered, estimated or unknown.
-`src/fastbrowse/cli.py` is the entire assembly in twenty lines.
+One call assembles the browser, the Jev and LLM clients, and the agent, then closes the browser on
+every path out with the cloud session's own cost folded into the result. Pass `jev=` and `llm=` to
+supply clients built from credentials you resolved yourself, rather than from the environment.
+
+`result.status` is the table above, `result.data` holds your `output_schema`, `result.evidence` the
+quotes behind the answer, `result.final_url` where the browser ended, and `result.cost` itemizes
+Jev, LLM, browser and proxy spend, each marked metered, estimated or unknown.
 
 ## Troubleshooting
 

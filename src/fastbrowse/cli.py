@@ -11,30 +11,11 @@ import argparse
 import asyncio
 import os
 import sys
-import tempfile
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from pathlib import Path
 
-import httpx
-
-from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser
-from fastbrowse.adapters.local_chrome import local_chrome
-from fastbrowse.agent import Agent
-from fastbrowse.artifacts import DirectorySink
-from fastbrowse.browser import BrowserSession, CdpPage
-from fastbrowse.clients.environment import MissingKeyError, jev_from_environment, llm_from_environment
-from fastbrowse.config import Config
-from fastbrowse.models import (
-    Authorization,
-    BrowserConnection,
-    CostBreakdown,
-    CostLine,
-    Limits,
-    RunEvent,
-    SecretRef,
-    StepEvent,
-)
+from fastbrowse.clients.environment import MissingKeyError
+from fastbrowse.models import Authorization, Limits, RunEvent, SecretRef, StepEvent
+from fastbrowse.run import run_task
 from fastbrowse.safety import origin_of
 
 
@@ -65,18 +46,13 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-@asynccontextmanager
-async def _browser(cloud: bool, http: httpx.AsyncClient, cost: list[CostLine]) -> AsyncGenerator[BrowserConnection]:
+def _browser_key(cloud: bool) -> str | None:
     if not cloud:
-        with local_chrome() as connection:
-            yield connection
-        return
+        return None
     key = os.environ.get("BROWSER_USE_API_KEY")
     if not key:
         raise MissingKeyError("set BROWSER_USE_API_KEY for --cloud")
-    async with BrowserUseCloudBrowser(key, http=http) as remote:
-        yield remote.connection
-    cost.extend(remote.cost)
+    return key
 
 
 async def _print_step(event: RunEvent) -> None:
@@ -87,22 +63,16 @@ async def _print_step(event: RunEvent) -> None:
 
 async def run(args: argparse.Namespace) -> int:
     names = dict(pair.split("=", 1) for pair in args.secret)
-    secrets = EnvironmentSecrets(names, origin_of(args.start)) if names else None
-    config = Config()
-    browser_cost: list[CostLine] = []
-    with tempfile.TemporaryDirectory() as scratch:
-        sink = DirectorySink(args.downloads or Path(scratch))
-        async with httpx.AsyncClient(timeout=60) as http, _browser(args.cloud, http, browser_cost) as connection:
-            jev, llm = jev_from_environment(http), llm_from_environment(http)
-            async with BrowserSession(connection, sink) as session:
-                page = CdpPage(session, config)
-                await page.navigate(args.start)
-                result = await Agent(page, jev, llm, config=config, secrets=secrets, on_event=_print_step).run(
-                    args.task,
-                    limits=Limits(max_steps=args.max_steps, max_dollars=args.max_dollars),
-                    authorization=Authorization(irreversible_actions=args.authorize),
-                )
-    result = result.model_copy(update={"cost": CostBreakdown(lines=(*result.cost.lines, *browser_cost))})
+    result = await run_task(
+        args.task,
+        start=args.start,
+        browser_api_key=_browser_key(args.cloud),
+        secrets=EnvironmentSecrets(names, origin_of(args.start)) if names else None,
+        limits=Limits(max_steps=args.max_steps, max_dollars=args.max_dollars),
+        authorization=Authorization(irreversible_actions=args.authorize),
+        downloads=args.downloads,
+        on_event=_print_step,
+    )
     if args.json:
         print(result.model_dump_json(indent=2))
     else:

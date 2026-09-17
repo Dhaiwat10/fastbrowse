@@ -633,6 +633,7 @@ class Agent:
             steps=tuple(state.steps) if state else (),
             cost=ledger.breakdown(),
             artifacts=self._page.artifacts[self._artifact_start :],
+            final_url=state.last_page[0] if state and state.last_page else None,
             error=error,
             resume_token=resume_token,
         )

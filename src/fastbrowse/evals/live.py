@@ -25,13 +25,8 @@ from urllib.parse import unquote, urlparse
 import httpx
 from pydantic import BaseModel
 
-from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser
-from fastbrowse.agent import Agent
-from fastbrowse.artifacts import DirectorySink
-from fastbrowse.browser import BrowserSession, CdpPage
-from fastbrowse.clients.environment import jev_from_environment, llm_from_environment
-from fastbrowse.config import Config
 from fastbrowse.models import CostBreakdown, Limits, RunResult, SecretRef, Status
+from fastbrowse.run import run_task
 from fastbrowse.safety import origin_of
 
 HOSTED_MAX_DOLLARS = 0.50
@@ -203,21 +198,17 @@ TASKS: tuple[LiveTask, ...] = (
 async def fast_arm(
     task: LiveTask, http: httpx.AsyncClient, downloads: Path
 ) -> tuple[Outcome, RunResult, CostBreakdown]:
-    config = Config()
-    jev, llm = jev_from_environment(http), llm_from_environment(http)
-    secrets = StaticSecrets(task.secrets, origin_of(task.start)) if task.secrets else None
-    cloud = BrowserUseCloudBrowser(os.environ["BROWSER_USE_API_KEY"], http=http)
-    async with cloud, BrowserSession(cloud.connection, DirectorySink(downloads)) as session:
-        page = CdpPage(session, config)
-        await page.navigate(task.start)
-        result = await Agent(page, jev, llm, config=config, secrets=secrets).run(
-            task.task,
-            output_schema=task.output_schema,
-            limits=Limits(max_steps=30, max_dollars=0.25, max_seconds=300),
-        )
-        final_url = (await page.observe()).url
-    outcome = Outcome(result.answer, result.data, final_url)
-    return outcome, result, CostBreakdown(lines=result.cost.lines + cloud.cost)
+    result = await run_task(
+        task.task,
+        start=task.start,
+        browser_api_key=os.environ["BROWSER_USE_API_KEY"],
+        output_schema=task.output_schema,
+        secrets=StaticSecrets(task.secrets, origin_of(task.start)) if task.secrets else None,
+        limits=Limits(max_steps=30, max_dollars=0.25, max_seconds=300),
+        downloads=downloads,
+        http=http,
+    )
+    return Outcome(result.answer, result.data, result.final_url or task.start), result, result.cost
 
 
 async def hosted_arm(task: LiveTask) -> tuple[Outcome, str, float | None]:
