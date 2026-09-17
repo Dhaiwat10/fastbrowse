@@ -1,0 +1,5 @@
+<!doctype html><html><head><title>Drafts</title></head><body>
+<h1>Your drafts</h1>
+<ul><li id="d1">Holiday post <button onclick="if (confirm('Delete Holiday post permanently?')) { fetch('/submit/delete', {method: 'POST', body: 'draft=holiday'}).then(() => { document.getElementById('d1').remove(); document.getElementById('status').textContent = 'Draft deleted.'; }); }">Delete</button></li>
+<li>Recipe notes <button>Delete</button></li></ul>
+<p id="status"></p></body></html>

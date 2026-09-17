@@ -1,0 +1,21 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      # The hosted-arm eval imports browser_use_sdk; without the extra, pyright sees a different tree than we do.
+      - run: uv sync --locked --all-extras
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      # Prose is part of the product surface: ban the punctuation and filler that mark text as machine-written.
+      - run: uv run python scripts/no_slop.py
+      - run: uv run pytest -q

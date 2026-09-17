@@ -1,0 +1,42 @@
+[project]
+name = "fastbrowse"
+version = "0.0.1"
+description = "A browser agent that picks instead of generating: Jev chooses, an LLM reads and plans, code verifies."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = ["cdp-use==1.4.5", "httpx[http2]>=0.28,<1", "pydantic>=2.11,<3"]
+
+[project.optional-dependencies]
+browser-use = ["browser-use-sdk>=3.10,<3.11"]
+
+[project.scripts]
+fastbrowse = "fastbrowse.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fastbrowse"]
+
+[dependency-groups]
+dev = ["pytest>=8.4,<9", "pytest-asyncio>=1,<2", "ruff>=0.14,<1", "pyright>=1.1.400"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Browser tests import helpers as tests.browser.*, which needs the repo root importable.
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"

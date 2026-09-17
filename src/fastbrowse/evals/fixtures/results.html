@@ -1,0 +1,11 @@
+<!doctype html><html><head><title>Results</title></head><body>
+<h1>Search results</h1>
+<p id="none" hidden>No products match.</p>
+<ul id="list"></ul>
+<script>
+const items = [["Red Kettle", "£29.00"], ["Blue Kettle", "£34.50"], ["Steel Kettle", "£41.99"], ["Blue Teapot", "£18.25"]];
+const q = (new URLSearchParams(location.search).get("q") || "").toLowerCase();
+const hits = items.filter(([n]) => q && q.split(/\s+/).every(w => n.toLowerCase().includes(w)));
+for (const [n, p] of hits) { const li = document.createElement("li"); li.innerHTML = `<a href="/product.html?name=${encodeURIComponent(n)}&price=${encodeURIComponent(p)}">${n}</a>`; list.append(li); }
+document.getElementById("none").hidden = hits.length > 0;
+</script></body></html>
