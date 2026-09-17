@@ -354,8 +354,13 @@ class CdpPage(Page):
             await self._session.client.send.Input.insertText(params={"text": text}, session_id=session_id)
         landed = await self._evaluate(
             session_id,
-            f"(e => !!e?.isConnected && (e.value ?? e.innerText) === {json.dumps(text)})"
-            f"(window.__fastbrowse?.nodes.get({local_id}))",
+            # A framework may swap the field for a hydrated copy while the text is being inserted, which
+            # detaches the node we typed into even though the text landed. The focused field is that copy,
+            # so accept it holding the text; anything else is a genuine rejection of the value.
+            f"((e, text) => {{ const holds = n => !!n && (n.value ?? n.innerText) === text; "
+            "const root = e?.getRootNode?.(); "
+            "return (!!e?.isConnected && holds(e)) || holds(root?.activeElement ?? document.activeElement); })"
+            f"(window.__fastbrowse?.nodes.get({local_id}), {json.dumps(text)})",
         )
         return (
             (StepOutcome.EXECUTED, None) if landed else (StepOutcome.FAILED, "field did not retain the supplied text")

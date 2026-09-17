@@ -41,6 +41,9 @@
   <button id="swap-target">Swap target</button>
   <button id="swap-trigger">Trigger swap</button>
 
+  <h2>Hydrating field</h2>
+  <input id="hydrating" type="text" placeholder="Hydrating field" />
+
   <h2>Upload</h2>
   <input id="file-input" type="file" />
   <pre id="upload-sha"></pre>
@@ -78,6 +81,16 @@
       fresh.id = 'swap-target';
       fresh.textContent = 'Replaced target';
       old.replaceWith(fresh);
+    });
+    document.getElementById('hydrating').addEventListener('input', e => {
+      // A component that re-renders on first input, detaching the very node that was typed into.
+      const old = e.target;
+      if (old.dataset.hydrated) return;
+      const fresh = old.cloneNode();
+      fresh.dataset.hydrated = 'true';
+      fresh.value = old.value;
+      old.replaceWith(fresh);
+      fresh.focus();
     });
     document.getElementById('file-input').addEventListener('change', async e => {
       const file = e.target.files[0];

@@ -262,3 +262,14 @@ async def test_capture_offsets_slice_exactly_to_each_block(loaded_page: CdpPage)
     assert "Ada" in capture.text[tables[0].start : tables[0].end]
     links = [b for b in capture.blocks if b.kind.value == "link"]
     assert any(link.href == "https://example.com/docs" for link in links)
+
+
+async def test_fill_succeeds_when_the_field_is_replaced_while_typing(loaded_page: CdpPage) -> None:
+    """Wikipedia's search box swaps itself for a hydrated copy mid-insertion; the text still landed."""
+    obs = await loaded_page.observe()
+    field = find(obs, "Hydrating field")
+    result = await loaded_page.act(Action(operation=Operation.FILL, target_id=field.id, text="godel"), obs)
+    assert result.outcome == StepOutcome.EXECUTED
+
+    obs2 = await loaded_page.observe()
+    assert find(obs2, "Hydrating field").value == "godel"
