@@ -23,6 +23,7 @@ from fastbrowse.retrieval import (
     copy_field,
     field_candidates,
     field_question,
+    propose_text_fields,
 )
 
 
@@ -147,12 +148,23 @@ async def check_claims(
     return worst <= thresholds.claim_problem_above and composed.dropped_claims == 0, evaluation.cost
 
 
-async def extract(jev: JevClient, task: str, capture: Capture, schema: type[BaseModel]) -> Extraction:
-    """Copy each field from page text Jev points at; a field with no supported candidate fails the extraction."""
+async def extract(jev: JevClient, llm: LLMClient, task: str, capture: Capture, schema: type[BaseModel]) -> Extraction:
+    """Text fields are proposed by the LLM and kept only when quoted verbatim from the page; other scalars are
+    copied from the typed spans Jev points at. A field with no supported value fails the extraction.
+    """
     values: dict[str, JsonValue] = {}
     evidence: list[Evidence] = []
+    text_fields = {name: field for name, field in schema.model_fields.items() if field.annotation is str}
     cost: list[CostLine] = []
+    if text_fields:
+        proposed, text_cost = await propose_text_fields(llm, task, capture, text_fields)
+        cost.extend(text_cost)
+        for name, (value, quoted) in proposed.items():
+            values[name] = value
+            evidence.append(quoted)
     for name, field in schema.model_fields.items():
+        if name in text_fields:
+            continue
         candidates = field_candidates(capture, field)
         if isinstance(candidates, UnsupportedField):
             return Extraction(data=None, evidence=(), problem=f"{name}: {candidates.reason}", cost=tuple(cost))

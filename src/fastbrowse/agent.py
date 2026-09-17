@@ -466,7 +466,7 @@ class Agent:
             verified = ok
         if output_schema is not None:
             state.ledger.reserve(CostComponent.JEV)
-            extraction = await extract(self._jev, state.task, await self._page.capture(), output_schema)
+            extraction = await extract(self._jev, self._llm, state.task, await self._page.capture(), output_schema)
             state.ledger.record(*extraction.cost)
             data = extraction.data
             evidence.extend(extraction.evidence)

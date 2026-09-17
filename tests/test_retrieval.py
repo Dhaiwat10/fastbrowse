@@ -21,6 +21,7 @@ from fastbrowse.retrieval import (
     field_candidates,
     field_question,
     locate_quote,
+    propose_text_fields,
     read,
 )
 
@@ -201,7 +202,6 @@ class Fields(Frozen):
 @pytest.mark.parametrize(
     "name,text,expected",
     [
-        ("label", "  Product name  ", "Product name"),
         ("count", "Stock: 1,234 units", 1234),
         ("amount", "Price: $1,234.50 today", Decimal("1234.50")),
         ("weight", "Weight: 12.25 kg", 12.25),
@@ -292,3 +292,23 @@ def test_currency_sentence_punctuation_and_candidate_context() -> None:
         "quote": "$1,234.50",
         "context": page.text,
     }
+
+
+async def test_text_fields_are_kept_only_when_quoted_verbatim_from_the_page() -> None:
+    page = capture((BlockKind.HEADING, "httpx 0.28.1"), (BlockKind.PARAGRAPH, "License: BSD"))
+    llm = ScriptedLLM(
+        [
+            {
+                "fields": [
+                    {"field": "label", "value": "0.28.1", "source_id": "s0", "quote": "httpx 0.28.1"},
+                    {"field": "license", "value": "MIT", "source_id": "s1", "quote": "License: BSD"},
+                    {"field": "owner", "value": "encode", "source_id": "s1", "quote": "Owner: encode"},
+                ]
+            }
+        ]
+    )
+    fields = {name: Fields.model_fields["label"] for name in ("label", "license", "owner")}
+    found, _ = await propose_text_fields(llm, "Get the version", page, fields)
+    assert found.keys() == {"label"}
+    value, evidence = found["label"]
+    assert value == "0.28.1" and evidence.quote == "httpx 0.28.1"
