@@ -48,6 +48,7 @@ _BLOCK_KIND = {
 _SETTLE_SECONDS = 5.0
 _SETTLE_POLL_SECONDS = 0.1
 _SCREENSHOT_WAIT_SECONDS = 1.0
+_FOCUS_SETTLE_SECONDS = 0.3
 # Long enough for a suggestion request to come back over a slow connection, and paid only by a field
 # that advertises a popup at all.
 _SUGGESTION_SECONDS = 1.2
@@ -596,8 +597,16 @@ class CdpPage(Page):
                 "(id => { const e = window.__fastbrowse?.nodes.get(id); if (!e?.isConnected) return false; "
                 + mask
                 + "e.ownerDocument.defaultView.focus(); e.focus({preventScroll: true}); "
-                "if (!e.isConnected || e.getRootNode().activeElement !== e || !e.ownerDocument.hasFocus()) "
-                "return false; " + prepare + f"return true; }})({local_id})",
+                "if (!e.isConnected || e.getRootNode().activeElement !== e) return false; "
+                # activeElement is set by focus() before it returns, but hasFocus() is answered by the
+                # browser's focus controller, which does not run inside the task that called focus().
+                # For a field inside an iframe it therefore reads false for a tick or two, so judging it
+                # here in the same task rejects a field that is in fact focused. Poll instead of guessing.
+                "return new Promise(resolve => { "
+                f"const deadline = Date.now() + {_FOCUS_SETTLE_SECONDS * 1000}; "
+                "const check = () => { if (e.ownerDocument.hasFocus()) { " + prepare + "resolve(true); return; } "
+                "if (Date.now() > deadline || !e.isConnected) { resolve(false); return; } "
+                f"setTimeout(check, 10); }}; check(); }}); }})({local_id})",
             )
         )
 
