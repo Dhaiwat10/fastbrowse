@@ -166,7 +166,7 @@ class BrowserSession:
     async def _open_owned_tab(self, url: str) -> str:
         remote = self._connection.remote
         # A remote browser has no user tab to protect and its background targets do not render (menus
-        # never open, screenshots hang, every click reads as covered) — foreground it.
+        # never open, screenshots hang, every click reads as covered), so foreground it.
         created = await self.client.send.Target.createTarget(params={"url": url, "background": not remote})
         target_id = created["targetId"]
         attach = await self.client.send.Target.attachToTarget(params={"targetId": target_id, "flatten": True})

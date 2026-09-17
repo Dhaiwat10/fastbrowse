@@ -1,7 +1,7 @@
 """The run loop: Jev chooses each action, the LLM plans, reads, writes and recovers, and code owns every gate.
 
-Only `Status.COMPLETE` is success. Anything the loop cannot prove — an answer whose claims fail their checks,
-a DONE the verifier rejects at the end of the budget — is reported as what it is rather than rounded up.
+Only `Status.COMPLETE` is success. Anything the loop cannot prove (an answer whose claims fail their checks,
+a DONE the verifier rejects at the end of the budget) is reported as what it is rather than rounded up.
 """
 
 import hashlib
