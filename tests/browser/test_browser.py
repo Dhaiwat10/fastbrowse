@@ -27,6 +27,24 @@ def find(observation: Observation, label: str) -> Control:
     raise AssertionError(f"no control labelled like {label!r} in {[c.label for c in observation.controls]}")
 
 
+async def observe_until(page: CdpPage, label: str, timeout_seconds: float = 5.0) -> Observation:
+    """Observe until a control is actually there: an attached frame session predates its document."""
+    observation: Observation | None = None
+
+    def present() -> bool:
+        nonlocal observation
+        return any(label in control.label for control in observation.controls) if observation else False
+
+    async def observed() -> bool:
+        nonlocal observation
+        observation = await page.observe()
+        return present()
+
+    await wait_until(observed, timeout_seconds)
+    assert observation is not None
+    return observation
+
+
 async def wait_until(predicate: Callable[[], Awaitable[bool] | bool], timeout_seconds: float = 5.0) -> None:
     deadline = asyncio.get_event_loop().time() + timeout_seconds
     while asyncio.get_event_loop().time() < deadline:
@@ -176,13 +194,8 @@ async def test_download_becomes_artifact_with_checksum(
 async def test_cross_origin_iframe_control_is_observed_and_clickable(
     loaded_page: CdpPage, browser_session: BrowserSession
 ) -> None:
-    async def frame_attached() -> bool:
-        return len(browser_session.frame_sessions()) > 0
-
-    await wait_until(frame_attached)
-
-    obs = await loaded_page.observe()
-    frame_button = next(c for c in obs.controls if "Frame button" in c.label)
+    obs = await observe_until(loaded_page, "Frame button")
+    frame_button = find(obs, "Frame button")
     assert frame_button.frame_id is not None
 
     result = await loaded_page.act(Action(operation=Operation.CLICK, target_id=frame_button.id), obs)

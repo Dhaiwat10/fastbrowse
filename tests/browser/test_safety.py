@@ -8,7 +8,7 @@ from fastbrowse.browser import BrowserSession, CdpPage
 from fastbrowse.config import Config, Thresholds
 from fastbrowse.models import Attachment, Authorization, Limits, Operation, SecretRef, Status, StepOutcome
 from fastbrowse.page import Action
-from tests.browser.test_browser import eval_value, find, wait_until
+from tests.browser.test_browser import eval_value, find, observe_until, wait_until
 from tests.test_policy import ScriptedJev
 from tests.test_retrieval import ScriptedLLM
 
@@ -33,8 +33,7 @@ async def test_secret_resolution_uses_receiving_origin(
     page: CdpPage, browser_session: BrowserSession, main_site: str
 ) -> None:
     await page.navigate(main_site)
-    await wait_until(lambda: bool(browser_session.frame_sessions()))
-    observed = await page.observe()
+    observed = await observe_until(page, "Frame field")
     target = find(observed, "Frame field")
     secrets = Secrets(main_site)
     agent = Agent(
@@ -53,8 +52,7 @@ async def test_page_rechecks_secret_origin_before_insertion(
     page: CdpPage, browser_session: BrowserSession, main_site: str
 ) -> None:
     await page.navigate(main_site)
-    await wait_until(lambda: bool(browser_session.frame_sessions()))
-    obs = await page.observe()
+    obs = await observe_until(page, "Frame field")
     target = find(obs, "Frame field")
     result = await page.act(
         Action(operation=Operation.FILL, target_id=target.id, text="do-not-leak", secret=True, secret_origin=main_site),
@@ -169,8 +167,7 @@ async def test_iframe_focus_hit_testing_and_capture_scope(
     assert any("shadow:" in b.source_id for b in capture.blocks if "Shadow evidence" in capture.text[b.start : b.end])
 
     await page.navigate(main_site)
-    await wait_until(lambda: bool(browser_session.frame_sessions()))
-    obs = await page.observe()
+    obs = await observe_until(page, "Frame field")
     field = find(obs, "Frame field")
     assert (
         await page.act(Action(operation=Operation.FILL, target_id=field.id, text="frame value"), obs)
