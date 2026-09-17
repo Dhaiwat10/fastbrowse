@@ -198,7 +198,12 @@ class Agent:
             duration_ms=int((time.monotonic() - started) * 1000),
         )
         await self._record_step(state, step)
-        state.unchanged = 0 if progressed else state.unchanged + 1
+        if progressed:
+            # Recoveries are spent on being stuck here, not on the whole run: a step that moved the page
+            # forward means the earlier recovery worked, so the next dead end gets the full budget again.
+            state.unchanged = state.recoveries = 0
+        else:
+            state.unchanged += 1
         if state.unchanged >= self._config.stall.unchanged_actions:
             await self._recover(state, observation, f"{state.unchanged} actions without visible progress")
 
