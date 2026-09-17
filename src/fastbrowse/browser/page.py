@@ -48,6 +48,9 @@ _BLOCK_KIND = {
 _SETTLE_SECONDS = 5.0
 _SETTLE_POLL_SECONDS = 0.1
 _SCREENSHOT_WAIT_SECONDS = 1.0
+# Long enough for a suggestion request to come back over a slow connection, and paid only by a field
+# that advertises a popup at all.
+_SUGGESTION_SECONDS = 1.2
 
 _MAIN = "main"
 """Frame key used for the top frame; OOPIF frames key on their CDP target id, per the browser session."""
@@ -359,8 +362,38 @@ class CdpPage(Page):
             "return inPlace && holds(now); })"
             f"(window.__fastbrowse?.nodes.get({local_id}), {json.dumps(text)})",
         )
-        return (
-            (StepOutcome.EXECUTED, None) if landed else (StepOutcome.FAILED, "field did not retain the supplied text")
+        if not landed:
+            return StepOutcome.FAILED, "field did not retain the supplied text"
+        await self._await_suggestions(session_id, local_id)
+        return StepOutcome.EXECUTED, None
+
+    async def _await_suggestions(self, session_id: str, local_id: int) -> None:
+        """Give an autocomplete field's suggestions time to arrive before the page is read.
+
+        Typing settles the fingerprint immediately, but the suggestions it asks for arrive over the
+        network afterwards, so the snapshot caught an empty popup and Jev was asked to choose from a
+        list that had not loaded. That is what stalled `wiki-godel` at an uncertain next step with the
+        query typed and nothing chosen. The wait is one round trip, resolves as soon as options appear
+        and returns at once for a field that has no popup to wait for.
+        """
+        await self._evaluate(
+            session_id,
+            "new Promise(resolve => { const e = window.__fastbrowse?.nodes.get("
+            f"{local_id}); "
+            "const owned = () => { const id = e.getAttribute('aria-controls') || e.getAttribute('aria-owns'); "
+            "return id ? e.ownerDocument.getElementById(id) : null; }; "
+            "const expects = !!e && (e.getAttribute('role') === 'combobox' || e.type === 'search' "
+            "|| !!e.getAttribute('aria-autocomplete') || !!owned()); "
+            "if (!expects) { resolve(false); return; } "
+            "const listed = () => e.getAttribute('aria-expanded') === 'true' "
+            "|| !!owned()?.querySelector('[role=\"option\"], li, td') "
+            "|| !!e.ownerDocument.querySelector('[role=\"listbox\"] [role=\"option\"]'); "
+            "if (listed()) { resolve(true); return; } "
+            "const stop = ok => { observer.disconnect(); clearTimeout(timer); resolve(ok); }; "
+            "const observer = new MutationObserver(() => { if (listed()) stop(true); }); "
+            "observer.observe(e.ownerDocument.body, {childList: true, subtree: true, attributes: true, "
+            "attributeFilter: ['aria-expanded']}); "
+            f"const timer = setTimeout(() => stop(false), {_SUGGESTION_SECONDS * 1000}); }})",
         )
 
     async def _select(
