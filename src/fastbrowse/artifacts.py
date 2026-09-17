@@ -8,7 +8,7 @@ from fastbrowse.models import Artifact, ArtifactKind
 
 class DirectorySink:
     def __init__(self, root: Path) -> None:
-        self._root = root
+        self._root = root.resolve()
 
     async def put(self, kind: ArtifactKind, name: str, mime_type: str, content: bytes) -> Artifact:
         digest = hashlib.sha256(content).hexdigest()

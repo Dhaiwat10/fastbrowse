@@ -22,7 +22,9 @@ The default is a local headless Chrome. `--cloud` uses a Browser Use Cloud brows
 async with BrowserSession(connection, DirectorySink(path)) as session:
     page = CdpPage(session, Config())
     await page.navigate(url)
-    result = await Agent(page, jev, llm, secrets=resolver).run(task, output_schema=MyModel, limits=Limits(max_dollars=0.10))
+    result = await Agent(page, jev, llm, secrets=resolver).run(
+        task, output_schema=MyModel, limits=Limits(max_dollars=0.10)
+    )
 ```
 
 `result.status` is `COMPLETE` only when every requirement of the task is backed by quoted page evidence. Otherwise it names why the run stopped (`NEEDS_LOGIN`, `NEEDS_CONFIRMATION`, `STUCK`, `UNVERIFIED`, `BUDGET_EXCEEDED`, ...). `result.cost` itemizes Jev, LLM, browser and proxy spend, each marked metered, estimated or unknown.

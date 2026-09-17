@@ -25,7 +25,16 @@ from fastbrowse.artifacts import DirectorySink
 from fastbrowse.browser import BrowserSession, CdpPage
 from fastbrowse.clients.environment import MissingKeyError, jev_from_environment, llm_from_environment
 from fastbrowse.config import Config
-from fastbrowse.models import Authorization, BrowserConnection, Limits, RunEvent, SecretRef, StepEvent
+from fastbrowse.models import (
+    Authorization,
+    BrowserConnection,
+    CostBreakdown,
+    CostLine,
+    Limits,
+    RunEvent,
+    SecretRef,
+    StepEvent,
+)
 from fastbrowse.safety import origin_of
 
 
@@ -57,7 +66,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
 
 
 @asynccontextmanager
-async def _browser(cloud: bool, http: httpx.AsyncClient) -> AsyncGenerator[BrowserConnection]:
+async def _browser(cloud: bool, http: httpx.AsyncClient, cost: list[CostLine]) -> AsyncGenerator[BrowserConnection]:
     if not cloud:
         with local_chrome() as connection:
             yield connection
@@ -67,6 +76,7 @@ async def _browser(cloud: bool, http: httpx.AsyncClient) -> AsyncGenerator[Brows
         raise MissingKeyError("set BROWSER_USE_API_KEY for --cloud")
     async with BrowserUseCloudBrowser(key, http=http) as remote:
         yield remote.connection
+    cost.extend(remote.cost)
 
 
 async def _print_step(event: RunEvent) -> None:
@@ -79,9 +89,10 @@ async def run(args: argparse.Namespace) -> int:
     names = dict(pair.split("=", 1) for pair in args.secret)
     secrets = EnvironmentSecrets(names, origin_of(args.start)) if names else None
     config = Config()
+    browser_cost: list[CostLine] = []
     with tempfile.TemporaryDirectory() as scratch:
         sink = DirectorySink(args.downloads or Path(scratch))
-        async with httpx.AsyncClient(timeout=60) as http, _browser(args.cloud, http) as connection:
+        async with httpx.AsyncClient(timeout=60) as http, _browser(args.cloud, http, browser_cost) as connection:
             jev, llm = jev_from_environment(http), llm_from_environment(http)
             async with BrowserSession(connection, sink) as session:
                 page = CdpPage(session, config)
@@ -91,6 +102,7 @@ async def run(args: argparse.Namespace) -> int:
                     limits=Limits(max_steps=args.max_steps, max_dollars=args.max_dollars),
                     authorization=Authorization(irreversible_actions=args.authorize),
                 )
+    result = result.model_copy(update={"cost": CostBreakdown(lines=(*result.cost.lines, *browser_cost))})
     if args.json:
         print(result.model_dump_json(indent=2))
     else:
