@@ -1,0 +1,37 @@
+"""Contract for the injected LLM: structured generation for a named purpose."""
+
+from collections.abc import Sequence
+from typing import Literal, Protocol
+
+from pydantic import BaseModel
+
+from fastbrowse.models import CostLine, Frozen, LLMPurpose
+
+
+class Message(Frozen):
+    role: Literal["system", "user", "assistant"]
+    content: str
+    images: tuple[bytes, ...] = ()
+    """JPEG or PNG bytes; clients that cannot see images must raise `LLMError`, never drop them silently."""
+
+
+class Generation[T: BaseModel](Frozen):
+    data: T
+    cost: CostLine
+
+
+class LLMError(RuntimeError):
+    """The model failed to return data matching the schema, or the transport failed."""
+
+
+class LLMClient(Protocol):
+    async def generate[T: BaseModel](
+        self,
+        purpose: LLMPurpose,
+        messages: Sequence[Message],
+        schema: type[T],
+        *,
+        max_output_tokens: int = 2000,
+    ) -> Generation[T]:
+        """Return `schema`-validated data. `purpose` lets callers route models and attribute cost."""
+        ...
