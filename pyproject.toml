@@ -32,6 +32,8 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Browser tests import helpers as tests.browser.*, which needs the repo root importable.
+pythonpath = ["."]
 asyncio_mode = "auto"
 
 [tool.pyright]
