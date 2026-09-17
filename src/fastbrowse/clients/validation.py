@@ -91,10 +91,13 @@ RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0)
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
 
 
-async def _post_with_retry(
+async def post_with_retry(
     http: httpx.AsyncClient, url: str, body: dict[str, JsonValue], headers: Mapping[str, str]
-) -> httpx.Response:
-    """An evaluation changes nothing, so an overloaded or dropped request is always safe to repeat."""
+) -> httpx.Response | None:
+    """Retry an overloaded or dropped request, which produced nothing and is always safe to repeat.
+
+    Returns None when the transport never completed, leaving each client to name its own failure.
+    """
     for delay in RETRY_DELAYS_SECONDS:
         try:
             response = await http.post(url, json=body, headers=headers)
@@ -107,7 +110,7 @@ async def _post_with_retry(
     try:
         return await http.post(url, json=body, headers=headers)
     except httpx.HTTPError:
-        raise JevError("Jev transport failed") from None
+        return None
 
 
 async def post(
@@ -117,7 +120,9 @@ async def post(
     body: dict[str, JsonValue],
     headers: Mapping[str, str] | None = None,
 ) -> httpx.Response:
-    response = await _post_with_retry(http, url, body, {"Authorization": f"Bearer {api_key}", **(headers or {})})
+    response = await post_with_retry(http, url, body, {"Authorization": f"Bearer {api_key}", **(headers or {})})
+    if response is None:
+        raise JevError("Jev transport failed")
     if response.status_code == 400 and "max_tokens_exceeded" in response.text:
         raise JevInputTooLarge(f"Jev input too large; HTTP 400: {response.text[:400]}")
     if not response.is_success:

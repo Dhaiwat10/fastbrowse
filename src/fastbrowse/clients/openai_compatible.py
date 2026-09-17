@@ -7,7 +7,7 @@ from typing import assert_never
 import httpx
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
-from fastbrowse.clients.validation import dollars, json_object, object_value, token_count
+from fastbrowse.clients.validation import dollars, json_object, object_value, post_with_retry, token_count
 from fastbrowse.llm import Generation, LLMError, Message
 from fastbrowse.models import CostBasis, CostComponent, CostLine, LLMPurpose
 from fastbrowse.telemetry import Ledger
@@ -94,14 +94,14 @@ class OpenAICompatibleLLM:
         self._models = dict(models)
 
     async def _request(self, body: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        try:
-            response = await self._http.post(
-                f"{self._base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json=body,
-            )
-        except httpx.HTTPError:
-            raise LLMError("LLM transport failed") from None
+        response = await post_with_retry(
+            self._http,
+            f"{self._base_url}/chat/completions",
+            body,
+            {"Authorization": f"Bearer {self._api_key}"},
+        )
+        if response is None:
+            raise LLMError("LLM transport failed")
         if not response.is_success:
             raise LLMError(f"LLM HTTP {response.status_code}: {response.text[:400]}")
         try:

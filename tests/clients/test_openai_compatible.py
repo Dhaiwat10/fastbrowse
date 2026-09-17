@@ -4,6 +4,7 @@ import httpx
 import pytest
 from pydantic import JsonValue, TypeAdapter
 
+from fastbrowse.clients import validation
 from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM
 from fastbrowse.llm import LLMError, Message
 from fastbrowse.models import CostBasis, Frozen, Limits, LLMPurpose
@@ -118,7 +119,11 @@ async def test_invalid_image_is_not_silently_dropped() -> None:
             ).generate(LLMPurpose.PLAN, [Message(role="user", content="See image", images=(b"GIF89a",))], Result)
 
 
-async def test_http_error_is_not_retried_as_schema_repair() -> None:
+async def test_an_overloaded_model_is_retried_then_reported_without_a_schema_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 429 is a transport condition: repeat it, then report it rather than asking to fix the JSON."""
+    monkeypatch.setattr(validation, "RETRY_DELAYS_SECONDS", (0.0, 0.0))
     calls = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
@@ -131,7 +136,7 @@ async def test_http_error_is_not_retried_as_schema_repair() -> None:
             await OpenAICompatibleLLM(
                 "key", http=http, base_url="https://llm.test", models={LLMPurpose.PLAN: "planner"}
             ).generate(LLMPurpose.PLAN, [], Result)
-    assert calls == 1 and len(str(error.value)) < 500
+    assert calls == 3 and len(str(error.value)) < 500
 
 
 async def test_a_retry_reserves_its_own_call_and_keeps_an_unreadable_attempts_cost() -> None:
