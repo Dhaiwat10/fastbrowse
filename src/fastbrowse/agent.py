@@ -45,6 +45,7 @@ from fastbrowse.safety import (
     may_be_irreversible,
     origin_of,
     resolve_secret,
+    secret_allowed,
 )
 from fastbrowse.telemetry import BudgetExceeded, Ledger
 from fastbrowse.verification import DoneVerdict, check_claims, check_done, extract, llm_verify, page_state
@@ -145,7 +146,7 @@ class Agent:
             state.ledger.check()
             observation = await self._page.observe()
             origin = origin_of(observation.url)
-            context = self._context(state, check_login=origin != state.last_origin)
+            context = self._context(state, check_login=origin != state.last_origin and not self._can_sign_in(origin))
             state.last_origin = origin
             state.ledger.reserve(CostComponent.JEV)
             decision = await decide(self._jev, observation, context, self._config)
@@ -196,6 +197,10 @@ class Agent:
         state.unchanged = 0 if progressed else state.unchanged + 1
         if state.unchanged >= self._config.stall.unchanged_actions:
             await self._recover(state, observation, f"{state.unchanged} actions without visible progress")
+
+    def _can_sign_in(self, origin: str) -> bool:
+        """A stored secret allowed on this origin means a sign-in wall is a step to take, not a stop."""
+        return self._secrets is not None and any(secret_allowed(ref, origin) for ref in self._secrets.available())
 
     @staticmethod
     def _first_edit(state: _RunState, decision: Decision, label: str | None) -> bool:

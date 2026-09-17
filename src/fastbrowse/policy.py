@@ -218,9 +218,9 @@ def build_request(
         )
     if context.check_login:
         questions["login_required"] = _noul(
-            "Must the user sign in or verify their identity on this page before the task can progress?",
-            "A sign-in, verification or access wall blocks the task.",
-            "The task can progress without signing in.",
+            "Does a sign-in or verification wall block the task, with no credentials given in the task to pass it?",
+            "A sign-in, verification or access wall blocks the task and the task gives no way through it.",
+            "The task can progress without signing in, or the task supplies the credentials to sign in.",
         )
     return _Request(_state(observation, controls, context), questions, targets, groups, offered)
 
