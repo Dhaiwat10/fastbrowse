@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
       # The hosted-arm eval imports browser_use_sdk; without the extra, pyright sees a different tree than we do.
       - run: uv sync --locked --all-extras
       - run: uv run ruff check .
