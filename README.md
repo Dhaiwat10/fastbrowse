@@ -13,7 +13,7 @@ and code owns verification, safety and secrets.
 ![python](https://img.shields.io/badge/python-3.14-475569?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-475569?style=flat-square)
 ![status](https://img.shields.io/badge/status-pre--alpha-6366F1?style=flat-square)
-![cost](https://img.shields.io/badge/vs%20hosted-19%C3%97%20cheaper-6366F1?style=flat-square)
+![cost](https://img.shields.io/badge/vs%20hosted-22%C3%97%20cheaper-6366F1?style=flat-square)
 
 </div>
 
@@ -30,15 +30,19 @@ Measured against hosted Browser Use on the same six tasks, two passes each ([doc
 
 | | passed | wall clock | cost per task |
 |:--|:--|:--|:--|
-| **fastbrowse** on a cloud browser | 11/12 | 36.3s | **$0.0191** |
+| **fastbrowse** on a cloud browser | 11/12 | 38.5s | **$0.0196** |
 | hosted Browser Use | 11/12 | 27.4s | $0.4236 |
 
-About **22x cheaper and 32% slower**. The cost gap is structural: picking from indexed candidates
+About **22x cheaper and 40% slower**. The cost gap is structural: picking from indexed candidates
 costs a fraction of generating actions from screenshots. The time gap is mostly the browser, not the
 thinking. These numbers are a cloud browser over the network, where every round trip costs about
 0.42s; the same agent against the local fixtures finishes a task in 1.6 to 12.6 seconds. The rest of
 the gap is work hosted does not do at all, since reading the page and verifying the answer against it
 are what make the answer checkable.
+
+Our row is the mean of two twelve-task runs that came out 4.4s a task apart, which is the honest
+precision available here: a live suite this size moves by seconds between runs, so read any
+difference smaller than that as noise rather than as a result.
 
 Six tasks over two passes is a smoke test rather than a benchmark, and it does not separate the two
 on correctness: each arm failed exactly one run, and neither failure was a wrong answer. Ours is

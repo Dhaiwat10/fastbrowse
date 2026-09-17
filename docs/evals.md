@@ -39,12 +39,12 @@ Two passes of all six live tasks through both arms, 2026-09-17, `google/gemini-3
 
 | | passed | cost | wall clock | cost per task |
 |---|---|---|---|---|
-| fastbrowse on a cloud browser | 11/12 | $0.2289 | 435s | $0.0191 |
+| fastbrowse on a cloud browser | 11/12 | $0.2354 | 462s | $0.0196 |
 | hosted Browser Use | 11/12 | $5.0828 | 329s | $0.4236 |
 
-**About 22x cheaper and about 32% slower.** The cost gap is structural: picking from indexed candidates spends a fraction of the tokens that generating actions from screenshots does, and most of what is left is the LLM rather than Jev (on a representative run, $0.0127 LLM against $0.0024 Jev and $0.0003 browser).
+**About 22x cheaper and about 40% slower.** The cost gap is structural: picking from indexed candidates spends a fraction of the tokens that generating actions from screenshots does, and most of what is left is the LLM rather than Jev (on a representative run, $0.0127 LLM against $0.0024 Jev and $0.0003 browser).
 
-**Where the time goes**, measured on one 49.1s run before the latency work: 64% LLM, 7% Jev, and the rest browser round trips at about 0.42s each. The round trips were the tractable half and have been attacked: action preparation, settling, frame reads and session setup were merged or made concurrent, and a fill now costs 7 CDP calls instead of 13. The same suite measured 44.2s a task before that work and 36.3s after, at the same cost. What is left is mostly the LLM, and about 7s of every cloud run is the network under the browser: the local fixture suite finishes a task in 1.6 to 12.6 seconds.
+**Where the time goes**, measured on one 49.1s run before the latency work: 64% LLM, 7% Jev, and the rest browser round trips at about 0.42s each. The round trips were the tractable half and have been attacked: action preparation, settling, frame reads and session setup were merged or made concurrent, and a fill now costs 7 CDP calls instead of 13. The same suite measured 44.2s a task before that work and 38.5s after, at the same cost. Those are single and paired runs of a twelve-task suite, and two runs of the identical build came out 36.3s and 40.7s, so the gain is real but its precision is not: treat it as several seconds a task, not as a figure to two significant digits. What is left is mostly the LLM, and about 7s of every cloud run is the network under the browser: the local fixture suite finishes a task in 1.6 to 12.6 seconds.
 
 **Six tasks is a smoke test, not a benchmark, and a single pass does not separate these arms on correctness.** Across the passes taken while developing this suite, fastbrowse scored 10-12/12 and hosted 11-12/12. Each arm failed exactly one run above, and neither failure was a wrong answer: ours is PyPI presenting a sign-in wall, reported as `needs_login` rather than answered with a guess, and hosted's is its own `Task ended unexpectedly`. Read the score as "both arms usually finish these tasks" and the cost column as the real finding.
 
