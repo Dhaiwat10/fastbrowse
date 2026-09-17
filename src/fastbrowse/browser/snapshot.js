@@ -15,7 +15,7 @@
 
   const safe = e => e.type !== 'hidden';
   // Password values never leave the page: only their length is observed, to mask them and detect edits.
-  const reveal = e => e.value === undefined ? null : e.type === 'password' ? '•'.repeat(e.value.length) : e.value;
+  const reveal = e => typeof e.value !== 'string' ? null : e.type === 'password' ? '•'.repeat(e.value.length) : e.value;
   const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
     e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
 
@@ -114,8 +114,8 @@
       const editable = !e.readOnly && e.getAttribute('aria-readonly') !== 'true' &&
         (['textbox', 'searchbox', 'spinbutton'].includes(rname) ||
           (rname === 'combobox' && ['INPUT', 'TEXTAREA'].includes(e.tagName)));
-      base.value = 'value' in e ? reveal(e) :
-        e.isContentEditable || rname === 'combobox' ? e.innerText.trim() : null;
+      // reveal() is null for <li>, <progress> and <meter>, whose numeric `value`s are not field contents.
+      base.value = reveal(e) ?? (e.isContentEditable || rname === 'combobox' ? e.innerText.trim() : null);
       base.operations = editable ? ['fill', 'click', 'enter'] : ['click'];
     }
     controls.push(base);
