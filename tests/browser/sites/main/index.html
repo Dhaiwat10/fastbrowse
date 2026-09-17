@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head><title>Main site</title></head>
+<body>
+  <h1>Fastbrowse fixture</h1>
+  <p>An introductory paragraph with some prose text.</p>
+
+  <h2>Login</h2>
+  <form id="login">
+    <input id="username" name="username" type="text" placeholder="Username" />
+    <input id="password" name="password" type="password" placeholder="Password" />
+    <button id="submit-login" type="submit">Sign in</button>
+  </form>
+  <p id="login-result"></p>
+
+  <h2>Notes</h2>
+  <ul>
+    <li>First item</li>
+    <li>Second item</li>
+  </ul>
+
+  <h2>Table</h2>
+  <table>
+    <tr><th>Name</th><th>Score</th></tr>
+    <tr><td>Ada</td><td>10</td></tr>
+    <tr><td>Grace</td><td>9</td></tr>
+  </table>
+
+  <h2>Code</h2>
+  <pre>def f(x):\n    return x + 1</pre>
+
+  <h2>Reference</h2>
+  <p><a href="https://example.com/docs">See the docs</a></p>
+
+  <h2>Modal</h2>
+  <button id="open-modal">Open modal</button>
+  <button id="covered-target">Covered target</button>
+  <div id="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);"></div>
+
+  <h2>Swap</h2>
+  <button id="swap-target">Swap target</button>
+  <button id="swap-trigger">Trigger swap</button>
+
+  <h2>Upload</h2>
+  <input id="file-input" type="file" />
+  <pre id="upload-sha"></pre>
+
+  <h2>Download</h2>
+  <a id="download-link" href="/download">Download attachment</a>
+
+  <h2>Cross-origin iframe</h2>
+  <iframe id="cross-frame" src="__IFRAME_ORIGIN__/iframe.html"></iframe>
+
+  <h2>Shadow DOM</h2>
+  <div id="shadow-host"></div>
+
+  <h2>Popup</h2>
+  <button id="open-popup">Open popup</button>
+
+  <h2>Dialog</h2>
+  <button id="open-dialog">Confirm</button>
+  <p id="dialog-result"></p>
+
+  <script>
+    document.getElementById('login').addEventListener('submit', e => {
+      e.preventDefault();
+      document.getElementById('login-result').textContent = 'signed in as ' + document.getElementById('username').value;
+    });
+    document.getElementById('open-modal').addEventListener('click', () => {
+      document.getElementById('modal').style.display = 'block';
+    });
+    document.getElementById('covered-target').addEventListener('click', () => {
+      document.getElementById('covered-target').dataset.clicked = 'true';
+    });
+    document.getElementById('swap-trigger').addEventListener('click', () => {
+      const old = document.getElementById('swap-target');
+      const fresh = document.createElement('button');
+      fresh.id = 'swap-target';
+      fresh.textContent = 'Replaced target';
+      old.replaceWith(fresh);
+    });
+    document.getElementById('file-input').addEventListener('change', async e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const buf = await file.arrayBuffer();
+      const digest = await crypto.subtle.digest('SHA-256', buf);
+      document.getElementById('upload-sha').textContent = [...new Uint8Array(digest)]
+        .map(b => b.toString(16).padStart(2, '0')).join('');
+    });
+    const host = document.getElementById('shadow-host').attachShadow({mode: 'open'});
+    host.innerHTML = '<button id="shadow-button">Shadow button</button>';
+    document.getElementById('shadow-host').shadowRoot.getElementById('shadow-button')
+      .addEventListener('click', () => { window.__shadowClicked = true; });
+    document.getElementById('open-popup').addEventListener('click', () => {
+      window.open(location.origin + '/popup.html', '_blank');
+    });
+    document.getElementById('open-dialog').addEventListener('click', () => {
+      const ok = confirm('Proceed?');
+      document.getElementById('dialog-result').textContent = ok ? 'confirmed' : 'cancelled';
+    });
+  </script>
+</body>
+</html>
