@@ -74,10 +74,11 @@ class BrowserUseCloudBrowser:
         """Stop the browser (it bills until stopped or timed out) and record what it cost."""
         if self._browser is None:
             return
-        browser_id, self._browser, self._connection = self._browser.id, None, None
-        stopped = _BrowserView.model_validate_json(
-            (await self._call("PATCH", f"/browsers/{browser_id}", json={"action": "stop"})).content
-        )
+        self._connection = None
+        # Forget the browser only once the stop succeeded, so a failed stop can be retried rather than left billing.
+        response = await self._call("PATCH", f"/browsers/{self._browser.id}", json={"action": "stop"})
+        self._browser = None
+        stopped = _BrowserView.model_validate_json(response.content)
         self.cost = (
             CostLine(component=CostComponent.BROWSER, basis=CostBasis.METERED, dollars=float(stopped.browser_cost)),
             CostLine(component=CostComponent.PROXY, basis=CostBasis.METERED, dollars=float(stopped.proxy_cost)),
