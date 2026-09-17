@@ -11,12 +11,14 @@ import asyncio
 import base64
 import hashlib
 import json
+import time
 from collections.abc import Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, assert_never, cast
 
 from cdp_use.cdp.input.commands import DispatchMouseEventParameters
+from cdp_use.cdp.page.commands import CaptureScreenshotParameters
 
 from fastbrowse.browser.session import BrowserSession
 from fastbrowse.config import Config
@@ -34,6 +36,10 @@ _BLOCK_KIND = {
     "code": BlockKind.CODE,
     "link": BlockKind.LINK,
 }
+
+_SETTLE_SECONDS = 5.0
+_SETTLE_POLL_SECONDS = 0.1
+_SCREENSHOT_WAIT_SECONDS = 1.0
 
 _MAIN = "main"
 """Frame key used for the top frame; OOPIF frames key on their CDP target id, per the browser session."""
@@ -420,10 +426,19 @@ class CdpPage(Page):
         task.result()
 
     async def screenshot(self) -> bytes:
-        out = await self._session.client.send.Page.captureScreenshot(
-            params={"format": "jpeg", "quality": 70}, session_id=self._session.active_session_id
-        )
-        return base64.b64decode(out["data"])
+        """Capture the active tab, activating it only if a background tab produces no frame to capture.
+
+        An idle background tab composites nothing new, so a capture can wait many seconds; focus emulation and
+        compositor-level nudges proved unreliable, while activating always yields a frame at once. Screenshots
+        are rare (recovery and uncertain completion), so focus moves only when it has to.
+        """
+        client, session_id = self._session.client, self._session.active_session_id
+        params: CaptureScreenshotParameters = {"format": "jpeg", "quality": 70}
+        capture = asyncio.ensure_future(client.send.Page.captureScreenshot(params=params, session_id=session_id))
+        done, _ = await asyncio.wait({capture}, timeout=_SCREENSHOT_WAIT_SECONDS)
+        if not done:
+            await client.send.Target.activateTarget(params={"targetId": self._session.active_target_id})
+        return base64.b64decode((await capture)["data"])
 
     async def origin(self) -> str:
         raw = await self._evaluate(self._session.active_session_id, "location.origin")
@@ -480,14 +495,33 @@ class CdpPage(Page):
         return str(result)
 
     async def _changed_since(self, before: str) -> bool:
-        # A blocking JS dialog (window.confirm/alert/prompt) freezes the renderer's main thread, so
-        # Runtime.evaluate would hang until the dialog is handled. Never block `act` on that: a timeout
-        # (or the frame navigating away mid-eval) is itself strong evidence the page changed.
-        try:
-            after = await asyncio.wait_for(self._fingerprint(), timeout=2.0)
-        except (TimeoutError, RuntimeError):
-            return True
-        return after != before
+        """Wait for the page to settle after an action, then report whether it changed.
+
+        A click that navigates returns before the navigation starts, so an immediate fingerprint would describe
+        the old page. Settled means the document is loaded and two polls agree. A blocking JavaScript dialog
+        freezes the renderer, and an evaluate that fails mid-navigation is itself evidence of change.
+        """
+        deadline = time.monotonic() + _SETTLE_SECONDS
+        previous: str | None = None
+        await asyncio.sleep(_SETTLE_POLL_SECONDS)
+        while time.monotonic() < deadline:
+            if self._session.pending_dialog() is not None:
+                return True
+            try:
+                current = await asyncio.wait_for(self._settled_fingerprint(), timeout=_SETTLE_POLL_SECONDS * 4)
+            except (TimeoutError, RuntimeError):
+                current = None
+            if current is not None and current == previous:
+                return current != before
+            previous = current
+            await asyncio.sleep(_SETTLE_POLL_SECONDS)
+        return previous != before
+
+    async def _settled_fingerprint(self) -> str | None:
+        """The fingerprint once the document has loaded; None while it is still loading."""
+        if await self._evaluate(self._session.active_session_id, "document.readyState") != "complete":
+            return None
+        return await self._fingerprint()
 
     async def _evaluate(self, session_id: str, expression: str) -> Any:
         out = await self._session.client.send.Runtime.evaluate(

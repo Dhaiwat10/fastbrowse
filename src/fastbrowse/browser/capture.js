@@ -1,80 +1,92 @@
 // Complete structured text capture of one frame, as ordered blocks with heading paths.
-// Unlike snapshot.js (bounded, for Jev's action choice) this reads the whole document, visible or not,
-// so the LLM reading path and the answer-evidence quotes see everything on the page.
+// Unlike snapshot.js (bounded, for Jev's action choice) this reads the whole rendered document, on screen or not,
+// so the reading path and answer-evidence quotes see everything a user could scroll to.
+// Adjacent inline content (text, <strong>, <a>, <span>...) is one block, so a value inside markup stays with its label.
 (() => {
   if (!document.body) return null;
   const HEADINGS = { H1: 1, H2: 2, H3: 3, H4: 4, H5: 5, H6: 6 };
+  const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'CANVAS', 'IFRAME']);
   const blocks = [];
   const path = [];
 
-  const textOf = e => (e.innerText ?? e.textContent ?? '').trim();
-
-  const cellsOf = row => [...row.querySelectorAll(':scope > th, :scope > td')].map(c => textOf(c).replace(/\|/g, '\\|'));
-
-  const renderTable = table => {
-    const rows = [...table.querySelectorAll(':scope > tr, :scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr')];
-    if (!rows.length) return null;
-    const lines = rows.map(cellsOf).filter(cells => cells.length);
-    if (!lines.length) return null;
-    const header = lines[0];
-    const body = ['| ' + header.join(' | ') + ' |', '| ' + header.map(() => '---').join(' | ') + ' |'];
-    for (const row of lines.slice(1)) body.push('| ' + row.join(' | ') + ' |');
-    return body.join('\n');
+  const clean = s => s.replace(/[ \t\r\f\v]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  const textOf = e => clean(e.innerText ?? e.textContent ?? '');
+  const hidden = e => e.hidden || getComputedStyle(e).display === 'none';
+  const isBlock = e => {
+    const display = getComputedStyle(e).display;
+    return !(display.startsWith('inline') || display === 'contents') || e.tagName === 'BR';
+  };
+  const hrefOf = a => {
+    const u = new URL(a.href, location.href);
+    return u.origin === location.origin ? u.pathname + u.search : u.href;
+  };
+  const push = (kind, text, extra = {}) => {
+    if (text) blocks.push({ kind, text, heading_path: [...path], ...extra });
   };
 
-  // Skip a subtree once its container has been rendered as one block (table, code, or a link's own text).
-  const SKIP_DESCEND = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TABLE', 'PRE']);
+  const renderTable = table => {
+    const rows = [...table.querySelectorAll(':scope > tr, :scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr')]
+      .map(row => [...row.querySelectorAll(':scope > th, :scope > td')].map(c => textOf(c).replace(/\|/g, '\\|')))
+      .filter(cells => cells.length);
+    if (!rows.length) return '';
+    const lines = ['| ' + rows[0].join(' | ') + ' |', '| ' + rows[0].map(() => '---').join(' | ') + ' |'];
+    for (const cells of rows.slice(1)) lines.push('| ' + cells.join(' | ') + ' |');
+    return lines.join('\n');
+  };
 
-  function walk(node) {
-    for (const child of node.children) {
-      if (SKIP_DESCEND.has(child.tagName)) {
-        if (child.tagName === 'TABLE') {
-          const rendered = renderTable(child);
-          if (rendered) blocks.push({ kind: 'table', text: rendered, heading_path: [...path] });
-        } else if (child.tagName === 'PRE') {
-          const text = textOf(child);
-          if (text) blocks.push({ kind: 'code', text, heading_path: [...path] });
-        }
-        continue;
-      }
-      const level = HEADINGS[child.tagName];
-      if (level) {
-        const text = textOf(child);
-        while (path.length >= level) path.pop();
-        if (text) {
-          path.push(text);
-          blocks.push({ kind: 'heading', text, heading_path: path.slice(0, -1) });
-        }
-        continue;
-      }
-      if (child.tagName === 'LI') {
-        const text = textOf(child);
-        if (text) blocks.push({ kind: 'list_item', text, heading_path: [...path] });
-        walk(child);
-        continue;
-      }
-      if (child.tagName === 'A' && child.href) {
-        const text = textOf(child);
-        if (text) {
-          const u = new URL(child.href, location.href);
-          const href = u.origin === location.origin ? u.pathname + u.search : u.href;
-          blocks.push({ kind: 'link', text, href, heading_path: [...path] });
-        }
-        continue;
-      }
-      if (['P', 'ARTICLE', 'SECTION', 'MAIN', 'BLOCKQUOTE'].includes(child.tagName)) {
-        const ownText = [...child.childNodes]
-          .filter(n => n.nodeType === 3)
-          .map(n => n.textContent.trim())
-          .filter(Boolean)
-          .join(' ');
-        if (ownText) blocks.push({ kind: 'paragraph', text: ownText, heading_path: [...path] });
-        walk(child);
-        continue;
-      }
-      walk(child);
-    }
+  function flush(run) {
+    if (!run.length) return;
+    const elements = run.filter(n => n.nodeType === 1);
+    const text = clean(run.map(n => (n.nodeType === 3 ? n.textContent : n.innerText ?? '')).join(''));
+    const onlyLink = elements.length === 1 && elements[0].tagName === 'A' && elements[0].href
+      && clean(elements[0].innerText ?? '') === text;
+    if (onlyLink) push('link', text, { href: hrefOf(elements[0]) });
+    else push('paragraph', text);
+    run.length = 0;
   }
+
+  function leaf(el) {
+    return ![...el.children].some(c => !SKIP.has(c.tagName) && !hidden(c) && isBlock(c));
+  }
+
+  function walk(el) {
+    const run = [];
+    for (const node of el.childNodes) {
+      if (node.nodeType === 3) {
+        run.push(node);
+        continue;
+      }
+      if (node.nodeType !== 1 || SKIP.has(node.tagName) || hidden(node)) continue;
+      if (!isBlock(node)) {
+        run.push(node);
+        continue;
+      }
+      flush(run);
+      block(node);
+    }
+    flush(run);
+  }
+
+  function block(el) {
+    const level = HEADINGS[el.tagName];
+    if (level) {
+      const text = textOf(el);
+      while (path.length >= level) path.pop();
+      if (text) {
+        push('heading', text);
+        path.push(text);
+      }
+      return;
+    }
+    if (el.tagName === 'TABLE') return push('table', renderTable(el));
+    if (el.tagName === 'PRE') return push('code', textOf(el));
+    if (el.tagName === 'LI' && leaf(el)) {
+      const links = el.querySelectorAll('a[href]');
+      return push('list_item', textOf(el), links.length === 1 ? { href: hrefOf(links[0]) } : {});
+    }
+    walk(el);
+  }
+
   walk(document.body);
   return { url: location.href, title: document.title, blocks };
 })()
