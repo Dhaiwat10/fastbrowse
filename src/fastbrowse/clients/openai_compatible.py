@@ -55,7 +55,7 @@ def _cost(payload: dict[str, JsonValue], purpose: LLMPurpose) -> CostLine:
             input_tokens=token_count(usage.get("prompt_tokens", 0)),
             output_tokens=token_count(usage.get("completion_tokens", 0)),
         )
-    except (ValueError, TypeError, OverflowError):
+    except ValueError, TypeError, OverflowError:
         return CostLine(component=CostComponent.LLM, purpose=purpose, basis=CostBasis.UNKNOWN, dollars=None)
 
 

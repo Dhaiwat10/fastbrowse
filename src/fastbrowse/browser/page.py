@@ -387,7 +387,7 @@ class CdpPage(Page):
             "if (!expects) { resolve(false); return; } "
             "const listed = () => e.getAttribute('aria-expanded') === 'true' "
             "|| !!owned()?.querySelector('[role=\"option\"], li, td') "
-            "|| !!e.ownerDocument.querySelector('[role=\"listbox\"] [role=\"option\"]'); "
+            '|| !!e.ownerDocument.querySelector(\'[role="listbox"] [role="option"]\'); '
             "if (listed()) { resolve(true); return; } "
             "const stop = ok => { observer.disconnect(); clearTimeout(timer); resolve(ok); }; "
             "const observer = new MutationObserver(() => { if (listed()) stop(true); }); "
