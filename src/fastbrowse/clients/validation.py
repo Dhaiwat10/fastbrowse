@@ -1,5 +1,6 @@
 """Shared wire encoding and strict validation for both Jev transports."""
 
+import asyncio
 import math
 from collections.abc import Mapping
 from typing import assert_never
@@ -86,6 +87,29 @@ def response_error(response: httpx.Response, detail: str) -> JevError:
     return JevError(f"{detail[:300]}; HTTP {response.status_code}: {response.text[:400]}")
 
 
+RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0)
+RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
+
+
+async def _post_with_retry(
+    http: httpx.AsyncClient, url: str, body: dict[str, JsonValue], headers: Mapping[str, str]
+) -> httpx.Response:
+    """An evaluation changes nothing, so an overloaded or dropped request is always safe to repeat."""
+    for delay in RETRY_DELAYS_SECONDS:
+        try:
+            response = await http.post(url, json=body, headers=headers)
+        except httpx.HTTPError:
+            await asyncio.sleep(delay)
+            continue
+        if response.status_code not in RETRYABLE_STATUS:
+            return response
+        await asyncio.sleep(delay)
+    try:
+        return await http.post(url, json=body, headers=headers)
+    except httpx.HTTPError:
+        raise JevError("Jev transport failed") from None
+
+
 async def post(
     http: httpx.AsyncClient,
     url: str,
@@ -93,10 +117,7 @@ async def post(
     body: dict[str, JsonValue],
     headers: Mapping[str, str] | None = None,
 ) -> httpx.Response:
-    try:
-        response = await http.post(url, json=body, headers={"Authorization": f"Bearer {api_key}", **(headers or {})})
-    except httpx.HTTPError:
-        raise JevError("Jev transport failed") from None
+    response = await _post_with_retry(http, url, body, {"Authorization": f"Bearer {api_key}", **(headers or {})})
     if response.status_code == 400 and "max_tokens_exceeded" in response.text:
         raise JevInputTooLarge(f"Jev input too large; HTTP 400: {response.text[:400]}")
     if not response.is_success:
