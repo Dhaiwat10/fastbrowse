@@ -108,7 +108,7 @@ async def llm_verify(
     task: str,
     plan: Plan,
     observation: Observation,
-    screenshot: bytes,
+    screenshots: tuple[bytes, ...],
     notes: Notes,
     steps: Sequence[StepResult],
 ) -> Generation[LLMVerdict]:
@@ -132,7 +132,7 @@ async def llm_verify(
                     f"## Page\n{observation.url}\n"
                     f"{observation.viewport_text}\n\n## Notes\n{notes.render(8000)}"
                 ),
-                images=(screenshot,),
+                images=screenshots,
             ),
         ],
         LLMVerdict,

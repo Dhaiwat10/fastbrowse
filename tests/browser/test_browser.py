@@ -65,6 +65,20 @@ async def test_observe_lists_controls_and_masks_password(loaded_page: CdpPage) -
     assert password2.value == "•" * len("s3cr3t")
 
 
+async def test_secret_typed_into_text_field_is_masked_but_submitted(
+    loaded_page: CdpPage, browser_session: BrowserSession
+) -> None:
+    obs = await loaded_page.observe()
+    username = find(obs, "Username")
+    action = Action(operation=Operation.FILL, target_id=username.id, text="tok-123", secret=True)
+    assert (await loaded_page.act(action, obs)).outcome == StepOutcome.EXECUTED
+
+    field = find(await loaded_page.observe(), "Username")
+    assert field.sensitive is True and field.value == "•" * len("tok-123")
+    session_id = browser_session.active_session_id
+    assert await eval_value(browser_session, session_id, "document.getElementById('username').value") == "tok-123"
+
+
 async def test_fill_and_click_submits_form_and_page_changed(loaded_page: CdpPage) -> None:
     obs = await loaded_page.observe()
     username = find(obs, "Username")

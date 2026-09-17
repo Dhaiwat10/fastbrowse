@@ -98,6 +98,8 @@ class Action(Frozen):
     target_id: str | None = None
     text: str | None = None
     """Value to type or option to select. May hold a resolved secret: never log or persist an Action."""
+    secret: bool = False
+    """`text` is a resolved secret: the page masks the field so it never renders in a screenshot."""
     tab_id: str | None = None
     files: tuple[Attachment, ...] = ()
     accept_dialog: bool | None = None

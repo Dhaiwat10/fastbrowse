@@ -245,7 +245,7 @@ class CdpPage(Page):
             case Operation.CLICK:
                 return await self._click(target)
             case Operation.FILL:
-                return await self._fill(target, action.text or "")
+                return await self._fill(target, action.text or "", secret=action.secret)
             case Operation.SELECT:
                 return await self._select(target, action.text or "")
             case Operation.ENTER:
@@ -287,7 +287,7 @@ class CdpPage(Page):
         return StepOutcome.EXECUTED, None
 
     async def _fill(
-        self, target: tuple[str, str, int, list[object] | None] | None, text: str
+        self, target: tuple[str, str, int, list[object] | None] | None, text: str, *, secret: bool = False
     ) -> tuple[StepOutcome, str | None]:
         if target is None:
             return StepOutcome.FAILED, "fill requires a target"
@@ -297,6 +297,14 @@ class CdpPage(Page):
             return StepOutcome.STALE, "target disconnected"
         if point == "covered":
             return StepOutcome.COVERED, None
+        if secret:
+            # Masked before typing, so no frame renders the value; the snapshot then reports the field sensitive.
+            await self._evaluate(
+                session_id,
+                f"(e => {{ if (e) {{ e.dataset.fastbrowseSecret = '1'; "
+                f"e.style.setProperty('-webkit-text-security', 'disc', 'important'); }} }})"
+                f"(window.__fastbrowse?.nodes.get({local_id}))",
+            )
         await self._click_point(session_id, point)
         await self._session.client.send.Input.dispatchKeyEvent(
             params={"type": "keyDown", "key": "a", "code": "KeyA", "modifiers": 2, "commands": ["selectAll"]},

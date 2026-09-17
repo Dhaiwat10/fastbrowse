@@ -34,7 +34,7 @@ from fastbrowse.models import (
     StepResult,
     UntilCheck,
 )
-from fastbrowse.page import Action, ActResult, Control, Observation, Page
+from fastbrowse.page import Action, ActResult, Capture, Control, Observation, Page
 from fastbrowse.planner import Plan, RequirementKind, make_plan
 from fastbrowse.policy import Decision, HistoryEntry, ObservationTooLarge, StepContext, decide
 from fastbrowse.retrieval import compose, read
@@ -107,6 +107,7 @@ class Agent:
         self._secrets = secrets
         self._on_event = on_event
         self._redactor = Redactor()
+        self._secret_on_screen = False
 
     async def run(
         self,
@@ -122,7 +123,7 @@ class Agent:
         ledger = Ledger(limits or Limits())
         state: _RunState | None = None
         try:
-            observation = await self._page.observe()
+            observation = await self._observe()
             ledger.reserve(CostComponent.LLM)
             planned = await make_plan(self._llm, task, observation)
             ledger.record(planned.cost)
@@ -144,7 +145,7 @@ class Agent:
     ) -> RunResult:
         while True:
             state.ledger.check()
-            observation = await self._page.observe()
+            observation = await self._observe()
             origin = origin_of(observation.url)
             context = self._context(state, check_login=origin != state.last_origin and not self._can_sign_in(origin))
             state.last_origin = origin
@@ -198,6 +199,42 @@ class Agent:
         if state.unchanged >= self._config.stall.unchanged_actions:
             await self._recover(state, observation, f"{state.unchanged} actions without visible progress")
 
+    async def _observe(self) -> Observation:
+        """Every observation models see has resolved secret values blanked, wherever the page echoes them."""
+        observation = await self._page.observe()
+        self._secret_on_screen = self._redactor.reveals(observation.viewport_text)
+        mask = self._redactor.mask
+        controls = tuple(
+            control.model_copy(
+                update={
+                    "label": mask(control.label),
+                    "value": None if control.value is None else mask(control.value),
+                    "options": tuple(mask(option) for option in control.options),
+                }
+            )
+            for control in observation.controls
+        )
+        return observation.model_copy(
+            update={
+                "title": mask(observation.title),
+                "viewport_text": mask(observation.viewport_text),
+                "controls": controls,
+            }
+        )
+
+    async def _capture(self) -> Capture:
+        capture = await self._page.capture()
+        text = self._redactor.mask(capture.text)
+        if text == capture.text:
+            return capture
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        return capture.model_copy(update={"text": text, "title": self._redactor.mask(capture.title), "sha256": digest})
+
+    async def _screenshots(self) -> tuple[bytes, ...]:
+        """No image while a secret shows as page text: pixels cannot be masked like text. Typed fields are masked
+        by the page itself."""
+        return () if self._secret_on_screen else (await self._page.screenshot(),)
+
     def _can_sign_in(self, origin: str) -> bool:
         """A stored secret allowed on this origin means a sign-in wall is a step to take, not a stop."""
         return self._secrets is not None and any(secret_allowed(ref, origin) for ref in self._secrets.available())
@@ -226,10 +263,12 @@ class Agent:
                 await self._gate_irreversible(state, observation, decision)
                 return Action(operation=decision.operation, target_id=target.id if target else None)
             case Operation.FILL:
+                text = await self._text(state, observation, _require(target))
                 return Action(
                     operation=Operation.FILL,
                     target_id=_require(target).id,
-                    text=await self._text(state, observation, _require(target)),
+                    text=text,
+                    secret=self._redactor.reveals(text),
                 )
             case Operation.SELECT:
                 option = await self._choose(
@@ -367,7 +406,7 @@ class Agent:
 
     async def _read(self, state: _RunState) -> bool:
         """Return whether reading added evidence, which is the only progress a read can make."""
-        capture = await self._page.capture()
+        capture = await self._capture()
         wanted = [r for r in state.notes.unresolved(state.plan) if r.kind is RequirementKind.INFORMATION]
         question = "\n".join(f"- {r.text}" for r in wanted) or state.task
         state.ledger.reserve(CostComponent.LLM)
@@ -398,7 +437,7 @@ class Agent:
                         f"## Task\n{state.task}\n\n## Problem\n{reason}\n\n## Recent steps\n{steps}\n\n"
                         f"## Page\n{observation.url}\n{observation.viewport_text[:4000]}"
                     ),
-                    images=(await self._page.screenshot(),),
+                    images=await self._screenshots(),
                 ),
             ],
             _Recovery,
@@ -430,7 +469,7 @@ class Agent:
         until: UntilCheck | None,
     ) -> RunResult | None:
         """Return the final result when DONE holds up; None sends the loop back to work."""
-        fresh = await self._page.observe()
+        fresh = await self._observe()
         state.ledger.reserve(CostComponent.JEV)
         check = await check_done(self._jev, state.task, state.plan, fresh, state.notes, self._config.thresholds)
         state.ledger.record(check.cost)
@@ -438,7 +477,7 @@ class Agent:
         if check.verdict is DoneVerdict.VERIFY:
             state.ledger.reserve(CostComponent.LLM)
             verdict = await llm_verify(
-                self._llm, state.task, state.plan, fresh, await self._page.screenshot(), state.notes, state.steps
+                self._llm, state.task, state.plan, fresh, await self._screenshots(), state.notes, state.steps
             )
             state.ledger.record(verdict.cost)
             accepted = verdict.data.complete and not verdict.data.missing
@@ -466,7 +505,7 @@ class Agent:
             verified = ok
         if output_schema is not None:
             state.ledger.reserve(CostComponent.JEV)
-            extraction = await extract(self._jev, self._llm, state.task, await self._page.capture(), output_schema)
+            extraction = await extract(self._jev, self._llm, state.task, await self._capture(), output_schema)
             state.ledger.record(*extraction.cost)
             data = extraction.data
             evidence.extend(extraction.evidence)

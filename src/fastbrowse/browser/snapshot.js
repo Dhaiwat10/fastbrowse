@@ -14,8 +14,9 @@
   for (const [id, e] of registry.nodes) if (!e.isConnected) registry.nodes.delete(id);
 
   const safe = e => e.type !== 'hidden';
-  // Password values never leave the page: only their length is observed, to mask them and detect edits.
-  const reveal = e => typeof e.value !== 'string' ? null : e.type === 'password' ? '•'.repeat(e.value.length) : e.value;
+  // Password and agent-typed secret values never leave the page: only their length is observed.
+  const secret = e => e.type === 'password' || e.dataset?.fastbrowseSecret === '1';
+  const reveal = e => typeof e.value !== 'string' ? null : secret(e) ? '•'.repeat(e.value.length) : e.value;
   const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
     e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
 
@@ -92,7 +93,7 @@
     const base = {
       id, role: rname, label: labelOf(e) || rname, offscreen: y < 0 || y >= innerHeight,
       distance: (y < 0 || y >= innerHeight) ? 1 + Math.abs(y - innerHeight / 2) : 0,
-      sensitive: e.type === 'password', input_type: e.type || null,
+      sensitive: secret(e), input_type: e.type || null,
     };
     if (rname === 'link' && e.href) {
       const u = new URL(e.href, location.href);

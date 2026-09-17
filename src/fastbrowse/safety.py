@@ -77,5 +77,14 @@ class Redactor:
             text = text.replace(value, f"[secret:{self._values[value]}]")
         return text
 
+    def mask(self, text: str) -> str:
+        """Blank secret values at equal length, so offsets into the text (capture blocks) stay valid."""
+        for value in sorted(self._values, key=len, reverse=True):
+            text = text.replace(value, "•" * len(value))
+        return text
+
+    def reveals(self, text: str) -> bool:
+        return any(value in text for value in self._values)
+
     def redact_all(self, texts: Iterable[str]) -> tuple[str, ...]:
         return tuple(self.redact(t) for t in texts)
