@@ -25,6 +25,19 @@ wheels = [
 ]
 
 [[package]]
+name = "browser-use-sdk"
+version = "3.10.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ff/33/1f23ec8ddccfcfb77f019cf9884b5fdfc1804bf70e1708ea2a69e5023975/browser_use_sdk-3.10.0.tar.gz", hash = "sha256:34871b7f6df0e90d5dd2c8d1f07cbd9298015e2a181c82fdf352a8db75d6946b", size = 217448, upload-time = "2026-07-17T18:22:27.749Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/52/a6377a871f791044eeaa2755ce49433dc745e687b40ecd16258c12b0bf44/browser_use_sdk-3.10.0-py3-none-any.whl", hash = "sha256:4a65df36f702fab6d90b0a5785bf8456a002abb5b504f856b1a8ab60251b9430", size = 79609, upload-time = "2026-07-17T18:22:26.505Z" },
+]
+
+[[package]]
 name = "cdp-use"
 version = "1.4.5"
 source = { registry = "https://pypi.org/simple" }
@@ -66,6 +79,11 @@ dependencies = [
     { name = "pydantic" },
 ]
 
+[package.optional-dependencies]
+browser-use = [
+    { name = "browser-use-sdk" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pyright" },
@@ -76,6 +94,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "browser-use-sdk", marker = "extra == 'browser-use'", specifier = ">=3.10,<3.11" },
     { name = "cdp-use", specifier = "==1.4.5" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28,<1" },
     { name = "pydantic", specifier = ">=2.11,<3" },
