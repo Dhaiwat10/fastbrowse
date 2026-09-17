@@ -3,7 +3,7 @@
     uv run --extra browser-use python -m fastbrowse.evals.live [--only TASK_ID ...] [--arms fast hosted]
         [--repeat N] [--out artifacts/evals/live.jsonl]
 
-Needs BROWSER_USE_API_KEY (both arms), AI_GATEWAY_API_KEY and OPENROUTER_API_KEY (fast arm).
+Needs BROWSER_USE_API_KEY (both arms), and the Jev and LLM keys in fastbrowse.clients.environment (fast arm).
 
 Truth is fetched from each site's own API at run time, so the grade tracks the live page rather than a stale
 fixture. Both arms are graded on their answer. The fast arm is also graded on the page it actually ended on;
@@ -29,13 +29,11 @@ from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser
 from fastbrowse.agent import Agent
 from fastbrowse.artifacts import DirectorySink
 from fastbrowse.browser import BrowserSession, CdpPage
-from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM
-from fastbrowse.clients.vercel import VercelGatewayJevClient
+from fastbrowse.clients.environment import jev_from_environment, llm_from_environment
 from fastbrowse.config import Config
-from fastbrowse.models import CostBreakdown, Limits, LLMPurpose, SecretRef, Status
+from fastbrowse.models import CostBreakdown, Limits, RunResult, SecretRef, Status
 from fastbrowse.safety import origin_of
 
-DEFAULT_LLM = "google/gemini-3.8-flash"
 HOSTED_MAX_DOLLARS = 0.50
 
 
@@ -202,16 +200,11 @@ TASKS: tuple[LiveTask, ...] = (
 )
 
 
-async def fast_arm(task: LiveTask, http: httpx.AsyncClient, downloads: Path) -> tuple[Outcome, str, CostBreakdown]:
+async def fast_arm(
+    task: LiveTask, http: httpx.AsyncClient, downloads: Path
+) -> tuple[Outcome, RunResult, CostBreakdown]:
     config = Config()
-    model = os.environ.get("FASTBROWSE_LLM_MODEL", DEFAULT_LLM)
-    jev = VercelGatewayJevClient(os.environ["AI_GATEWAY_API_KEY"], http=http)
-    llm = OpenAICompatibleLLM(
-        os.environ["OPENROUTER_API_KEY"],
-        http=http,
-        base_url="https://openrouter.ai/api/v1",
-        models=dict.fromkeys(LLMPurpose, model),
-    )
+    jev, llm = jev_from_environment(http), llm_from_environment(http)
     secrets = StaticSecrets(task.secrets, origin_of(task.start)) if task.secrets else None
     cloud = BrowserUseCloudBrowser(os.environ["BROWSER_USE_API_KEY"], http=http)
     async with cloud, BrowserSession(cloud.connection, DirectorySink(downloads)) as session:
@@ -224,7 +217,7 @@ async def fast_arm(task: LiveTask, http: httpx.AsyncClient, downloads: Path) -> 
         )
         final_url = (await page.observe()).url
     outcome = Outcome(result.answer, result.data, final_url)
-    return outcome, result.status.value, CostBreakdown(lines=result.cost.lines + cloud.cost)
+    return outcome, result, CostBreakdown(lines=result.cost.lines + cloud.cost)
 
 
 async def hosted_arm(task: LiveTask) -> tuple[Outcome, str, float | None]:
@@ -255,7 +248,10 @@ async def run_arm(arm: str, task: LiveTask, http: httpx.AsyncClient, downloads: 
     row: dict[str, object] = {"arm": arm, "task": task.id}
     try:
         if arm == "fast":
-            outcome, status, cost = await fast_arm(task, http, downloads)
+            outcome, result, cost = await fast_arm(task, http, downloads)
+            status = result.status.value
+            row["error"] = result.error
+            row["trace"] = [f"{s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in result.steps]
             dollars: float | None = cost.known_dollars
             row["unknown_cost"] = cost.has_unknown
             row["cost_by_component"] = {

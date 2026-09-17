@@ -2,13 +2,12 @@
 
     uv run python -m fastbrowse.evals.runner [--only TASK_ID ...] [--repeat N] [--out results.jsonl]
 
-Needs AI_GATEWAY_API_KEY (Jev) and OPENROUTER_API_KEY (LLM); FASTBROWSE_LLM_MODEL overrides the LLM.
+Needs Jev and LLM keys; see fastbrowse.clients.environment.
 """
 
 import argparse
 import asyncio
 import json
-import os
 import sys
 import tempfile
 import time
@@ -20,14 +19,11 @@ from fastbrowse.adapters.local_chrome import local_chrome
 from fastbrowse.agent import Agent
 from fastbrowse.artifacts import DirectorySink
 from fastbrowse.browser import BrowserSession, CdpPage
-from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM
-from fastbrowse.clients.vercel import VercelGatewayJevClient
+from fastbrowse.clients.environment import jev_from_environment, llm_from_environment
 from fastbrowse.config import Config
 from fastbrowse.evals.local import Recorder, fixture_server
 from fastbrowse.evals.tasks import TASKS, LocalTask
-from fastbrowse.models import BrowserConnection, Limits, LLMPurpose
-
-DEFAULT_LLM = "google/gemini-3.8-flash"
+from fastbrowse.models import BrowserConnection, Limits
 
 
 async def run_task(
@@ -40,14 +36,7 @@ async def run_task(
 ) -> dict[str, object]:
     recorder.clear()
     config = Config()
-    jev = VercelGatewayJevClient(os.environ["AI_GATEWAY_API_KEY"], http=http)
-    model = os.environ.get("FASTBROWSE_LLM_MODEL", DEFAULT_LLM)
-    llm = OpenAICompatibleLLM(
-        os.environ["OPENROUTER_API_KEY"],
-        http=http,
-        base_url="https://openrouter.ai/api/v1",
-        models=dict.fromkeys(LLMPurpose, model),
-    )
+    jev, llm = jev_from_environment(http), llm_from_environment(http)
     started = time.monotonic()
     async with BrowserSession(connection, sink) as session:
         page = CdpPage(session, config)
