@@ -357,9 +357,12 @@ class CdpPage(Page):
             # A framework may swap the field for a hydrated copy while the text is being inserted, which
             # detaches the node we typed into even though the text landed. The focused field is that copy,
             # so accept it holding the text; anything else is a genuine rejection of the value.
+            # The focused copy is consulted only once the node we typed into is gone: while it is still
+            # attached, it is the only field that answers for the value, and another field holding the
+            # same text is not evidence that this one took it.
             f"((e, text) => {{ const holds = n => !!n && (n.value ?? n.innerText) === text; "
-            "const root = e?.getRootNode?.(); "
-            "return (!!e?.isConnected && holds(e)) || holds(root?.activeElement ?? document.activeElement); })"
+            "if (!e) return false; if (e.isConnected) return holds(e); "
+            "return holds(e.getRootNode?.()?.activeElement ?? document.activeElement); })"
             f"(window.__fastbrowse?.nodes.get({local_id}), {json.dumps(text)})",
         )
         return (
