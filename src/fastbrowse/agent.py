@@ -339,7 +339,11 @@ class Agent:
         choice = await self._ask_choice(
             state,
             observation,
-            f"The page shows a {dialog.kind} dialog: {dialog.message!r}. Accept it?",
+            (
+                f"The page shows a {dialog.kind} dialog saying {dialog.message!r}, opened by the agent's last action. "
+                "Accept it if it asks to go ahead with what the task wants done; dismiss it if it would do "
+                "something the task did not ask for."
+            ),
             {"accept": "Accept / OK", "dismiss": "Dismiss / Cancel"},
         )
         return choice == "accept"
@@ -417,7 +421,7 @@ class Agent:
         if check.verdict is DoneVerdict.VERIFY:
             state.ledger.reserve(CostComponent.LLM)
             verdict = await llm_verify(
-                self._llm, state.task, state.plan, fresh, await self._page.screenshot(), state.notes
+                self._llm, state.task, state.plan, fresh, await self._page.screenshot(), state.notes, state.steps
             )
             state.ledger.record(verdict.cost)
             accepted = verdict.data.complete and not verdict.data.missing
@@ -445,7 +449,7 @@ class Agent:
             verified = ok
         if output_schema is not None:
             state.ledger.reserve(CostComponent.JEV)
-            extraction = await extract(self._jev, await self._page.capture(), output_schema)
+            extraction = await extract(self._jev, state.task, await self._page.capture(), output_schema)
             state.ledger.record(*extraction.cost)
             data = extraction.data
             evidence.extend(extraction.evidence)

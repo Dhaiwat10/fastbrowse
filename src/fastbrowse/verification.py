@@ -4,7 +4,7 @@ Jev answers the cheap checks, all framed so "yes" means something is wrong; an L
 when Jev's completion answer lands in the uncertain band.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 
 from pydantic import BaseModel, JsonValue, ValidationError
@@ -13,7 +13,7 @@ from fastbrowse.config import Thresholds
 from fastbrowse.jev import JevClient, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation, LLMClient, Message
 from fastbrowse.memory import Notes
-from fastbrowse.models import CostLine, Evidence, Frozen, LLMPurpose
+from fastbrowse.models import CostLine, Evidence, Frozen, LLMPurpose, StepResult
 from fastbrowse.page import Capture, Observation
 from fastbrowse.planner import Plan, RequirementKind
 from fastbrowse.retrieval import (
@@ -75,7 +75,10 @@ async def check_done(
             false="Something the task asks for is missing, unsubmitted or unconfirmed.",
         )
     }
-    unmet = [r.id for r in plan.requirements if r.kind is RequirementKind.INFORMATION and not notes.evidenced(r.id)]
+    unevidenced = {
+        r.id for r in plan.requirements if r.kind is RequirementKind.INFORMATION and not notes.evidenced(r.id)
+    }
+    unmet = sorted(unevidenced)
     for requirement in plan.requirements:
         if requirement.kind is RequirementKind.ACTION:
             questions[f"unmet_{requirement.id}"] = NoulQuestion(
@@ -88,9 +91,11 @@ async def check_done(
         if _probability(evaluation.answers, f"unmet_{requirement.id}") > thresholds.claim_problem_above:
             unmet.append(requirement.id)
     complete = _probability(evaluation.answers, "complete")
-    if unmet or complete < thresholds.done_verify_from:
+    # Jev reliably confirms a visible result but is too strict to reject one on its own, so apart from
+    # information nobody has read, doubt goes to the verifier rather than straight back to work.
+    if any(requirement_id in unevidenced for requirement_id in unmet):
         verdict = DoneVerdict.REJECT
-    elif complete >= thresholds.done_accept_from:
+    elif complete >= thresholds.done_accept_from and not unmet:
         verdict = DoneVerdict.ACCEPT
     else:
         verdict = DoneVerdict.VERIFY
@@ -98,9 +103,16 @@ async def check_done(
 
 
 async def llm_verify(
-    llm: LLMClient, task: str, plan: Plan, observation: Observation, screenshot: bytes, notes: Notes
+    llm: LLMClient,
+    task: str,
+    plan: Plan,
+    observation: Observation,
+    screenshot: bytes,
+    notes: Notes,
+    steps: Sequence[StepResult],
 ) -> Generation[LLMVerdict]:
     requirements = "\n".join(f"- {r.id}: {r.text}" for r in plan.requirements)
+    history = "\n".join(f"- {s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in steps[-12:])
     return await llm.generate(
         LLMPurpose.VERIFY,
         [
@@ -115,7 +127,8 @@ async def llm_verify(
             Message(
                 role="user",
                 content=(
-                    f"## Task\n{task}\n\n## Requirements\n{requirements}\n\n## Page\n{observation.url}\n"
+                    f"## Task\n{task}\n\n## Requirements\n{requirements}\n\n## Steps taken\n{history}\n\n"
+                    f"## Page\n{observation.url}\n"
                     f"{observation.viewport_text}\n\n## Notes\n{notes.render(8000)}"
                 ),
                 images=(screenshot,),
@@ -134,7 +147,7 @@ async def check_claims(
     return worst <= thresholds.claim_problem_above and composed.dropped_claims == 0, evaluation.cost
 
 
-async def extract(jev: JevClient, capture: Capture, schema: type[BaseModel]) -> Extraction:
+async def extract(jev: JevClient, task: str, capture: Capture, schema: type[BaseModel]) -> Extraction:
     """Copy each field from page text Jev points at; a field with no supported candidate fails the extraction."""
     values: dict[str, JsonValue] = {}
     evidence: list[Evidence] = []
@@ -146,10 +159,12 @@ async def extract(jev: JevClient, capture: Capture, schema: type[BaseModel]) -> 
         if not candidates:
             continue
         try:
-            question = field_question(field, candidates, name=name)
+            question = field_question(field, candidates, name=name, task=task, record_fields=tuple(schema.model_fields))
         except ValueError as error:
             return Extraction(data=None, evidence=tuple(evidence), problem=f"{name}: {error}", cost=tuple(cost))
-        evaluation = await jev.evaluate({"page": {"url": capture.url, "title": capture.title}}, {name: question})
+        evaluation = await jev.evaluate(
+            {"task": task, "page": {"url": capture.url, "title": capture.title}}, {name: question}
+        )
         cost.append(evaluation.cost)
         answer = evaluation.answers.get(name)
         copied = copy_field(answer, candidates) if answer is not None and answer.type == "choice" else None
