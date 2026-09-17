@@ -136,6 +136,9 @@ class OpenAICompatibleLLM:
                 costs.append(_cost(payload, purpose))
                 content = _content(payload)
             except (ValueError, TypeError, OverflowError) as error:
+                # An empty completion comes back intermittently (a dropped or refused generation); ask once more.
+                if attempt == 0:
+                    continue
                 raise LLMError(f"Invalid completion envelope: {str(error)[:400]}") from None
             try:
                 data = schema.model_validate_json(content)
