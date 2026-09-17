@@ -38,8 +38,13 @@ class Ledger:
         limits = self.limits
         if limits.max_seconds is not None and monotonic() - self.started > limits.max_seconds:
             raise BudgetExceeded(f"time limit {limits.max_seconds}s reached")
-        if limits.max_dollars is not None and self.breakdown().known_dollars + extra_dollars > limits.max_dollars:
-            raise BudgetExceeded(f"spend limit ${limits.max_dollars} reached")
+        if limits.max_dollars is not None:
+            spent = self.breakdown()
+            # An unpriced call could have spent anything, so a dollar cap cannot be enforced past it.
+            if spent.has_unknown:
+                raise BudgetExceeded(f"spend limit ${limits.max_dollars} cannot be enforced: a call reported no cost")
+            if spent.known_dollars + extra_dollars > limits.max_dollars:
+                raise BudgetExceeded(f"spend limit ${limits.max_dollars} reached")
         if self.steps >= limits.max_steps:
             raise BudgetExceeded(f"step limit {limits.max_steps} reached")
 
