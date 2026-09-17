@@ -156,7 +156,11 @@ class Agent:
             decision = await decide(self._jev, observation, context, self._config, ledger=state.ledger)
             if (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
                 raise _Stop(Status.NEEDS_LOGIN, f"sign-in required at {origin}")
-            if decision.confidence < self._config.thresholds.recover_below or decision.operation is Operation.ESCALATE:
+            uncertain = decision.confidence < self._config.thresholds.recover_below
+            # The confidence gate exists to stop the agent acting on a page it does not understand, and a
+            # READ is not acting: it changes nothing and is what one does when unsure what the page says.
+            # Routing it to recovery spent the recovery budget on the page that held the answer.
+            if (uncertain and decision.operation is not Operation.READ) or decision.operation is Operation.ESCALATE:
                 await self._recover(state, observation, f"uncertain next step ({decision.confidence:.2f})")
                 continue
             if decision.operation is Operation.DONE and self._unread(state):
