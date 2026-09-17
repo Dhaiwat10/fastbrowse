@@ -4,6 +4,7 @@ Only `Status.COMPLETE` is success. Anything the loop cannot prove (an answer who
 a DONE the verifier rejects at the end of the budget) is reported as what it is rather than rounded up.
 """
 
+import asyncio
 import hashlib
 import time
 from collections.abc import Mapping, Sequence
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field, JsonValue
 
 from fastbrowse.config import Config
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
-from fastbrowse.llm import LLMClient, LLMError, Message
+from fastbrowse.llm import Generation, LLMClient, LLMError, Message
 from fastbrowse.memory import Notes
 from fastbrowse.models import (
     Attachment,
@@ -37,7 +38,7 @@ from fastbrowse.models import (
 from fastbrowse.page import Action, ActResult, Capture, Control, Observation, Page
 from fastbrowse.planner import Plan, RequirementKind, make_plan
 from fastbrowse.policy import Decision, HistoryEntry, ObservationTooLarge, StepContext, decide
-from fastbrowse.retrieval import compose, read
+from fastbrowse.retrieval import ComposedAnswer, compose, read
 from fastbrowse.safety import (
     Redactor,
     irreversible_question,
@@ -48,7 +49,15 @@ from fastbrowse.safety import (
     secret_allowed,
 )
 from fastbrowse.telemetry import BudgetExceeded, Ledger
-from fastbrowse.verification import DoneVerdict, check_claims, check_done, extract, llm_verify, page_state
+from fastbrowse.verification import (
+    DoneVerdict,
+    Extraction,
+    check_claims,
+    check_done,
+    extract,
+    llm_verify,
+    page_state,
+)
 
 GENERATE = "generate"
 
@@ -552,7 +561,15 @@ class Agent:
         check = await check_done(self._jev, state.task, state.plan, fresh, state.notes, self._config.thresholds)
         state.ledger.record(check.cost)
         accepted = check.verdict is DoneVerdict.ACCEPT
+        drafting: asyncio.Task[Generation[ComposedAnswer]] | None = None
         if check.verdict is DoneVerdict.VERIFY:
+            # Write the answer while the verifier is still deciding. Both read the same finished notes,
+            # and every accepted run wants an answer, so the whole cost of guessing wrong is one
+            # discarded call on the branch that was going back to work anyway.
+            if state.plan.answer_expected:
+                drafting = asyncio.create_task(
+                    compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
+                )
             verdict = await llm_verify(
                 self._llm,
                 state.task,
@@ -568,27 +585,53 @@ class Agent:
         if accepted and until is not None:
             accepted = await until((self._raw_observation or fresh).url)
         if not accepted:
+            if drafting is not None:
+                drafting.cancel()
             unmet = ", ".join(check.unmet) or "completion not confirmed"
             await self._recover(state, observation, f"DONE rejected: {unmet}")
             return None
-        return await self._conclude(state, output_schema)
+        return await self._conclude(state, output_schema, drafting)
 
-    async def _conclude(self, state: _RunState, output_schema: type[BaseModel] | None) -> RunResult:
+    async def _answer(
+        self, state: _RunState, drafting: asyncio.Task[Generation[ComposedAnswer]] | None
+    ) -> tuple[str, bool]:
+        """The composed answer and whether its claims held, taking the draft started during verification."""
+        composed = await (
+            drafting
+            if drafting is not None
+            else compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
+        )
+        ok, _ = await check_claims(self._jev, composed.data, state.notes, self._config.thresholds, ledger=state.ledger)
+        return self._redactor.redact(composed.data.answer), ok
+
+    async def _extraction(self, state: _RunState, output_schema: type[BaseModel]) -> Extraction:
+        """The caller's schema, filled from a capture taken inside this branch so it overlaps the answer."""
+        return await extract(
+            self._jev, self._llm, state.task, await self._capture(), output_schema, ledger=state.ledger
+        )
+
+    async def _conclude(
+        self,
+        state: _RunState,
+        output_schema: type[BaseModel] | None,
+        drafting: asyncio.Task[Generation[ComposedAnswer]] | None = None,
+    ) -> RunResult:
         answer: str | None = None
         data: JsonValue | None = None
         evidence: list[Evidence] = [fact.evidence for fact in state.notes.facts]
         verified = True
-        if state.plan.answer_expected:
-            composed = await compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
-            answer = self._redactor.redact(composed.data.answer)
-            ok, _ = await check_claims(
-                self._jev, composed.data, state.notes, self._config.thresholds, ledger=state.ledger
-            )
-            verified = ok
-        if output_schema is not None:
-            extraction = await extract(
-                self._jev, self._llm, state.task, await self._capture(), output_schema, ledger=state.ledger
-            )
+        # Writing the answer and filling the caller's schema read the same finished notes and neither
+        # needs the other's output, so a task that wants both pays for the slower one rather than both.
+        answering = self._answer(state, drafting) if state.plan.answer_expected else None
+        extracting = self._extraction(state, output_schema) if output_schema is not None else None
+        if answering is not None and extracting is not None:
+            (answer, verified), extraction = await asyncio.gather(answering, extracting)
+        elif answering is not None:
+            answer, verified = await answering
+            extraction = None
+        else:
+            extraction = await extracting if extracting is not None else None
+        if extraction is not None:
             data = extraction.data
             evidence.extend(extraction.evidence)
             verified = verified and extraction.problem is None
