@@ -7,14 +7,8 @@ real CDP mechanics (OOPIFs, downloads, dialogs) that cannot be faked without los
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
-import socket
-import subprocess
-import tempfile
 import threading
-import time
-import urllib.request
 from collections.abc import AsyncIterator, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,6 +16,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+from fastbrowse.adapters.local_chrome import free_port, local_chrome
 from fastbrowse.browser.page import CdpPage
 from fastbrowse.browser.session import BrowserSession
 from fastbrowse.config import Config
@@ -51,12 +46,6 @@ class RecordingArtifactSink:
         )
         self.artifacts.append(artifact)
         return artifact
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _handler_for(directory: Path, iframe_origin: str | None = None) -> type[BaseHTTPRequestHandler]:
@@ -101,7 +90,7 @@ def _handler_for(directory: Path, iframe_origin: str | None = None) -> type[Base
 
 @pytest.fixture(scope="session")
 def iframe_site() -> Iterator[str]:
-    port = _free_port()
+    port = free_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), _handler_for(SITES / "iframe"))
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -113,7 +102,7 @@ def iframe_site() -> Iterator[str]:
 
 @pytest.fixture(scope="session")
 def main_site(iframe_site: str) -> Iterator[str]:
-    port = _free_port()
+    port = free_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), _handler_for(SITES / "main", iframe_origin=iframe_site))
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -124,39 +113,9 @@ def main_site(iframe_site: str) -> Iterator[str]:
 
 
 @pytest.fixture(scope="session")
-def chrome_ws_url() -> Iterator[str]:
-    assert CHROME is not None
-    port = _free_port()
-    profile = tempfile.mkdtemp()
-    proc = subprocess.Popen(
-        [
-            CHROME,
-            "--headless=new",
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={profile}",
-            "--no-first-run",
-            "--disable-popup-blocking",
-            "about:blank",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        ws_url = ""
-        for _ in range(100):
-            try:
-                info = urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1).read()
-                ws_url = json.loads(info)["webSocketDebuggerUrl"]
-                break
-            except OSError:
-                time.sleep(0.1)
-        if not ws_url:
-            raise RuntimeError("Chrome did not expose a DevTools endpoint in time")
-        yield ws_url
-    finally:
-        proc.terminate()
-        proc.wait(timeout=10)
-        shutil.rmtree(profile, ignore_errors=True)
+def chrome_connection() -> Iterator[BrowserConnection]:
+    with local_chrome() as connection:
+        yield connection
 
 
 @pytest_asyncio.fixture
@@ -165,9 +124,10 @@ async def artifact_sink() -> RecordingArtifactSink:
 
 
 @pytest_asyncio.fixture
-async def browser_session(chrome_ws_url: str, artifact_sink: RecordingArtifactSink) -> AsyncIterator[BrowserSession]:
-    connection = BrowserConnection(cdp_url=chrome_ws_url, remote=False)
-    async with BrowserSession(connection, artifact_sink) as session:
+async def browser_session(
+    chrome_connection: BrowserConnection, artifact_sink: RecordingArtifactSink
+) -> AsyncIterator[BrowserSession]:
+    async with BrowserSession(chrome_connection, artifact_sink) as session:
         yield session
 
 

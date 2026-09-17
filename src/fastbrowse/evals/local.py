@@ -1,18 +1,13 @@
-"""Local infrastructure for evals: a fixture server that records submissions, and a headless Chrome."""
+"""A fixture server for local evals that records every submission."""
 
-import json
-import shutil
-import socket
-import subprocess
-import tempfile
 import threading
-import time
-import urllib.request
 from collections.abc import Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl
+
+from fastbrowse.adapters.local_chrome import free_port
 
 FIXTURES = Path(__file__).with_name("fixtures")
 
@@ -62,12 +57,6 @@ def _handler(recorder: Recorder) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
 @contextmanager
 def fixture_server() -> Generator[tuple[str, Recorder]]:
     recorder = Recorder()
@@ -77,42 +66,3 @@ def fixture_server() -> Generator[tuple[str, Recorder]]:
         yield f"http://127.0.0.1:{server.server_port}", recorder
     finally:
         server.shutdown()
-
-
-@contextmanager
-def local_chrome() -> Generator[str]:
-    """Yield a DevTools WebSocket URL for a throwaway headless Chrome."""
-    binary = shutil.which("google-chrome-stable") or shutil.which("google-chrome") or shutil.which("chromium")
-    if binary is None:
-        raise RuntimeError("Chrome is not installed")
-    port = free_port()
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as profile:
-        proc = subprocess.Popen(
-            [
-                binary,
-                "--headless=new",
-                f"--remote-debugging-port={port}",
-                f"--user-data-dir={profile}",
-                "--no-first-run",
-                "about:blank",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        try:
-            yield _wait_for_ws(port)
-        finally:
-            proc.terminate()
-            proc.wait(timeout=10)
-
-
-def _wait_for_ws(port: int, timeout: float = 15.0) -> str:
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
-                return str(json.load(response)["webSocketDebuggerUrl"])
-        except OSError:
-            if time.monotonic() > deadline:
-                raise
-            time.sleep(0.1)

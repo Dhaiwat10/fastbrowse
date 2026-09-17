@@ -16,13 +16,14 @@ from pathlib import Path
 
 import httpx
 
+from fastbrowse.adapters.local_chrome import local_chrome
 from fastbrowse.agent import Agent
 from fastbrowse.artifacts import DirectorySink
 from fastbrowse.browser import BrowserSession, CdpPage
 from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM
 from fastbrowse.clients.vercel import VercelGatewayJevClient
 from fastbrowse.config import Config
-from fastbrowse.evals.local import Recorder, fixture_server, local_chrome
+from fastbrowse.evals.local import Recorder, fixture_server
 from fastbrowse.evals.tasks import TASKS, LocalTask
 from fastbrowse.models import BrowserConnection, Limits, LLMPurpose
 
@@ -30,7 +31,12 @@ DEFAULT_LLM = "google/gemini-3.8-flash"
 
 
 async def run_task(
-    task: LocalTask, base_url: str, recorder: Recorder, ws_url: str, http: httpx.AsyncClient, sink: DirectorySink
+    task: LocalTask,
+    base_url: str,
+    recorder: Recorder,
+    connection: BrowserConnection,
+    http: httpx.AsyncClient,
+    sink: DirectorySink,
 ) -> dict[str, object]:
     recorder.clear()
     config = Config()
@@ -43,7 +49,7 @@ async def run_task(
         models=dict.fromkeys(LLMPurpose, model),
     )
     started = time.monotonic()
-    async with BrowserSession(BrowserConnection(cdp_url=ws_url, live_url=None, remote=False), sink) as session:
+    async with BrowserSession(connection, sink) as session:
         page = CdpPage(session, config)
         await page.navigate(base_url + task.start)
         result = await Agent(page, jev, llm, config=config).run(
@@ -81,14 +87,14 @@ async def main(argv: list[str]) -> int:
     rows: list[dict[str, object]] = []
     with (
         fixture_server() as (base_url, recorder),
-        local_chrome() as ws_url,
+        local_chrome() as connection,
         tempfile.TemporaryDirectory() as downloads,
         args.out.open("a") as out,
     ):
         async with httpx.AsyncClient(timeout=60) as http:
             for _ in range(args.repeat):
                 for task in tasks:
-                    row = await run_task(task, base_url, recorder, ws_url, http, DirectorySink(Path(downloads)))
+                    row = await run_task(task, base_url, recorder, connection, http, DirectorySink(Path(downloads)))
                     rows.append(row)
                     out.write(json.dumps(row) + "\n")
                     mark = "PASS" if row["passed"] else "FAIL"
