@@ -85,7 +85,7 @@ Run on 2026-09-18. Every arm used a Browser Use Cloud browser and the same limit
 - **jev-ultrafast** at `452c1ad`: Jev through the AI Gateway (no `TYPESAFE_API_KEY` was available), with its default text helper, `inception/mercury-2.5` with reasoning off.
 - **Hosted Browser Use:** its default model, `claude-opus-4.7`, in its own browser.
 
-Each arm meets the others only on the tasks both can be graded on (see `arms` above), so there are two headline tables, not one. `wasted actions per run` counts escalations, actions that failed or changed nothing, and an action repeated on the same target, from each run's trace (`scripts/h2h_report.py`); hosted Browser Use returns no trace to count.
+Each arm meets the others only on the tasks both can be graded on (see `arms` above), so there are two headline tables, not one. `wasted actions per run` counts escalations, actions that failed or changed nothing, and an action repeated on the same target from the same page, from each run's step log (the target alone for rows from before the step log, such as this run) (`scripts/h2h_report.py`); hosted Browser Use returns no trace to count.
 
 **Answer tasks** (lookups, sign-ins, checkout and Flights), fastbrowse against hosted Browser Use:
 
