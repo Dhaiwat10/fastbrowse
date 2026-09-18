@@ -9,7 +9,7 @@ RIGHT = {
     "books-travel-priciest": ("A Year in Provence (Provence #1), at £56.88.", None),
     "hockey-bruins-1990": ("The Boston Bruins won 44 games in 1990.", None),
     "oscars-2012": ("Argo won Best Picture.", None),
-    "dynamic-loading": ("It shows “Hello World!”.", None),
+    "dynamic-loading": ("It shows \u201cHello World!\u201d.", None),
     "nested-frames": ("The middle frame shows MIDDLE.", None),
     "hover-profile": ("name: user2", None),
     "ruff-release": ("The latest release is 0.16.8.", "0.16.8"),
@@ -22,7 +22,7 @@ RIGHT = {
     "new-window": ("The new window's heading is New Window.", None),
     "table-largest-due": ("Jason Doe, who owes $100.00.", None),
     "httpx-requires-python": ("Python 3.8 or later.", "3.8"),
-    "quotes-search": ("“Try not to become a man of success. Rather become a man of value.”", None),
+    "quotes-search": ("\u201cTry not to become a man of success. Rather become a man of value.\u201d", None),
 }
 
 
