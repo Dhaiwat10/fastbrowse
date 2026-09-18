@@ -205,6 +205,8 @@ class Agent:
             raw = self._raw_observation or observation
             origin = origin_of(raw.url)
             page = (raw.url, raw.document_key)
+            if state.planning.done():
+                await state.await_plan()
             context = self._context(state, check_login=page != state.last_page and not self._can_sign_in(origin))
             state.last_page = page
             decision = await decide(self._jev, observation, context, self._config, ledger=state.ledger)
@@ -219,6 +221,10 @@ class Agent:
             # The confidence gate exists to stop the agent acting on a page it does not understand, and a
             # READ is not acting: it changes nothing and is what one does when unsure what the page says.
             # Routing it to recovery spent the recovery budget on the page that held the answer.
+            if uncertain and state.ready_plan is None:
+                # Unsure without the requirements: the plan is already in flight and costs less than recovery.
+                await state.await_plan()
+                continue
             if (uncertain and decision.operation is not Operation.READ) or decision.operation is Operation.ESCALATE:
                 await self._recover(state, observation, f"uncertain next step ({decision.confidence:.2f})")
                 continue
@@ -464,11 +470,14 @@ class Agent:
 
     async def _text(self, state: _RunState, observation: Observation, target: Control) -> str:
         secrets = tuple(ref.name for ref in self._secrets.available()) if self._secrets else ()
+        origin = self._target_origin(target)
+        if target.sensitive:
+            return await self._sensitive_text(state, observation, target, secrets, origin)
         criteria: dict[str, JsonValue] = {
             f"input:{k}": f"The provided value named {k}: {v}" for k, v in state.inputs.items()
         }
-        criteria |= {f"secret:{name}": f"The stored secret named {name}" for name in secrets}
-        criteria[GENERATE] = "None of these; write new text from the task and notes."
+        criteria |= {f"secret:{name}": f"The stored secret named {name} (value hidden)" for name in secrets}
+        criteria[GENERATE] = "None of these; write new text stated in the task or notes."
         choice = (
             await self._ask_choice(state, observation, f"What should be typed into {target.label!r}?", criteria)
             if len(criteria) > 1
@@ -477,8 +486,23 @@ class Agent:
         if choice.startswith("input:"):
             return state.inputs[choice.removeprefix("input:")]
         if choice.startswith("secret:"):
-            return await self._secret(choice.removeprefix("secret:"), self._target_origin(target))
+            return await self._secret(choice.removeprefix("secret:"), origin)
         return await self._generate_text(state, observation, target)
+
+    async def _sensitive_text(
+        self, state: _RunState, observation: Observation, target: Control, secrets: tuple[str, ...], origin: str
+    ) -> str:
+        """A password field takes a stored secret or nothing: a generated value is at best a guess, and a guess
+        that happens to work (a demo site's well-known password) is a pass nobody authorized."""
+        match secrets:
+            case ():
+                raise _Stop(Status.NEEDS_LOGIN, f"{target.label!r} wants a secret and none is stored")
+            case (only,):
+                return await self._secret(only, origin)
+            case _:
+                criteria: dict[str, JsonValue] = {name: f"The stored secret named {name}" for name in secrets}
+                question = f"Which stored secret belongs in {target.label!r}?"
+                return await self._secret(await self._ask_choice(state, observation, question, criteria), origin)
 
     def _raw_target(self, target: Control) -> Control:
         if self._raw_observation is not None:
