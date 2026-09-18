@@ -138,15 +138,38 @@ The exit code is 0 only for `complete`.
 ## Embed it
 
 ```python
+import asyncio
+
+from pydantic import BaseModel
+
 from fastbrowse import run_task
 from fastbrowse.models import Limits
 
-result = await run_task(
-    "Find the cheapest kettle and tell me its price.",
-    start="https://example.com/",
-    output_schema=Kettle,  # any pydantic model
-    limits=Limits(max_dollars=0.10),
-)
+
+class Release(BaseModel):
+    package: str
+    version: str
+
+
+async def main() -> None:
+    result = await run_task(
+        "Find the httpx package and report its name and latest released version.",
+        start="https://pypi.org/",
+        output_schema=Release,
+        limits=Limits(max_dollars=0.10),
+    )
+    print(result.status, result.data, f"${result.cost.known_dollars:.4f}")
+    for evidence in result.evidence:
+        print(f'  "{evidence.quote}" from {evidence.url}')
+
+
+asyncio.run(main())
+```
+
+```
+complete {'package': 'httpx', 'version': '0.28.1'} $0.0114
+  "httpx 0.28.1" from https://pypi.org/project/httpx/
+  "pip install httpx" from https://pypi.org/project/httpx/
 ```
 
 `run_task` builds the browser and clients, runs the agent, and closes the browser on every path.
