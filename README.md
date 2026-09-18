@@ -23,20 +23,18 @@ Most browser agents generate each action from a screenshot. fastbrowse indexes t
 candidates and has [Jev](https://typesafe.ai), a choice model, **pick one**, so it cannot click
 something that was never on the page. Every claim in an answer cites a verbatim quote from the page.
 
-Six live tasks, two passes each, against hosted Browser Use on the same day, graded against each
-site's own API ([tasks and method](docs/evals.md)):
+![fastbrowse finding one-way Zürich → London flights on Google Flights in 14.6s](docs/assets/demo.gif)
 
-| | passed | correct answer | median time | mean time | cost per task |
-|:--|:--|:--|:--|:--|:--|
-| **fastbrowse** (cloud browser) | **12/12** | 12/12 | **12.9s** | **15.4s** | **$0.0072** |
-| hosted Browser Use | 11/12 | 11/12 | 14.7s | 25.8s | $0.3767 |
+Same day, same cloud browser, same limits (30 steps, $0.25, 300s), each arm graded only on the tasks its
+output can be graded on ([tasks, method and per-category results](docs/evals.md#head-to-head)):
 
-Faster on median and mean at about a fiftieth of the cost; hosted is still 1 to 2.6s ahead on three
-of the six tasks ([per task](docs/evals.md#results)). Twelve runs is a smoke test, not a benchmark:
-single runs swing by 4 to 5 seconds.
+| | graded on | passed | median time | cost per task |
+|:--|:--|:--|:--|:--|
+| **fastbrowse** | all 21 tasks | 54/63 | 19.6s | $0.0135 |
+| [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | 6 navigation tasks (fastbrowse: 15/18, 10.1s, $0.0115) | 8/18 | 11.9s | **$0.0044** |
+| hosted Browser Use | 14 answer tasks (fastbrowse: 36/42, 21.5s, $0.0151) | 5/14 | 28.5s | $0.3878 |
 
-The suite has since grown to 15 tasks: sign-ins (optionally from Bitwarden), a checkout, a stop before
-paying and Google Flights. fastbrowse alone passes 12 of them ([results](docs/evals.md#full-suite)).
+jev-ultrafast is cheaper where both pass; hosted Browser Use's 9 failures all ran past the $0.25 cap.
 
 ## How it works
 
