@@ -59,7 +59,7 @@ LIMITS = Limits(max_steps=MAX_STEPS, max_dollars=MAX_DOLLARS, max_seconds=MAX_SE
 """Every arm's bound. Hosted Browser Use takes the dollar cap and is stopped at the time limit, but has no step
 cap to set."""
 
-ULTRAFAST = "jev-ultrafast @ git+https://github.com/browser-use/jev-ultrafast@452c1ad2dd628008f1d5608f28158d76e49e6cc0"
+ULTRAFAST = "jev-ultrafast @ git+https://github.com/browser-use/jev-ultrafast@1231850a0bf1a0c0341fe408ef1668dbbfdfac46"
 ULTRAFAST_RUNNER = Path(__file__).resolve().parents[3] / "scripts" / "ultrafast_arm.py"
 ULTRAFAST_COMMAND = ("uv", "run", "--no-project", "--quiet", "--python", "3.14", "--with", ULTRAFAST, "python")
 ULTRAFAST_TEXT_MODEL = "inception/mercury-2.5"
