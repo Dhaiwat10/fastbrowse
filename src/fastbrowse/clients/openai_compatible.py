@@ -2,6 +2,7 @@
 
 import base64
 from collections.abc import Mapping, Sequence
+from enum import StrEnum
 from typing import assert_never
 
 import httpx
@@ -79,6 +80,14 @@ def _total_cost(costs: Sequence[CostLine], purpose: LLMPurpose) -> CostLine:
     )
 
 
+class ReasoningEffort(StrEnum):
+    """How much hidden reasoning a model may spend before it answers, in OpenRouter's normalized terms."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class OpenAICompatibleLLM:
     def __init__(
         self,
@@ -87,11 +96,13 @@ class OpenAICompatibleLLM:
         http: httpx.AsyncClient,
         base_url: str,
         models: Mapping[LLMPurpose, str],
+        reasoning_effort: ReasoningEffort | None = None,
     ) -> None:
         self._api_key = api_key
         self._http = http
         self._base_url = base_url.rstrip("/")
         self._models = dict(models)
+        self._reasoning_effort = reasoning_effort
 
     async def _request(self, body: dict[str, JsonValue]) -> dict[str, JsonValue]:
         response = await post_with_retry(
@@ -135,6 +146,8 @@ class OpenAICompatibleLLM:
                 },
             },
         }
+        if self._reasoning_effort is not None:
+            body["reasoning"] = {"effort": self._reasoning_effort.value}
         costs: list[CostLine] = []
         for attempt in range(2):
             if ledger is not None:

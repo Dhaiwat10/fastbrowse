@@ -9,7 +9,7 @@ import os
 
 import httpx
 
-from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM
+from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM, ReasoningEffort
 from fastbrowse.clients.typesafe import TypeSafeJevClient
 from fastbrowse.clients.vercel import VercelGatewayJevClient
 from fastbrowse.jev import JevClient
@@ -33,6 +33,12 @@ DEFAULT_LLM = "google/gemini-3.8-flash"
 FIELD_TEXT_LLM = "google/gemini-3.5-flash-lite"
 
 DEFAULT_MODELS = dict.fromkeys(LLMPurpose, DEFAULT_LLM) | {LLMPurpose.FIELD_TEXT: FIELD_TEXT_LLM}
+
+# gemini-3.8-flash reasons before every answer unless told otherwise, and cannot be told not to: it
+# rejects reasoning disabled outright. It can be told to reason less. Measured on the plan and read
+# request shapes, the default spent 150 to 275 hidden tokens planning, and `low` took plan from 4.6s to
+# 3.2s and read from 2.4s to 2.1s on the same model. FASTBROWSE_LLM_REASONING overrides it.
+DEFAULT_REASONING = ReasoningEffort.LOW
 
 
 class MissingKeyError(RuntimeError):
@@ -61,5 +67,9 @@ def llm_from_environment(http: httpx.AsyncClient) -> LLMClient:
     if not key:
         raise MissingKeyError("set OPENROUTER_API_KEY for the LLM")
     return OpenAICompatibleLLM(
-        key, http=http, base_url="https://openrouter.ai/api/v1", models=models_from_environment()
+        key,
+        http=http,
+        base_url="https://openrouter.ai/api/v1",
+        models=models_from_environment(),
+        reasoning_effort=ReasoningEffort(os.environ.get("FASTBROWSE_LLM_REASONING", DEFAULT_REASONING)),
     )
