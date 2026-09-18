@@ -26,14 +26,23 @@ from a stored capture of the page.
 
 Same six live tasks, two passes each, against hosted Browser Use ([method](docs/evals.md)):
 
-| | passed | time per task | cost per task |
-|:--|:--|:--|:--|
-| **fastbrowse** (cloud browser) | 11/12 | 26.7s | **$0.0160** |
-| hosted Browser Use | 11/12 | 27.4s | $0.4236 |
+| | passed | correct answer | median time | mean time | cost per task |
+|:--|:--|:--|:--|:--|:--|
+| **fastbrowse** (cloud browser) | 11/12 | 12/12 | **18.1s** | 27.6s | **$0.0152** |
+| fastbrowse, previous build | 11/12 | | 27.5s | 26.7s | $0.0160 |
+| hosted Browser Use | 11/12 | not graded apart | 16.9s | 27.4s | $0.4236 |
+
+**Speed.** This build cut the median task by a third, 27.5s to 18.1s, and every lookup on the second
+pass finished in 11 to 19s. Four changes did it: a direct address for the task proposed while the
+start page loads, settling on DOM quiet instead of every image and tracker, short facts picked by
+Jev instead of read by the LLM, and one fewer browser round trip per click. The mean has not moved
+yet because it is carried by provider stalls (one 26s plan call, 34s of Jev in one run); cutting
+those tails is next ([details](docs/evals.md#results)).
 
 Twelve runs is a smoke test, not a benchmark: read it as "both finish these, at about the same
-speed, and fastbrowse costs about a twenty-sixth". Our miss was a correct answer that one claim's
-quote could not back, so it reported `unverified` instead of `complete`.
+speed, and fastbrowse costs about a twenty-eighth". `passed` counts only `complete`; our miss had
+the right answer but could not confirm the cart on the page, so it reported `unverified`. The
+hosted row was measured once, on 2026-09-17.
 
 ## How it compares
 

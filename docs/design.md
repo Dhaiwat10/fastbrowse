@@ -3,7 +3,7 @@
 fastbrowse splits a browser agent into three owners:
 
 - **Jev picks.** Each step, one batched Jev request chooses the operation and its target from indexed page candidates, and answers yes/no checks (did the last step work, is login required, is this concrete action irreversible, is the task complete).
-- **An LLM reads and writes.** Planning (requirements, subgoals, postconditions), reading page content for answers, writing non-secret field text, recovering when Jev is unsure, verifying completion in the uncertain band, composing the final answer.
+- **An LLM reads and writes.** Proposing a direct address for the task while the start page loads, planning (requirements, subgoals, postconditions), reading page content for answers when Jev cannot pick a short fact from quoted spans, writing non-secret field text, recovering when Jev is unsure, verifying completion in the uncertain band, composing the final answer.
 - **Code owns the gates.** Freshness and hit-tests before every input, no automatic retry of a mutation, authorization for irreversible actions, secret resolution and redaction, budgets, and the definition of success: only `COMPLETE`, which requires every requirement evidenced.
 
 ## Browser capabilities over plain CDP (P0 spike, 2026-09-17)
@@ -14,7 +14,7 @@ Verified with `cdp-use==1.4.5` against local headless Chrome and a Browser Use c
 |---|---|---|---|
 | Own tab rendered | `Target.createTarget(background=not remote)` + `activateTarget` | pass | pass |
 | Upload caller bytes | in-page `DataTransfer` + `File` on the input, `input`/`change` events (no host path needed) | pass | pass |
-| Download bytes | `Fetch.enable` at Response stage, `Fetch.getResponseBody` on `Content-Disposition: attachment` | pass | pass |
+| Download bytes | `Fetch.enable` at Response stage for Document responses (download-attribute anchors included), `Fetch.getResponseBody` on `Content-Disposition: attachment` | pass | pass |
 | Cross-origin iframe | `Target.setAutoAttach(flatten)` on the page session, evaluate in the iframe session | pass | pass |
 | Popup ownership | `Target.targetCreated.openerId` equals our target | pass | pass |
 | Dialogs | `Page.javascriptDialogOpening` + `Page.handleJavaScriptDialog` | pass | pass |

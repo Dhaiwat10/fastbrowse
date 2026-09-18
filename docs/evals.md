@@ -31,16 +31,19 @@ The same prompts run through fastbrowse on a Browser Use Cloud browser and throu
 
 Both arms are graded on their answer. The fast arm is also graded on the URL it ended on. The hosted SDK exposes no final URL, so hosted navigation tasks rest on the answer alone.
 
-Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys. Rows are appended to `artifacts/evals/live.jsonl` with status, error and step trace.
+Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys. Rows are appended to `artifacts/evals/live.jsonl` with status, error, step trace, `correct` (the answer check alone, apart from `passed`, which also needs `complete`) and `seconds_by_call` (wall time per model call, by component and purpose). The summary prints both, per arm.
 
 ## Results
 
 Two passes of all six live tasks, 2026-09-18, `google/gemini-3.8-flash` at low reasoning effort behind Jev. The hosted row is from 2026-09-17 and was not rerun:
 
-| | passed | time per task | cost per task |
-|---|---|---|---|
-| fastbrowse on a cloud browser | 11/12 | 26.7s | $0.0160 |
-| hosted Browser Use | 11/12 | 27.4s | $0.4236 |
+| | passed | correct answer | median time | mean time | cost per task |
+|---|---|---|---|---|---|
+| fastbrowse on a cloud browser | 11/12 | 12/12 | 18.1s | 27.6s | $0.0152 |
+| fastbrowse, previous build | 11/12 | | 27.5s | 26.7s | $0.0160 |
+| hosted Browser Use | 11/12 | not graded apart | 16.9s | 27.4s | $0.4236 |
+
+Best of two passes per task, previous build to this one: pypi-version 17.6s to 11.4s, pypi-structured 20.4s to 13.8s, github-license 20.2s to 15.0s, wiki-godel 25.2s to 19.0s, hn-top unchanged at 11s, saucedemo-cart 33.9s to 47.1s (both passes escalated on the cart page; the change there is recovery, not these speedups). Medians are reported because twelve runs with a few provider stalls make the mean a measure of the stalls: hosted Browser Use's 27.4s mean is two Sauce Demo runs of 102s and 77s.
 
 **The cost gap is structural.** Picking from indexed candidates spends a fraction of the tokens that generating actions from screenshots does, and most of what is left is the LLM rather than Jev or the browser.
 
@@ -50,10 +53,15 @@ Two passes of all six live tasks, 2026-09-18, `google/gemini-3.8-flash` at low r
 - The plan running alongside the first steps instead of before them.
 - Merged and concurrent browser calls (a fill is 7 CDP calls, down from 13).
 - A 30s cap on a single LLM attempt, so a stuck request is retried rather than waited on.
+- A direct address for the task (the package, repository or article page) proposed by flash-lite while the start page loads, about 0.7s and hidden under the load. It stays on the start origin and returns nothing for account pages, carts and forms.
+- Settling after an action on an interactive document plus 200ms of DOM quiet, not on every image and tracker (a delayed-image navigation on the fixtures went from 1.41s to 0.67s).
+- Short facts read by one Jev choice over quoted spans before the LLM reader: 0.8s for the PyPI version, where the reader takes about 2.2s. Pages it cannot answer, or with too many candidates, fall back at little or no cost.
+
+**Where the time goes now.** Per task on the run above: Jev 7.3s, PLAN 5.1s, READ 4.2s, VERIFY 1.9s, COMPOSE 1.2s, RECOVER 1.1s, SHORTCUT 0.7s. The second pass ran every lookup in 11 to 19s; the mean is carried by provider tails (a single 26.1s PLAN call, 34s of Jev in one run) and by `saucedemo-cart` at 47s, which escalates and recovers on the cart page every time. Per-attempt deadlines or hedged requests on PLAN and Jev are the next lever.
 
 The local fixtures, simpler sites on a local Chrome, averaged 9.8s a task on the same build.
 
-The one fastbrowse miss answered correctly but could not quote one of its claims, so it reported `unverified`; the grader counts only `complete`.
+The one fastbrowse miss (`saucedemo-cart`) answered correctly but could not confirm the cart on the page, so it reported `unverified`; `passed` counts only `complete`, which is why `correct answer` is its own column.
 
 **Twelve runs is a smoke test, and noise is several seconds a task:** two runs of an identical build came out 36.3s and 40.7s. Read the score as "both arms usually finish these tasks" and the cost column as the real finding.
 
