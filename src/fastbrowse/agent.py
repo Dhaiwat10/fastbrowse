@@ -6,6 +6,7 @@ a DONE the verifier rejects at the end of the budget) is reported as what it is 
 
 import asyncio
 import hashlib
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ from fastbrowse.safety import (
     resolve_secret,
     secret_allowed,
 )
+from fastbrowse.shortcut import accept, propose_shortcut
 from fastbrowse.telemetry import BudgetExceeded, Ledger
 from fastbrowse.verification import (
     DoneVerdict,
@@ -63,7 +65,12 @@ GENERATE = "generate"
 # Long enough for a browser-verification page to run its check and hand over, short enough that a page
 # which never moves still ends as needs_login well inside a run's time budget.
 _INTERSTITIAL_SECONDS = 12.0
+# How long a shortcut may outlast the start page's load. Flash-lite answers in about 0.8s and a cloud page
+# loads in one to two, so a proposal later than this is an outlier costing more than it saves.
+_SHORTCUT_GRACE_SECONDS = 1.0
 _INTERSTITIAL_POLL_SECONDS = 0.5
+
+logger = logging.getLogger(__name__)
 
 type _Prepared = ComposedAnswer | asyncio.Task[Generation[ComposedAnswer]] | None
 """An answer ready before conclusion: the reader's facts Jev accepted as written, or a composer in flight."""
@@ -155,6 +162,7 @@ class Agent:
         self,
         task: str,
         *,
+        start: str | None = None,
         inputs: Mapping[str, str] | None = None,
         attachments: Sequence[Attachment] = (),
         output_schema: type[BaseModel] | None = None,
@@ -170,6 +178,7 @@ class Agent:
         deadline = asyncio.timeout(ledger.limits.max_seconds)
         try:
             async with deadline:
+                history = [] if start is None else await self._open(task, start, ledger)
                 observation = await self._observe()
                 # The plan is needed to read, to judge DONE and to answer, and the first fills and clicks
                 # usually come before all three, so it is written while they run instead of ahead of them.
@@ -177,6 +186,7 @@ class Agent:
                 state = _RunState(
                     task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planning
                 )
+                state.history.extend(history)
                 return await self._loop(state, output_schema, until)
         except _Stop as stop:
             return self._result(state, ledger, stop.status, error=stop.error)
@@ -240,6 +250,33 @@ class Agent:
                 await self._step(state, observation, decision)
             except _Unsure as unsure:
                 await self._recover(state, observation, str(unsure))
+
+    async def _open(self, task: str, start: str, ledger: Ledger) -> list[HistoryEntry]:
+        """Open `start`, or a direct address for the task on its site when one is proposed in time.
+
+        The proposal is written while the start page loads, so it costs no wall time unless it outlasts the load,
+        and the start page stays one BACK away for when the shortcut lands somewhere unhelpful.
+        """
+        proposing = asyncio.create_task(propose_shortcut(self._llm, task, start, ledger=ledger))
+        try:
+            await self._page.navigate(start)
+            proposal = await asyncio.wait_for(asyncio.shield(proposing), _SHORTCUT_GRACE_SECONDS)
+        except TimeoutError, LLMError:
+            return []
+        finally:
+            await _discard(proposing)
+        ledger.record(proposal.cost)
+        shortcut = accept(proposal.data.url, start)
+        if shortcut is None:
+            return []
+        try:
+            await self._page.navigate(shortcut)
+        except BrowserError:
+            logger.warning("shortcut %s did not load; staying on the start page", shortcut)
+            await self._page.navigate(start)
+            return []
+        note = f"opened {shortcut} directly instead of clicking there; the start page {start} is one BACK away"
+        return [HistoryEntry(operation=None, target=None, outcome=StepOutcome.EXECUTED, page_changed=True, note=note)]
 
     async def _outwait(self, stuck: Observation) -> bool:
         """Re-observe until the page is no longer `stuck`, returning whether it moved in time."""

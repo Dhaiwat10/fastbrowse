@@ -77,7 +77,8 @@ class ObservationTooLarge(RuntimeError):
 
 
 class HistoryEntry(Frozen):
-    operation: Operation
+    operation: Operation | None
+    """None for a move code made before Jev's first step, such as opening a shortcut address."""
     target: str | None
     outcome: StepOutcome
     page_changed: bool

@@ -99,9 +99,9 @@ async def run_task(
                     session = BrowserSession(connection, sink)
                     async with session:
                         page = CdpPage(session, config)
-                        await page.navigate(start)
                         result = await Agent(page, jev, llm, config=config, secrets=secrets, on_event=on_event).run(
                             task,
+                            start=start,
                             output_schema=output_schema,
                             inputs=inputs,
                             attachments=attachments,

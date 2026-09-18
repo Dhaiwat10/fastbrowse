@@ -2,7 +2,7 @@
 
 Jev: TYPESAFE_API_KEY (direct) or AI_GATEWAY_API_KEY (Vercel AI Gateway). LLM: OPENROUTER_API_KEY.
 Cloud browser: BROWSER_USE_API_KEY. FASTBROWSE_LLM_MODEL overrides every purpose at once, and
-FASTBROWSE_LLM_MODEL_<PURPOSE> (PLAN, READ, FIELD_TEXT, RECOVER, COMPOSE, VERIFY) overrides one.
+FASTBROWSE_LLM_MODEL_<PURPOSE> (PLAN, READ, FIELD_TEXT, RECOVER, COMPOSE, VERIFY, SHORTCUT) overrides one.
 FASTBROWSE_LLM_REASONING sets the reasoning effort: low (default), medium or high. FASTBROWSE_CHROME
 names the Chrome binary. `.env.example` lists them all. A real environment variable beats `.env`.
 """
@@ -36,7 +36,13 @@ DEFAULT_LLM = "google/gemini-3.8-flash"
 # using a small model for its only LLM call, which is this one.
 FIELD_TEXT_LLM = "google/gemini-3.5-flash-lite"
 
-DEFAULT_MODELS = dict.fromkeys(LLMPurpose, DEFAULT_LLM) | {LLMPurpose.FIELD_TEXT: FIELD_TEXT_LLM}
+# SHORTCUT shares that asymmetry: its only output is an address code confines to the start origin, and a
+# wrong one costs a page load and a BACK, not a conclusion. It runs while the start page loads, so its
+# latency is hidden only while it stays under a page load.
+DEFAULT_MODELS = dict.fromkeys(LLMPurpose, DEFAULT_LLM) | {
+    LLMPurpose.FIELD_TEXT: FIELD_TEXT_LLM,
+    LLMPurpose.SHORTCUT: FIELD_TEXT_LLM,
+}
 
 # gemini-3.8-flash reasons before every answer unless told otherwise, and cannot be told not to: it
 # rejects reasoning disabled outright. It can be told to reason less. Measured on the plan and read
@@ -67,6 +73,7 @@ class Settings(BaseSettings):
     llm_model_recover: str | None = None
     llm_model_compose: str | None = None
     llm_model_verify: str | None = None
+    llm_model_shortcut: str | None = None
     llm_reasoning: ReasoningEffort = DEFAULT_REASONING
     chrome: str | None = None
 
@@ -90,6 +97,8 @@ class Settings(BaseSettings):
                 return self.llm_model_compose
             case LLMPurpose.VERIFY:
                 return self.llm_model_verify
+            case LLMPurpose.SHORTCUT:
+                return self.llm_model_shortcut
             case _:
                 assert_never(purpose)
 

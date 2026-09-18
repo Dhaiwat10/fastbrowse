@@ -41,9 +41,9 @@ async def run_task(
     started = time.monotonic()
     async with BrowserSession(connection, sink) as session:
         page = CdpPage(session, config)
-        await page.navigate(base_url + task.start)
         result = await Agent(page, jev, llm, config=config).run(
             task.task,
+            start=base_url + task.start,
             inputs=task.inputs,
             output_schema=task.output_schema,
             limits=Limits(max_steps=25, max_dollars=0.25, max_seconds=180),

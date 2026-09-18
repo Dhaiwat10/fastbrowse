@@ -109,6 +109,7 @@ class LLMPurpose(StrEnum):
     RECOVER = "recover"
     VERIFY = "verify"
     COMPOSE = "compose"
+    SHORTCUT = "shortcut"
 
 
 class CostLine(Frozen):
