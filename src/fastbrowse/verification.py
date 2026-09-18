@@ -55,7 +55,6 @@ class Extraction(Frozen):
     data: JsonValue | None
     evidence: tuple[Evidence, ...]
     problem: str | None
-    cost: tuple[CostLine, ...]
 
 
 def page_state(observation: Observation, notes: Notes, max_note_chars: int = 8000) -> JsonValue:
@@ -176,7 +175,7 @@ async def llm_verify(
 
 async def check_claims(
     jev: JevClient, composed: ComposedAnswer, notes: Notes, thresholds: Thresholds, *, ledger: Ledger | None = None
-) -> tuple[bool, CostLine]:
+) -> bool:
     """True when no check says a claim is unsupported, contradicted, or a requirement is omitted."""
     if ledger is not None:
         ledger.reserve(CostComponent.JEV)
@@ -184,7 +183,7 @@ async def check_claims(
     if ledger is not None:
         ledger.record(evaluation.cost)
     worst = max((_probability(evaluation.answers, key) for key in evaluation.answers), default=0.0)
-    return worst <= thresholds.claim_problem_above and composed.dropped_claims == 0, evaluation.cost
+    return worst <= thresholds.claim_problem_above and composed.dropped_claims == 0
 
 
 async def extract(
@@ -202,10 +201,8 @@ async def extract(
     values: dict[str, JsonValue] = {}
     evidence: list[Evidence] = []
     text_fields = {name: field for name, field in schema.model_fields.items() if field.annotation is str}
-    cost: list[CostLine] = []
     if text_fields:
-        proposed, text_cost = await propose_text_fields(llm, task, capture, text_fields, ledger=ledger)
-        cost.extend(text_cost)
+        proposed, _ = await propose_text_fields(llm, task, capture, text_fields, ledger=ledger)
         for name, (value, quoted) in proposed.items():
             values[name] = value
             evidence.append(quoted)
@@ -214,13 +211,13 @@ async def extract(
             continue
         candidates = field_candidates(capture, field)
         if isinstance(candidates, UnsupportedField):
-            return Extraction(data=None, evidence=(), problem=f"{name}: {candidates.reason}", cost=tuple(cost))
+            return Extraction(data=None, evidence=(), problem=f"{name}: {candidates.reason}")
         if not candidates:
             continue
         try:
             question = field_question(field, candidates, name=name, task=task, record_fields=tuple(schema.model_fields))
         except ValueError as error:
-            return Extraction(data=None, evidence=tuple(evidence), problem=f"{name}: {error}", cost=tuple(cost))
+            return Extraction(data=None, evidence=tuple(evidence), problem=f"{name}: {error}")
         if ledger is not None:
             ledger.reserve(CostComponent.JEV)
         evaluation = await jev.evaluate(
@@ -228,17 +225,26 @@ async def extract(
         )
         if ledger is not None:
             ledger.record(evaluation.cost)
-        cost.append(evaluation.cost)
         answer = evaluation.answers.get(name)
         copied = copy_field(answer, candidates) if answer is not None and answer.type == "choice" else None
         if copied is not None:
             values[name] = str(copied[0]) if not isinstance(copied[0], int | float | bool | str) else copied[0]
             evidence.append(copied[1])
+    # A default the page never showed is the caller's placeholder, not data; only None may stand for absent.
+    unsupported = [
+        name
+        for name, field in schema.model_fields.items()
+        if name not in values and not field.is_required() and field.get_default(call_default_factory=True) is not None
+    ]
+    if unsupported:
+        return Extraction(
+            data=None, evidence=tuple(evidence), problem=f"no value on the page for {', '.join(unsupported)}"
+        )
     try:
         data = schema.model_validate(values).model_dump(mode="json")
     except ValidationError as error:
-        return Extraction(data=None, evidence=tuple(evidence), problem=str(error)[:500], cost=tuple(cost))
-    return Extraction(data=data, evidence=tuple(evidence), problem=None, cost=tuple(cost))
+        return Extraction(data=None, evidence=tuple(evidence), problem=str(error)[:500])
+    return Extraction(data=data, evidence=tuple(evidence), problem=None)
 
 
 def _probability(answers: Mapping[str, object], key: str) -> float:

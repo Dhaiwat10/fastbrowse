@@ -35,14 +35,13 @@ from fastbrowse.models import (
     StepResult,
     UntilCheck,
 )
-from fastbrowse.page import Action, ActResult, Capture, Control, Observation, Page
+from fastbrowse.page import Action, ActResult, BrowserError, Capture, Control, Observation, Page
 from fastbrowse.planner import Plan, RequirementKind, make_plan
 from fastbrowse.policy import Decision, HistoryEntry, ObservationTooLarge, StepContext, decide
 from fastbrowse.retrieval import ComposedAnswer, compose, draft_answer, read
 from fastbrowse.safety import (
     Redactor,
     irreversible_question,
-    is_authorized,
     may_be_irreversible,
     origin_of,
     resolve_secret,
@@ -71,7 +70,13 @@ type _Prepared = ComposedAnswer | asyncio.Task[Generation[ComposedAnswer]] | Non
 
 
 class _FieldText(Frozen):
-    text: str = Field(description="Exactly the text to type into the field, with no commentary.")
+    missing: bool = Field(
+        description=(
+            "True when the field wants a fact about the user (a phone number, address, account or order id) "
+            "that the task and notes do not contain. Such a value is never invented."
+        )
+    )
+    text: str = Field(description="Exactly the text to type into the field, with no commentary; empty when missing.")
 
 
 class _Recovery(Frozen):
@@ -81,11 +86,14 @@ class _Recovery(Frozen):
 
 
 class _Stop(Exception):
-    def __init__(self, status: Status, error: str | None = None, resume_token: str | None = None) -> None:
+    def __init__(self, status: Status, error: str | None = None) -> None:
         super().__init__(error or status.value)
         self.status = status
         self.error = error
-        self.resume_token = resume_token
+
+
+class _Unsure(Exception):
+    """The next action is authorized but not clearly the right one: a case for recovery, not for the caller."""
 
 
 @dataclass(slots=True)
@@ -142,21 +150,30 @@ class Agent:
         ledger = Ledger(limits or Limits())
         self._artifact_start = len(self._page.artifacts)
         state: _RunState | None = None
+        # The ledger checks `max_seconds` between operations; only a deadline around the awaits bounds a
+        # browser or provider call that never returns.
+        deadline = asyncio.timeout(ledger.limits.max_seconds)
         try:
-            observation = await self._observe()
-            planned = await make_plan(self._llm, task, observation, ledger=ledger)
-            ledger.record(planned.cost)
-            state = _RunState(
-                task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planned.data
-            )
-            return await self._loop(state, output_schema, until)
+            async with deadline:
+                observation = await self._observe()
+                planned = await make_plan(self._llm, task, observation, ledger=ledger)
+                ledger.record(planned.cost)
+                state = _RunState(
+                    task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planned.data
+                )
+                return await self._loop(state, output_schema, until)
         except _Stop as stop:
-            return self._result(state, ledger, stop.status, error=stop.error, resume_token=stop.resume_token)
+            return self._result(state, ledger, stop.status, error=stop.error)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            limit = f"time limit {ledger.limits.max_seconds}s reached"
+            return self._result(state, ledger, Status.BUDGET_EXCEEDED, error=limit)
         except BudgetExceeded as error:
             return self._result(state, ledger, Status.BUDGET_EXCEEDED, error=str(error))
         except ObservationTooLarge as error:
             return self._result(state, ledger, Status.OBSERVATION_LIMIT, error=str(error))
-        except (JevError, LLMError) as error:
+        except (JevError, LLMError, BrowserError) as error:
             return self._result(state, ledger, Status.ERROR, error=self._redactor.redact(str(error))[:500])
 
     async def _loop(
@@ -193,7 +210,10 @@ class Agent:
                 if result is not None:
                     return result
                 continue
-            await self._step(state, observation, decision)
+            try:
+                await self._step(state, observation, decision)
+            except _Unsure as unsure:
+                await self._recover(state, observation, str(unsure))
 
     async def _outwait(self, stuck: Observation) -> bool:
         """Re-observe until the page is no longer `stuck`, returning whether it moved in time."""
@@ -403,19 +423,24 @@ class Agent:
         self, state: _RunState, observation: Observation, decision: Decision, label: str, question: NoulQuestion
     ) -> None:
         thresholds = self._config.thresholds
+        authorized = state.authorization.irreversible_actions
+        # Authorized and confident proceeds whatever Jev would say about the action, so it is not asked.
+        if authorized and decision.confidence >= thresholds.sensitive_act_from:
+            return
         state.ledger.reserve(CostComponent.JEV)
+        # Only the address goes with the question: the page's own text is what would argue a harmful action
+        # is harmless, and the control's label and form are already in the question.
         evaluation = await self._jev.evaluate(
-            page_state(observation, state.notes),
-            {"irreversible": question},
+            {"page": {"url": observation.url, "title": observation.title}}, {"irreversible": question}
         )
         state.ledger.record(evaluation.cost)
         answer = evaluation.answers.get("irreversible")
         if isinstance(answer, NoulAnswer) and answer.probability <= thresholds.irreversible_above:
             return
-        if is_authorized(state.authorization) and decision.confidence >= thresholds.sensitive_act_from:
-            return
-        token = hashlib.sha256(f"{state.task}|{observation.url}|{label}".encode()).hexdigest()[:24]
-        raise _Stop(Status.NEEDS_CONFIRMATION, f"{decision.operation.value} {label!r} needs confirmation", token)
+        what = f"{decision.operation.value} {label!r}"
+        if authorized:
+            raise _Unsure(f"unsure {what} is the irreversible action the task means ({decision.confidence:.2f})")
+        raise _Stop(Status.NEEDS_CONFIRMATION, f"{what} needs confirmation")
 
     async def _text(self, state: _RunState, observation: Observation, target: Control) -> str:
         secrets = tuple(ref.name for ref in self._secrets.available()) if self._secrets else ()
@@ -473,6 +498,8 @@ class Agent:
             ledger=state.ledger,
         )
         state.ledger.record(generation.cost)
+        if generation.data.missing:
+            raise _Stop(Status.NEEDS_INPUT, f"{target.label!r} needs a value the task does not give")
         return generation.data.text
 
     async def _choose(self, state: _RunState, observation: Observation, question: str, options: Sequence[str]) -> str:
@@ -638,8 +665,7 @@ class Agent:
         return self._redactor.redact(composed.data.answer), await self._holds(state, composed.data)
 
     async def _holds(self, state: _RunState, answer: ComposedAnswer) -> bool:
-        ok, _ = await check_claims(self._jev, answer, state.notes, self._config.thresholds, ledger=state.ledger)
-        return ok
+        return await check_claims(self._jev, answer, state.notes, self._config.thresholds, ledger=state.ledger)
 
     async def _extraction(self, state: _RunState, output_schema: type[BaseModel]) -> Extraction:
         """The caller's schema, filled from a capture taken inside this branch so it overlaps the answer."""
@@ -687,16 +713,12 @@ class Agent:
         return any(r.kind is RequirementKind.INFORMATION for r in state.notes.unresolved(state.plan))
 
     def _context(self, state: _RunState, *, check_login: bool) -> StepContext:
-        last = state.steps[-1] if state.steps else None
         return StepContext(
             task=state.task,
             subgoal=state.hint,
             requirements=tuple(r.text for r in state.plan.requirements),
             notes=state.notes.render(4000),
             history=tuple(state.history[-self._config.observation.history_entries :]),
-            previous_intent=f"{last.operation.value} {last.target}"
-            if last and last.operation is not Operation.READ
-            else None,
             check_login=check_login,
             has_attachments=bool(state.attachments),
         )
@@ -711,7 +733,6 @@ class Agent:
         data: JsonValue | None = None,
         evidence: tuple[Evidence, ...] = (),
         error: str | None = None,
-        resume_token: str | None = None,
     ) -> RunResult:
         return RunResult(
             status=status,
@@ -721,9 +742,8 @@ class Agent:
             steps=tuple(state.steps) if state else (),
             cost=ledger.breakdown(),
             artifacts=self._page.artifacts[self._artifact_start :],
-            final_url=state.last_page[0] if state and state.last_page else None,
+            final_url=self._redactor.redact(state.last_page[0]) if state and state.last_page else None,
             error=error,
-            resume_token=resume_token,
         )
 
 

@@ -18,7 +18,7 @@ class Status(StrEnum):
     UNVERIFIED = "unverified"
     """The run believes it finished but could not evidence every requirement."""
     NEEDS_CONFIRMATION = "needs_confirmation"
-    """Paused before an irreversible action the caller has not authorized; resume with `resume_token`."""
+    """Stopped before an irreversible action the caller has not authorized, having committed nothing."""
     NEEDS_LOGIN = "needs_login"
     """Authentication is required and no authorized credential covers this origin."""
     NEEDS_INPUT = "needs_input"
@@ -50,7 +50,6 @@ class Operation(StrEnum):
 class Decider(StrEnum):
     JEV = "jev"
     LLM = "llm"
-    CODE = "code"
 
 
 class StepOutcome(StrEnum):
@@ -155,7 +154,6 @@ class RunResult(Frozen):
     cost: CostBreakdown
     artifacts: tuple[Artifact, ...]
     error: str | None = None
-    resume_token: str | None = None
     final_url: str | None = None
     """Where the browser was last observed; what a caller checks when the task was to arrive somewhere."""
 
@@ -212,19 +210,6 @@ class StepEvent(Frozen):
     step: StepResult
 
 
-class ScreenshotEvent(Frozen):
-    type: Literal["screenshot"] = "screenshot"
-    step_index: int
-    url: str
-    jpeg: bytes
-
-
-class StatusEvent(Frozen):
-    type: Literal["status"] = "status"
-    message: str
-
-
-type RunEvent = StepEvent | ScreenshotEvent | StatusEvent
-type EventHandler = Callable[[RunEvent], Awaitable[None]]
+type EventHandler = Callable[[StepEvent], Awaitable[None]]
 type UntilCheck = Callable[[str], Awaitable[bool]]
 """Caller assertion over the final page URL; COMPLETE requires it to return True when supplied."""

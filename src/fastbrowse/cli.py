@@ -13,8 +13,8 @@ import os
 import sys
 from pathlib import Path
 
-from fastbrowse.clients.environment import MissingKeyError
-from fastbrowse.models import Authorization, Limits, RunEvent, SecretRef, StepEvent
+from fastbrowse.clients.environment import ConfigurationError
+from fastbrowse.models import Authorization, Limits, SecretRef, StepEvent
 from fastbrowse.run import run_task
 from fastbrowse.safety import origin_of
 
@@ -32,13 +32,20 @@ class EnvironmentSecrets:
         return os.environ.get(variable) if variable and origin == self._origin else None
 
 
+def _secret(pair: str) -> tuple[str, str]:
+    name, sep, variable = pair.partition("=")
+    if not (sep and name and variable):
+        raise argparse.ArgumentTypeError(f"expected NAME=ENV_VAR, got {pair!r}")
+    return name, variable
+
+
 def _parse(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="fastbrowse", description="Run one browser task.")
     parser.add_argument("task")
     parser.add_argument("--start", required=True, help="URL to open before the task starts")
     parser.add_argument("--cloud", action="store_true", help="use a Browser Use Cloud browser")
     parser.add_argument("--authorize", action="store_true", help="allow submit/pay/delete/send without pausing")
-    parser.add_argument("--secret", action="append", default=[], metavar="NAME=ENV_VAR")
+    parser.add_argument("--secret", action="append", default=[], type=_secret, metavar="NAME=ENV_VAR")
     parser.add_argument("--max-steps", type=int, default=60)
     parser.add_argument("--max-dollars", type=float, default=None)
     parser.add_argument("--downloads", type=Path, default=None, help="directory for downloaded files")
@@ -51,18 +58,17 @@ def _browser_key(cloud: bool) -> str | None:
         return None
     key = os.environ.get("BROWSER_USE_API_KEY")
     if not key:
-        raise MissingKeyError("set BROWSER_USE_API_KEY for --cloud")
+        raise ConfigurationError("set BROWSER_USE_API_KEY for --cloud")
     return key
 
 
-async def _print_step(event: RunEvent) -> None:
-    if isinstance(event, StepEvent):
-        step = event.step
-        print(f"  {step.index:>2} {step.operation.value} {step.target or ''} -> {step.outcome.value}", file=sys.stderr)
+async def _print_step(event: StepEvent) -> None:
+    step = event.step
+    print(f"  {step.index:>2} {step.operation.value} {step.target or ''} -> {step.outcome.value}", file=sys.stderr)
 
 
 async def run(args: argparse.Namespace) -> int:
-    names = dict(pair.split("=", 1) for pair in args.secret)
+    names = dict(args.secret)
     result = await run_task(
         args.task,
         start=args.start,
@@ -85,5 +91,5 @@ def main() -> None:
     args = _parse(sys.argv[1:])
     try:
         sys.exit(asyncio.run(run(args)))
-    except MissingKeyError as exc:
+    except ConfigurationError as exc:
         sys.exit(f"fastbrowse: {exc}")

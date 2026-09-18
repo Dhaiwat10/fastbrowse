@@ -81,24 +81,17 @@ def context(**changes: object) -> StepContext:
         requirements=(),
         notes="",
         history=(),
-        previous_intent=None,
         check_login=False,
         has_attachments=False,
     )
     return base.model_copy(update=changes)
 
 
-async def test_picks_target_for_chosen_operation_and_asks_prev_ok_only_with_intent() -> None:
+async def test_picks_target_for_chosen_operation() -> None:
     jev = ScriptedJev({"operation": "click", "click_target": "b3"})
     history = (HistoryEntry(operation=Operation.SCROLL, target=None, outcome=StepOutcome.EXECUTED, page_changed=True),)
-    decision = await decide(
-        jev,
-        observation(tuple(button(i) for i in range(5))),
-        context(history=history, previous_intent="scroll"),
-        Config(),
-    )
+    decision = await decide(jev, observation(tuple(button(i) for i in range(5))), context(history=history), Config())
     assert (decision.operation, decision.target and decision.target.id) == (Operation.CLICK, "b3")
-    assert decision.prev_ok == 0.8
     assert decision.login_required is None
 
 

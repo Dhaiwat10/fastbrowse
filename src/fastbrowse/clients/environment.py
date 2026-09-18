@@ -3,6 +3,7 @@
 Jev: TYPESAFE_API_KEY (direct) or AI_GATEWAY_API_KEY (Vercel AI Gateway).
 LLM: OPENROUTER_API_KEY. FASTBROWSE_LLM_MODEL overrides every purpose at once, and
 FASTBROWSE_LLM_MODEL_<PURPOSE> (PLAN, READ, FIELD_TEXT, RECOVER, COMPOSE, VERIFY) overrides one.
+FASTBROWSE_LLM_REASONING sets the reasoning effort: low (default), medium or high.
 """
 
 import os
@@ -16,8 +17,8 @@ from fastbrowse.jev import JevClient
 from fastbrowse.llm import LLMClient
 from fastbrowse.models import LLMPurpose
 
-# The default is the model the live suite scores 12/12 on, not the fastest one. `evals.latency` timed
-# 17 candidates on the two request shapes that dominate a run and gemini-3.5-flash-lite won both by a
+# The default is the model the live suite passes on, not the fastest one. `evals.latency` timed the
+# candidates on the two request shapes that dominate a run and gemini-3.5-flash-lite won both by a
 # wide margin (plan 1.6s against 5.9s, read 0.6s against 1.7s), which on the local fixtures was free:
 # 12/12 at 2.9x the speed. Live sites disagreed. Flash-lite scored 8/12, and a run that answers None
 # is not a fast run. Three configurations were measured at 12 runs each and none of them held:
@@ -41,8 +42,17 @@ DEFAULT_MODELS = dict.fromkeys(LLMPurpose, DEFAULT_LLM) | {LLMPurpose.FIELD_TEXT
 DEFAULT_REASONING = ReasoningEffort.LOW
 
 
-class MissingKeyError(RuntimeError):
-    pass
+class ConfigurationError(RuntimeError):
+    """A missing key or an invalid setting in the environment, reported without a traceback."""
+
+
+def reasoning_from_environment() -> ReasoningEffort:
+    value = os.environ.get("FASTBROWSE_LLM_REASONING", DEFAULT_REASONING)
+    try:
+        return ReasoningEffort(value)
+    except ValueError:
+        choices = ", ".join(effort.value for effort in ReasoningEffort)
+        raise ConfigurationError(f"FASTBROWSE_LLM_REASONING={value!r} is not one of {choices}") from None
 
 
 def jev_from_environment(http: httpx.AsyncClient) -> JevClient:
@@ -50,7 +60,7 @@ def jev_from_environment(http: httpx.AsyncClient) -> JevClient:
         return TypeSafeJevClient(key, http=http)
     if key := os.environ.get("AI_GATEWAY_API_KEY"):
         return VercelGatewayJevClient(key, http=http)
-    raise MissingKeyError("set TYPESAFE_API_KEY or AI_GATEWAY_API_KEY for Jev")
+    raise ConfigurationError("set TYPESAFE_API_KEY or AI_GATEWAY_API_KEY for Jev")
 
 
 def models_from_environment() -> dict[LLMPurpose, str]:
@@ -65,11 +75,11 @@ def models_from_environment() -> dict[LLMPurpose, str]:
 def llm_from_environment(http: httpx.AsyncClient) -> LLMClient:
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
-        raise MissingKeyError("set OPENROUTER_API_KEY for the LLM")
+        raise ConfigurationError("set OPENROUTER_API_KEY for the LLM")
     return OpenAICompatibleLLM(
         key,
         http=http,
         base_url="https://openrouter.ai/api/v1",
         models=models_from_environment(),
-        reasoning_effort=ReasoningEffort(os.environ.get("FASTBROWSE_LLM_REASONING", DEFAULT_REASONING)),
+        reasoning_effort=reasoning_from_environment(),
     )

@@ -308,8 +308,6 @@ def _cells(table: str) -> tuple[tuple[int, int, str], ...]:
 
 
 def _scalar(raw: str, annotation: object) -> ScalarValue:
-    if annotation is str:
-        return raw
     if annotation is bool:
         return raw.lower() in {"true", "yes"}
     if annotation is date:

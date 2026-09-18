@@ -3,17 +3,17 @@
 Models only ever see secret names. Values are resolved here, at dispatch time, for the origin being acted on.
 """
 
+import json
 import re
-from collections.abc import Iterable
-from urllib.parse import urlsplit
+from urllib.parse import quote, quote_plus, urlsplit
 
 from fastbrowse.jev import NoulQuestion
-from fastbrowse.models import Authorization, Operation, SecretRef, SecretResolver
+from fastbrowse.models import Operation, SecretRef, SecretResolver
 from fastbrowse.page import Control
 
-# Deliberately broad: a false flag costs one extra Jev question, a missed one can buy something.
+# A link can still commit through its label ("Delete"), so the words are checked on every control.
 _IRREVERSIBLE_WORDS = re.compile(
-    r"\b(buy|purchase|pay|checkout|place order|order now|confirm|submit|send|delete|remove|destroy|transfer|"
+    r"\b(buy|purchase|pay|checkout|order|confirm|submit|send|delete|remove|erase|wipe|destroy|transfer|"
     r"book|reserve|subscribe|unsubscribe|cancel|publish|post|donate|sign up|register|agree|accept|withdraw|"
     r"close account|deactivate|archive|merge|approve)\b",
     re.IGNORECASE,
@@ -22,14 +22,19 @@ _DISPATCHING = frozenset({Operation.CLICK, Operation.ENTER})
 
 
 def may_be_irreversible(operation: Operation, control: Control | None) -> bool:
-    """Cheap first pass; a flagged action is then asked about concretely before it can run."""
+    """Whether Jev is asked before this dispatches. Only plain navigation is exempt.
+
+    A label list cannot be complete ("Place your order", "Erase"), so every button is asked about: a button
+    runs script, and script can commit anything. A link with an href navigates, which is exempt unless its
+    label says otherwise.
+    """
     if operation not in _DISPATCHING or control is None:
         return False
-    return (
-        bool(_IRREVERSIBLE_WORDS.search(control.label))
-        or control.input_type == "submit"
-        or (operation is Operation.ENTER and control.submit_semantics is not None)
-    )
+    if _IRREVERSIBLE_WORDS.search(control.label) or control.input_type == "submit":
+        return True
+    if operation is Operation.ENTER:
+        return control.submit_semantics is not None
+    return control.href is None
 
 
 def irreversible_question(task: str, operation: Operation, control: Control) -> NoulQuestion:
@@ -44,10 +49,6 @@ def irreversible_question(task: str, operation: Operation, control: Control) -> 
         true="It commits an irreversible or externally visible change.",
         false="It only navigates, filters, reveals or edits a draft that can still be changed.",
     )
-
-
-def is_authorized(authorization: Authorization) -> bool:
-    return authorization.irreversible_actions
 
 
 def origin_of(url: str) -> str:
@@ -74,8 +75,17 @@ class Redactor:
         self._values: dict[str, str] = {}
 
     def register(self, name: str, value: str) -> None:
-        if value:
-            self._values[value] = name
+        # Pages and logs carry a value encoded as often as raw: in a query string, or escaped inside JSON.
+        forms = {
+            value,
+            quote(value, safe=""),
+            quote_plus(value),
+            json.dumps(value)[1:-1],
+            json.dumps(value, ensure_ascii=False)[1:-1],
+        }
+        for form in forms:
+            if form:
+                self._values[form] = name
 
     def redact(self, text: str) -> str:
         # Longest first, so a secret containing another secret is replaced whole.
@@ -91,6 +101,3 @@ class Redactor:
 
     def reveals(self, text: str) -> bool:
         return any(value in text for value in self._values)
-
-    def redact_all(self, texts: Iterable[str]) -> tuple[str, ...]:
-        return tuple(self.redact(t) for t in texts)

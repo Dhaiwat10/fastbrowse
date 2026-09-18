@@ -24,6 +24,7 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel, Field
 
+from fastbrowse.clients.environment import reasoning_from_environment
 from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM
 from fastbrowse.llm import LLMError, Message
 from fastbrowse.models import LLMPurpose
@@ -106,7 +107,11 @@ def read_messages() -> tuple[Message, ...]:
 
 async def measure(model: str, http: httpx.AsyncClient, key: str, repeat: int) -> None:
     llm = OpenAICompatibleLLM(
-        key, http=http, base_url="https://openrouter.ai/api/v1", models=dict.fromkeys(LLMPurpose, model)
+        key,
+        http=http,
+        base_url="https://openrouter.ai/api/v1",
+        models=dict.fromkeys(LLMPurpose, model),
+        reasoning_effort=reasoning_from_environment(),
     )
     reads = read_messages()
     for label, messages, schema in (("plan", PLAN_MESSAGES, PlanShape), ("read", reads, ReadShape)):
