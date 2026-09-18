@@ -284,3 +284,18 @@ async def test_the_results_of_a_typed_search_are_read_once_before_leaving(typed:
         await agent._read_before_leaving(state, obs, decision)
     await asyncio.gather(*state.leaving)
     assert agent._read.await_count == reads
+
+
+async def test_recovery_can_direct_a_read_with_no_control_to_name() -> None:
+    button = Control(id="next", frame_id=None, role="button", label="Next", operations=frozenset({Operation.CLICK}))
+    obs = observation((button,))
+    page = Mock(spec=Page)
+    page.screenshot = AsyncMock(return_value=b"png")
+    recovery = {"diagnosis": "the answer is further down", "next_subgoal": "Read the page", "give_up": False}
+    llm = ScriptedLLM([{**recovery, "control": None, "operation": "read"}])
+    jev = ScriptedJev({"operation": "scroll"})
+    state = await run_state()
+    await Agent(page, jev, llm)._recover(state, obs, "uncertain next step (0.47)")
+    unsure = await decide(jev, obs, context(), Config())
+    followed = _follow_recovery(state, obs, unsure, uncertain=True)
+    assert followed is not None and followed.operation is Operation.READ and followed.target is None
