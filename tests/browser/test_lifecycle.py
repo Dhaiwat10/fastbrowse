@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import re
 import subprocess
 import threading
 import time
@@ -29,6 +30,7 @@ from tests.test_retrieval import ScriptedLLM
 
 CONNECTION = BrowserConnection(cdp_url="ws://localhost:9222", remote=False)
 chrome_adapter = importlib.import_module("fastbrowse.adapters.local_chrome")
+page_module = importlib.import_module("fastbrowse.browser.page")
 
 
 class CdpTransport:
@@ -37,6 +39,7 @@ class CdpTransport:
         self.failures: dict[str, BaseException] = {}
         self.blocked: dict[str, asyncio.Event] = {}
         self.finished: set[str] = set()
+        self.results: dict[str, list[dict[str, Any]]] = {}
         monkeypatch.setattr(CDPClient, "start", AsyncMock())
         monkeypatch.setattr(CDPClient, "stop", AsyncMock(side_effect=lambda: self.calls.append("stop")))
         monkeypatch.setattr(CDPClient, "send_raw", AsyncMock(side_effect=self.send))
@@ -45,6 +48,8 @@ class CdpTransport:
         self.calls.append(method)
         if method in self.failures:
             raise self.failures[method]
+        if queued := self.results.get(method):
+            return queued.pop(0)
         if started := self.blocked.get(method):
             started.set()
             try:
@@ -97,6 +102,31 @@ async def test_cdp_errors_are_typed_with_safe_messages(monkeypatch: pytest.Monke
         assert raised.value.__cause__ is failure
         assert str(raised.value).startswith("Page.navigate failed (")
         assert "secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("errors", "raised"),
+    [
+        (["net::ERR_TUNNEL_CONNECTION_FAILED"], None),
+        (["net::ERR_TUNNEL_CONNECTION_FAILED"] * 2, "Page.navigate failed (net::ERR_TUNNEL_CONNECTION_FAILED)"),
+        (["secret https://example.test/secret"] * 2, "Page.navigate failed (NavigationError)"),
+    ],
+)
+async def test_a_failed_navigation_is_tried_again_once(
+    monkeypatch: pytest.MonkeyPatch, errors: list[str], raised: str | None
+) -> None:
+    transport = CdpTransport(monkeypatch)
+    transport.results["Page.navigate"] = [{"errorText": error} for error in errors]
+    transport.results["Runtime.evaluate"] = [{"result": {"value": "complete"}}]
+    monkeypatch.setattr(page_module, "_NAVIGATE_RETRY_SECONDS", 0)
+    async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
+        navigating = CdpPage(session, Config()).navigate("https://example.test")
+        if raised is None:
+            await navigating
+        else:
+            with pytest.raises(BrowserError, match=re.escape(raised)):
+                await navigating
+    assert transport.calls.count("Page.navigate") == min(len(errors) + 1, 2)
 
 
 async def test_background_finalizers_finish_before_socket_stops(monkeypatch: pytest.MonkeyPatch) -> None:

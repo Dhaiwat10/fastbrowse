@@ -11,6 +11,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import time
 from collections.abc import Coroutine
 from contextlib import suppress
@@ -125,6 +126,9 @@ _SETTLE_SECONDS = 5.0
 _SETTLE_POLL_SECONDS = 0.1
 _SETTLE_QUIET_SECONDS = 0.2
 _SCREENSHOT_WAIT_SECONDS = 1.0
+_NAVIGATE_ATTEMPTS = 2
+_NAVIGATE_RETRY_SECONDS = 1.0
+_NET_ERROR = re.compile(r"net::ERR_[A-Z_]+")
 # A deadline, not a wait: focus normally lands in one or two ticks. A loaded CI runner took over 0.3s.
 _FOCUS_SETTLE_SECONDS = 1.0
 # Long enough for a suggestion request to come back over a slow connection, and paid only by a field
@@ -737,9 +741,16 @@ class CdpPage(Page):
         becoming interactive; observation settles the rest.
         """
         session_id = self._session.active_session_id
-        result = await self._session.client.send.Page.navigate(params={"url": url}, session_id=session_id)
-        if result.get("errorText"):
-            raise BrowserError("Page.navigate failed (NavigationError)")
+        for attempt in range(_NAVIGATE_ATTEMPTS):
+            result = await self._session.client.send.Page.navigate(params={"url": url}, session_id=session_id)
+            if not (error := result.get("errorText")):
+                break
+            # A cloud browser's proxy drops a first connection now and then, and a run that never started was
+            # scored as a failed task. Chrome's error names (net::ERR_...) carry no page content, so they are shown.
+            if attempt + 1 == _NAVIGATE_ATTEMPTS:
+                name = error if _NET_ERROR.fullmatch(error) else "NavigationError"
+                raise BrowserError(f"Page.navigate failed ({name})")
+            await asyncio.sleep(_NAVIGATE_RETRY_SECONDS)
         deadline = asyncio.get_event_loop().time() + load_timeout_seconds
         while asyncio.get_event_loop().time() < deadline:
             state = await self._evaluate(session_id, "document.readyState")
