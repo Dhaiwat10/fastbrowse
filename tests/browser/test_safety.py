@@ -216,7 +216,8 @@ async def test_iframe_focus_hit_testing_and_capture_scope(
     ).outcome is StepOutcome.EXECUTED
     assert find(await page.observe(), "Frame field").value == "frame value"
     obs = await page.observe()
-    await page.act(Action(operation=Operation.CLICK, target_id=find(obs, "Open popup").id), obs)
+    opened = await page.act(Action(operation=Operation.CLICK, target_id=find(obs, "Open popup").id), obs)
+    assert opened.outcome is StepOutcome.EXECUTED, opened
     await wait_until(lambda: any("popup.html" in t.url for t in browser_session.tabs()))
     popup = next(t for t in browser_session.tabs() if "popup.html" in t.url)
     await browser_session.switch_tab(popup.id)
