@@ -59,7 +59,7 @@ class BrowserUseCloudBrowser:
             version = await self._http.get(f"{self._browser.cdp_url}/json/version")
             version.raise_for_status()
             ws_url = str(version.json()["webSocketDebuggerUrl"])
-        except (httpx.HTTPError, KeyError, ValueError, BrowserUseCloudError):
+        except httpx.HTTPError, KeyError, ValueError, BrowserUseCloudError:
             await self._stop()
             raise
         self._connection = BrowserConnection(cdp_url=ws_url, live_url=self._browser.live_url, remote=True)

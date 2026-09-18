@@ -85,6 +85,23 @@ def chunk(capture: Capture, max_chars: int, overlap_blocks: int = 1) -> tuple[Ch
     if max_chars <= 0 or overlap_blocks < 0:
         raise ValueError("max_chars must be positive and overlap_blocks nonnegative")
     pieces = _pieces(capture, max_chars)
+    # Size candidate spans without repeatedly joining every prefix of a long chunk.
+    lengths = [0]
+    header_lengths: dict[tuple[int, int], int] = {}
+    for piece in pieces:
+        lengths.append(lengths[-1] + len(capture.text[piece.start : piece.end].rstrip("\n")) + 1)
+        if piece.header is not None:
+            span = (piece.header.start, piece.header.end)
+            if span not in header_lengths:
+                header_lengths[span] = len(capture.text[span[0] : span[1]].rstrip("\n")) + 1
+
+    def size(start: int, end: int) -> int:
+        length = lengths[end] - lengths[start] - 1
+        first = pieces[start]
+        if first.header is not None and first.header.end <= first.start:
+            length += header_lengths[(first.header.start, first.header.end)]
+        return length
+
     chunks: list[Chunk] = []
     cursor = 0
     while cursor < len(pieces):
@@ -92,10 +109,10 @@ def chunk(capture: Capture, max_chars: int, overlap_blocks: int = 1) -> tuple[Ch
         if pieces[cursor].block.kind is BlockKind.HEADING:
             start = cursor
         # Overlap must never prevent forward progress, even for one oversized block.
-        while start < cursor and len(_chunk_text(capture, pieces[start : cursor + 1])[0]) > max_chars:
+        while start < cursor and size(start, cursor + 1) > max_chars:
             start += 1
         end = cursor + 1
-        while end < len(pieces) and len(_chunk_text(capture, pieces[start : end + 1])[0]) <= max_chars:
+        while end < len(pieces) and size(start, end + 1) <= max_chars:
             end += 1
         if end < len(pieces):
             headings = [i for i in range(cursor + 1, end) if pieces[i].block.kind is BlockKind.HEADING]
@@ -324,7 +341,7 @@ def field_candidates(capture: Capture, field: FieldInfo) -> tuple[Candidate, ...
         for start, end, raw in _spans(text, annotation):
             try:
                 value = validator.validate_python(_scalar(raw, annotation))
-            except (ValidationError, ValueError, InvalidOperation, OverflowError):
+            except ValidationError, ValueError, InvalidOperation, OverflowError:
                 continue
             candidates.append(
                 Candidate(
