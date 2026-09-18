@@ -1,10 +1,14 @@
 """Login values from a Bitwarden vault item, read through the `bw` CLI the user has unlocked.
 
-The item's own saved URIs decide where it may be used: a login is released only for a start origin one
-of them covers, the way Bitwarden's default base-domain match would autofill it.
+The item's own saved URIs decide where it may be used, under each URI's match detection
+(https://bitwarden.com/help/uri-match-detection/). Secrets here are scoped to an origin, not a page, so
+Starts with and Exact narrow to the URI's origin; a regular expression is not trusted, and a URI set to Never
+matches nothing. A login saved for https is not released over http.
 """
 
 import subprocess
+from enum import IntEnum
+from typing import assert_never
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -14,9 +18,21 @@ class BitwardenError(RuntimeError):
     """The vault is locked, the item is missing, or it does not belong to the start origin."""
 
 
+class UriMatch(IntEnum):
+    """Bitwarden's stored codes; an unset match means the account default, base domain."""
+
+    DOMAIN = 0
+    HOST = 1
+    STARTS_WITH = 2
+    EXACT = 3
+    REGULAR_EXPRESSION = 4
+    NEVER = 5
+
+
 class _Uri(BaseModel):
     model_config = ConfigDict(extra="ignore")
     uri: str | None = None
+    match: UriMatch | None = None
 
 
 class _Login(BaseModel):
@@ -32,16 +48,24 @@ class _Item(BaseModel):
     login: _Login | None = None
 
 
-def _host(uri: str) -> str:
+def covers(uri: str, detection: UriMatch | None, origin: str) -> bool:
+    """True when Bitwarden would fill the login saved for `uri` on `origin`."""
     # Vault URIs are often saved bare ("amazon.com"), which urlsplit reads as a path, not a host.
-    host = (urlsplit(uri if "://" in uri else f"//{uri}").hostname or "").lower()
-    return host.removeprefix("www.")
-
-
-def covers(uri: str, origin: str) -> bool:
-    """True when `origin`'s host is the URI's host or a subdomain of it."""
-    saved, visited = _host(uri), _host(origin)
-    return bool(saved) and (visited == saved or visited.endswith(f".{saved}"))
+    saved = urlsplit(uri if "://" in uri else f"https://{uri}")
+    visited = urlsplit(origin)
+    if not saved.hostname or visited.scheme != saved.scheme:
+        return False
+    match detection or UriMatch.DOMAIN:
+        case UriMatch.DOMAIN:
+            base = saved.hostname.removeprefix("www.")
+            host = visited.hostname or ""
+            return host == base or host.endswith(f".{base}")
+        case UriMatch.HOST | UriMatch.STARTS_WITH | UriMatch.EXACT:
+            return visited.netloc.lower() == saved.netloc.lower()
+        case UriMatch.REGULAR_EXPRESSION | UriMatch.NEVER:
+            return False
+        case _:
+            assert_never(detection)
 
 
 def login_values(item_json: str, origin: str) -> dict[str, str]:
@@ -53,8 +77,7 @@ def login_values(item_json: str, origin: str) -> dict[str, str]:
         raise BitwardenError("bw returned something other than a vault item") from None
     if item.login is None:
         raise BitwardenError(f"Bitwarden item {item.name!r} is not a login")
-    uris = [u.uri for u in item.login.uris or () if u.uri]
-    if not any(covers(uri, origin) for uri in uris):
+    if not any(u.uri and covers(u.uri, u.match, origin) for u in item.login.uris or ()):
         raise BitwardenError(f"Bitwarden item {item.name!r} is not saved for {origin}")
     values = {"username": item.login.username, "password": item.login.password}
     return {name: value for name, value in values.items() if value}

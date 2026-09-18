@@ -2,27 +2,35 @@ import json
 
 import pytest
 
-from fastbrowse.adapters.bitwarden import BitwardenError, covers, login_values
+from fastbrowse.adapters.bitwarden import BitwardenError, UriMatch, covers, login_values
 
 
-def item(*uris: str, password: str | None = "hunter2") -> str:
-    login = {"username": "me@example.com", "password": password, "uris": [{"match": None, "uri": u} for u in uris]}
+def item(*uris: str, password: str | None = "hunter2", match: int | None = None) -> str:
+    login = {"username": "me@example.com", "password": password, "uris": [{"match": match, "uri": u} for u in uris]}
     return json.dumps({"id": "1", "name": "Amazon", "type": 1, "login": login})
 
 
 @pytest.mark.parametrize(
-    ("uri", "origin", "expected"),
+    ("uri", "detection", "origin", "expected"),
     [
-        ("https://www.amazon.com", "https://www.amazon.com", True),
-        ("amazon.com", "https://www.amazon.com", True),
-        ("https://amazon.com/ap/signin", "https://smile.amazon.com", True),
-        ("https://amazon.com", "https://amazon.com.evil.test", False),
-        ("https://amazon.com", "https://notamazon.com", False),
-        ("", "https://amazon.com", False),
+        ("https://www.amazon.com", None, "https://www.amazon.com", True),
+        ("amazon.com", None, "https://www.amazon.com", True),
+        ("https://amazon.com/ap/signin", UriMatch.DOMAIN, "https://smile.amazon.com", True),
+        ("https://amazon.com", None, "https://amazon.com.evil.test", False),
+        ("https://amazon.com", None, "https://notamazon.com", False),
+        ("https://amazon.com", None, "http://www.amazon.com", False),
+        ("https://www.amazon.com", UriMatch.HOST, "https://smile.amazon.com", False),
+        ("https://www.amazon.com/ap/signin", UriMatch.EXACT, "https://www.amazon.com", True),
+        ("https://www.amazon.com/ap/signin", UriMatch.EXACT, "http://sub.www.amazon.com", False),
+        ("https://www.amazon.com", UriMatch.NEVER, "https://www.amazon.com", False),
+        (r"https://www\.amazon\.com/.*", UriMatch.REGULAR_EXPRESSION, "https://www.amazon.com", False),
+        ("", None, "https://amazon.com", False),
     ],
 )
-def test_a_vault_uri_covers_its_domain_and_subdomains_only(uri: str, origin: str, expected: bool) -> None:
-    assert covers(uri, origin) is expected
+def test_a_login_is_released_only_where_its_match_detection_allows(
+    uri: str, detection: UriMatch | None, origin: str, expected: bool
+) -> None:
+    assert covers(uri, detection, origin) is expected
 
 
 def test_login_values_are_named_and_scoped_to_the_items_uris() -> None:
@@ -33,6 +41,8 @@ def test_login_values_are_named_and_scoped_to_the_items_uris() -> None:
     assert login_values(item("amazon.com", password=None), "https://www.amazon.com") == {"username": "me@example.com"}
     with pytest.raises(BitwardenError, match="not saved for"):
         login_values(item("amazon.com"), "https://evil.test")
+    with pytest.raises(BitwardenError, match="not saved for"):
+        login_values(item("https://www.amazon.com", match=UriMatch.NEVER), "https://www.amazon.com")
 
 
 def test_a_malformed_item_error_does_not_echo_the_password() -> None:
