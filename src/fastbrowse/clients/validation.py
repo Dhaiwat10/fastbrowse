@@ -104,6 +104,7 @@ def response_error(response: httpx.Response, detail: str) -> JevError:
 
 RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0)
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
+_MAX_BACKOFF_SECONDS = 10.0
 JEV_ATTEMPT_SECONDS = 15.0
 """Jev answers in about a second, so an attempt this old is stuck upstream, and a retry beats waiting on it."""
 LLM_ATTEMPT_SECONDS = 30.0
@@ -148,8 +149,24 @@ async def post_with_retry(
         if response is not None and response.status_code not in RETRYABLE_STATUS:
             return response
         if delay is not None:
-            await asyncio.sleep(delay)
+            await asyncio.sleep(_backoff(response, delay))
     return response
+
+
+def _backoff(response: httpx.Response | None, delay: float) -> float:
+    """The server's own `Retry-After` when it sends one on a 429 or 529, as TypeSafe's SDK honours it; capped
+    so an overloaded provider cannot hold a run past its budget."""
+    if response is None:
+        return delay
+    for header, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        raw = response.headers.get(header)
+        if raw is None:
+            continue
+        try:
+            return min(max(float(raw) * scale, 0.0), _MAX_BACKOFF_SECONDS)
+        except ValueError:
+            break
+    return delay
 
 
 async def _hedged(
@@ -220,9 +237,11 @@ def _probabilities(value: JsonValue, keys: set[str]) -> dict[str, float]:
     if not keys or set(raw) != keys:
         raise ValueError("probability keys differ from criteria")
     result = {key: probability(value) for key, value in raw.items()}
-    # Two-decimal wire rounding can put a valid distribution exactly on the tolerance boundary.
-    if abs(math.fsum(result.values()) - 1) > 0.02 + 1e-12:
-        raise ValueError("probabilities do not sum to one within 0.02")
+    # Each probability is rounded to two decimals on the wire, so the sum can drift by up to half a unit per
+    # option (the AI SDK's own check); a fixed 0.02 rejected valid answers over many options.
+    tolerance = max(0.02, 0.005 * len(result))
+    if abs(math.fsum(result.values()) - 1) > tolerance + 1e-12:
+        raise ValueError(f"probabilities do not sum to one within {tolerance}")
     return result
 
 
@@ -255,7 +274,10 @@ def parse_answers(
                     choice=choice, probabilities=probs, confidence=probability(confidence_value)
                 )
             case NoulQuestion():
-                answers[key] = NoulAnswer(probability=probability(answer.get("probability")))
+                # v1 of the direct API names P(yes) `noul` (https://docs.typesafe.ai/migrating-to-v1.md); the
+                # gateway maps it to a boolean answer's `probability`.
+                field = "probability" if gateway else "noul"
+                answers[key] = NoulAnswer(probability=probability(answer.get(field)))
             case ScoreQuestion():
                 probs = _probabilities(answer.get("probabilities"), {str(i) for i in range(len(question.criteria))})
                 score = number(answer.get("score"))
