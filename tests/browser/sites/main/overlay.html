@@ -15,7 +15,13 @@
   const typed = document.getElementById("typed");
   const places = document.getElementById("places");
   // Clicking the field opens an editor over it and moves focus there a moment later; only that editor suggests places.
-  from.addEventListener("click", () => { editor.hidden = false; setTimeout(() => typed.focus(), 50); });
+  const open = () => { editor.hidden = false; typed.value = "Houston"; typed.focus(); typed.select(); };
+  if (location.search === "?late") {
+    // Here the editor opens only once typing starts, prefilled, and the keystroke that opened it is lost.
+    from.addEventListener("input", () => { from.value = ""; open(); }, {once: true});
+  } else {
+    from.addEventListener("click", () => { editor.hidden = false; setTimeout(() => typed.focus(), 50); });
+  }
   typed.addEventListener("input", () => {
     places.innerHTML = "";
     for (const place of ["London", "Londonderry"].filter(p => typed.value && p.startsWith(typed.value))) {

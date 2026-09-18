@@ -487,8 +487,9 @@ async def test_a_visible_option_is_clicked_without_scrolling_its_menu_shut(page:
     assert any(c.role == "button" and c.label == "One way" for c in after.controls)
 
 
-async def test_a_fill_follows_focus_to_the_editor_its_click_opened(page: CdpPage, main_site: str) -> None:
-    await page.navigate(f"{main_site}/overlay.html")
+@pytest.mark.parametrize("opens", ["", "?late"])
+async def test_a_fill_follows_focus_to_the_editor_its_click_opened(page: CdpPage, main_site: str, opens: str) -> None:
+    await page.navigate(f"{main_site}/overlay.html{opens}")
     obs = await page.observe()
     field = next(c for c in obs.controls if c.label == "Where from?")
     result = await page.act(Action(operation=Operation.FILL, target_id=field.id, text="Lond"), obs)

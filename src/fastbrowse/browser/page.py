@@ -472,43 +472,51 @@ class CdpPage(Page):
         await self._click_point(session_id, point)
         if not secret:
             local_id = int(await self._evaluate(session_id, f"({_HANDED_FOCUS_JS})({local_id})"))
-        if not await self._focus(session_id, local_id, prepare_fill=True, secret=secret):
-            return StepOutcome.FAILED, "target did not receive keyboard focus"
-        # A secret must be checked and inserted in one renderer task: CDP insertText would leave a
-        # navigation/focus race between checking the origin and dispatching the secret to the page.
-        script = (
-            "((id, text, origin) => { const e = window.__fastbrowse?.nodes.get(id); "
-            "if (!e?.isConnected || (origin !== null && e.ownerDocument.location.origin !== origin)) return false; "
-            "const doc = e.ownerDocument; if (e.getRootNode().activeElement !== e) return false; "
-            "if (typeof e.select === 'function') e.select(); else { const range = doc.createRange(); "
-            "range.selectNodeContents(e); const selection = doc.getSelection(); selection.removeAllRanges(); "
-            "selection.addRange(range); } "
-            "return doc.execCommand('insertText', false, text); })"
-            f"({local_id}, {json.dumps(text)}, {json.dumps(secret_origin if secret else None)})"
-        )
-        if secret:
-            inserted = await self._evaluate(session_id, script)
-            if not inserted:
-                return StepOutcome.FAILED, "secret origin or focus changed before insertion"
-        else:
-            await self._session.client.send.Input.insertText(params={"text": text}, session_id=session_id)
-        landed = await self._evaluate(
-            session_id,
-            # A framework may swap the field for a hydrated copy while the text is being inserted, which
-            # detaches the node we typed into even though the text landed. That copy is accepted only once
-            # ours is gone, and only when it is focused in the same document and now covers the point ours
-            # occupied: a field elsewhere holding the same text is not evidence that ours took it.
-            f"((e, text) => {{ const holds = n => !!n && (n.value ?? n.innerText) === text; "
-            "if (!e) return false; if (e.isConnected) return holds(e); "
-            "const was = window.__fastbrowse?.filled; if (!was) return false; "
-            "const now = was.doc.activeElement; if (!now || now.tagName !== was.tag) return false; "
-            "const r = now.getBoundingClientRect(); "
-            "const inPlace = was.x >= r.left && was.x <= r.right && was.y >= r.top && was.y <= r.bottom; "
-            "return inPlace && holds(now); })"
-            f"(window.__fastbrowse?.nodes.get({local_id}), {json.dumps(text)})",
-        )
-        if not landed:
-            return StepOutcome.FAILED, "field did not retain the supplied text"
+        for attempt in range(2):
+            if not await self._focus(session_id, local_id, prepare_fill=True, secret=secret):
+                return StepOutcome.FAILED, "target did not receive keyboard focus"
+            # A secret must be checked and inserted in one renderer task: CDP insertText would leave a
+            # navigation/focus race between checking the origin and dispatching the secret to the page.
+            script = (
+                "((id, text, origin) => { const e = window.__fastbrowse?.nodes.get(id); "
+                "if (!e?.isConnected || (origin !== null && e.ownerDocument.location.origin !== origin)) return false; "
+                "const doc = e.ownerDocument; if (e.getRootNode().activeElement !== e) return false; "
+                "if (typeof e.select === 'function') e.select(); else { const range = doc.createRange(); "
+                "range.selectNodeContents(e); const selection = doc.getSelection(); selection.removeAllRanges(); "
+                "selection.addRange(range); } "
+                "return doc.execCommand('insertText', false, text); })"
+                f"({local_id}, {json.dumps(text)}, {json.dumps(secret_origin if secret else None)})"
+            )
+            if secret:
+                inserted = await self._evaluate(session_id, script)
+                if not inserted:
+                    return StepOutcome.FAILED, "secret origin or focus changed before insertion"
+            else:
+                await self._session.client.send.Input.insertText(params={"text": text}, session_id=session_id)
+            landed = await self._evaluate(
+                session_id,
+                # The text can land in another field than ours: a framework may swap ours for a hydrated copy while
+                # the text is inserted, or focusing ours opens an editor over it that takes focus, a moment too
+                # late for the hand-off above to see. That field is accepted only when it is focused in the same
+                # document and covers the point ours occupied: a field elsewhere holding the same text is not
+                # evidence that ours took it.
+                f"((e, text) => {{ const holds = n => !!n && (n.value ?? n.innerText) === text; "
+                "if (e?.isConnected && holds(e)) return true; "
+                "const was = window.__fastbrowse?.filled; if (!was) return false; "
+                "const now = was.doc.activeElement; if (!now || now === e) return false; "
+                "const r = now.getBoundingClientRect(); "
+                "const inPlace = was.x >= r.left && was.x <= r.right && was.y >= r.top && was.y <= r.bottom; "
+                "return inPlace && holds(now); })"
+                f"(window.__fastbrowse?.nodes.get({local_id}), {json.dumps(text)})",
+            )
+            if landed:
+                break
+            # An editor that took focus after the hand-off looked, and so never got the text, is typed into
+            # once more, as a person would on seeing the text had gone nowhere.
+            handed = local_id if secret else int(await self._evaluate(session_id, f"({_HANDED_FOCUS_JS})({local_id})"))
+            if attempt or handed == local_id:
+                return StepOutcome.FAILED, "field did not retain the supplied text"
+            local_id = handed
         await self._await_suggestions(session_id, local_id)
         return StepOutcome.EXECUTED, None
 
@@ -737,7 +745,7 @@ class CdpPage(Page):
         # replacement occupies the same place, rather than accepting a different field with the same text.
         prepare = (
             "const r = e.getBoundingClientRect(); window.__fastbrowse.filled = "
-            "{doc: e.ownerDocument, tag: e.tagName, x: r.x + r.width / 2, y: r.y + r.height / 2}; "
+            "{doc: e.ownerDocument, x: r.x + r.width / 2, y: r.y + r.height / 2}; "
             + (_SELECT_TEXT_JS if not secret else "")
             if prepare_fill
             else ""
