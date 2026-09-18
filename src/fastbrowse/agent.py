@@ -48,7 +48,7 @@ from fastbrowse.safety import (
     resolve_secret,
     secret_allowed,
 )
-from fastbrowse.shortcut import accept, propose_shortcut
+from fastbrowse.shortcut import Shortcut, accept, propose_shortcut
 from fastbrowse.telemetry import BudgetExceeded, Ledger
 from fastbrowse.verification import (
     DoneVerdict,
@@ -257,7 +257,7 @@ class Agent:
         The proposal is written while the start page loads, so it costs no wall time unless it outlasts the load,
         and the start page stays one BACK away for when the shortcut lands somewhere unhelpful.
         """
-        proposing = asyncio.create_task(propose_shortcut(self._llm, task, start, ledger=ledger))
+        proposing = asyncio.create_task(self._propose(task, start, ledger))
         try:
             await self._page.navigate(start)
             proposal = await asyncio.wait_for(asyncio.shield(proposing), _SHORTCUT_GRACE_SECONDS)
@@ -265,18 +265,27 @@ class Agent:
             return []
         finally:
             await _discard(proposing)
-        ledger.record(proposal.cost)
-        shortcut = accept(proposal.data.url, start)
+        shortcut = accept(proposal.url, start)
         if shortcut is None:
             return []
         try:
             await self._page.navigate(shortcut)
+            # `accept` saw only the proposed address; a redirect can still land on another site.
+            landed = origin_of(await self._page.origin())
         except BrowserError:
-            logger.warning("shortcut %s did not load; staying on the start page", shortcut)
+            landed = None
+        if landed != origin_of(start):
+            logger.warning("shortcut %s did not stay on %s; returning to the start page", shortcut, start)
             await self._page.navigate(start)
             return []
         note = f"opened {shortcut} directly instead of clicking there; the start page {start} is one BACK away"
         return [HistoryEntry(operation=None, target=None, outcome=StepOutcome.EXECUTED, page_changed=True, note=note)]
+
+    async def _propose(self, task: str, start: str, ledger: Ledger) -> Shortcut:
+        # Recorded here, not by the caller: a proposal that finished is billed even when the run ends first.
+        generation = await propose_shortcut(self._llm, task, start, ledger=ledger)
+        ledger.record(generation.cost)
+        return generation.data
 
     async def _outwait(self, stuck: Observation) -> bool:
         """Re-observe until the page is no longer `stuck`, returning whether it moved in time."""
