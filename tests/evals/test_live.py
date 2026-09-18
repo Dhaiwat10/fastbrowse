@@ -63,3 +63,31 @@ def test_a_real_gap_in_probabilities_is_left_alone() -> None:
     answer, cost = RUNNER["systemone_answer"](payload)
     assert answer["answers"]["op"]["probabilities"] == {"A": 0.3, "B": 0.7}
     assert cost is None
+
+
+def test_each_task_runs_only_where_it_grades_fairly() -> None:
+    for live_task in TASKS:
+        if "ultrafast" in live_task.arms:
+            # jev-ultrafast has no answer, so its tasks must be graded on the page alone.
+            assert live_task.output_schema is None
+            assert "hosted" not in live_task.arms
+    assert {t.id for t in TASKS if "ultrafast" in t.arms} >= {"wiki-open", "flights-search"}
+
+
+@pytest.mark.parametrize(
+    ("final_url", "passed"),
+    [
+        ("https://en.wikipedia.org/wiki/G%C3%B6del%27s_incompleteness_theorems", True),
+        ("https://en.wikipedia.org/wiki/Kurt_G%C3%B6del", False),
+        (None, False),
+    ],
+)
+def test_a_navigation_task_is_graded_on_the_page_alone(final_url: str | None, passed: bool) -> None:
+    outcome = Outcome(None, None, final_url)
+    assert (task("wiki-open").check(outcome, None) is None) is passed
+
+
+def test_hn_comments_accepts_any_leading_story() -> None:
+    check = task("hn-comments").check
+    assert check(Outcome(None, None, "https://news.ycombinator.com/item?id=2"), ["1", "2"]) is None
+    assert check(Outcome(None, None, "https://news.ycombinator.com/item?id=9"), ["1", "2"]) is not None

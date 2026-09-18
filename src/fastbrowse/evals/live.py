@@ -14,9 +14,10 @@ Tasks and their grading live in fastbrowse.evals.live_tasks. With --bitwarden, t
 task's credentials from its vault item (created by scripts/eval_vault.py) instead of the task. With --record,
 each run is saved as DIR/<arm>/<task>-<n>.mp4, n counting up from 1 past any video already there.
 
-Every arm is graded on its answer. The fast arm is also graded on the page it ended on and on its final
-status, and jev-ultrafast on the page it ended on and on choosing DONE; the hosted SDK exposes neither, so
-its tasks rest on the answer alone. jev-ultrafast returns no answer, only DONE or BLOCKED.
+Each task runs only on the arms it grades fairly (LiveTask.arms). Answer tasks compare fastbrowse with hosted
+Browser Use; jev-ultrafast returns no answer, only DONE or BLOCKED. Navigation tasks, graded on the page the
+run ended on, compare fastbrowse with jev-ultrafast; the hosted SDK does not say where its browser ended.
+fastbrowse must also end with the task's expected status, and jev-ultrafast with DONE.
 """
 
 import argparse
@@ -226,20 +227,28 @@ async def hosted_arm(
     if run.session_id is not None:
         _watch("hosted", task, (await client.sessions.get(run.session_id)).live_url)
     remaining = MAX_SECONDS - (time.monotonic() - started)
+    timed_out = False
     try:
-        result = await asyncio.wait_for(asyncio.shield(finishing), max(remaining, 1))
+        await asyncio.wait_for(asyncio.shield(finishing), max(remaining, 1))
     except TimeoutError:
+        timed_out = True
         if run.session_id is not None:
             await client.sessions.stop(run.session_id)
-        result = await finishing
-        timed_out = True
-    else:
-        timed_out = False
+    await asyncio.gather(finishing, return_exceptions=True)
     seconds = time.monotonic() - started
-    session = result.session
-    output = result.output
+    if (error := finishing.exception()) is None:
+        result = finishing.result()
+        session, output = result.session, result.output
+    elif run.session_id is not None:
+        # The SDK raises on output that fails the task's schema; the session still holds that output and its cost.
+        session = await client.sessions.get(run.session_id)
+        output = session.output
+    else:
+        raise error
     if isinstance(output, BaseModel):
         outcome = Outcome(output.model_dump_json(), output.model_dump(), None)
+    elif isinstance(output, dict):
+        outcome = Outcome(json.dumps(output), cast(dict[str, object], output), None)
     else:
         outcome = Outcome(str(output) if output else None, None, None)
     cost = session.total_cost_usd
@@ -383,8 +392,7 @@ async def main(argv: list[str]) -> int:
             for _ in range(args.repeat):
                 for task in tasks:
                     for arm in args.arms:
-                        # Neither jev-ultrafast nor hosted Browser Use has a pause before irreversible actions.
-                        if arm != "fast" and task.fast_only:
+                        if arm not in task.arms:
                             continue
                         record = None if args.record is None else video_path(args.record, arm, task)
                         row = await run_arm(arm, task, http, Path(downloads), bitwarden=args.bitwarden, record=record)
