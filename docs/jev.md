@@ -18,7 +18,7 @@ evals rather than taken from Typesafe.
 | Rate limits | 1,200 requests a minute and 250k tokens a second on the direct API, subject to change ([Models](https://docs.typesafe.ai/models)); no extra gateway limit on paid tiers ([Gateway limits](https://vercel.com/docs/ai-gateway/rate-limits)) | A run makes a few requests a step, far below either |
 | Errors | 400/401/403/404/422/429/5xx, with 529 for overload; retry with backoff, honouring server retry headers ([Exceptions](https://docs.typesafe.ai/sdk/python/api/exceptions)) | `post_with_retry` retries these and honours `retry-after-ms` and `retry-after`, capped at 10s |
 | Price | $0.042 per million input tokens; output is free ([Models](https://docs.typesafe.ai/models), [gateway catalog](https://ai-gateway.vercel.sh/v1/models)) | `CostComponent.JEV` on the ledger |
-| Latency | 70 to 500ms end to end, as advertised ([launch post](https://typesafe.ai/blog/introducing-system-one-models-and-jev)); no SLA is published | Measured through the gateway: 0.28s median and 0.62s worst over 25 policy-sized calls. The 3s hedge in `clients/validation.py` is **ours** |
+| Latency | 70 to 500ms end to end, as advertised ([launch post](https://typesafe.ai/blog/introducing-system-one-models-and-jev)); no SLA is published | Measured through the gateway: 0.28s median and 0.62s worst over 25 policy-sized calls. The 1.5s hedge in `clients/validation.py` is **ours** |
 | Streaming | Gateway evaluation does not stream ([AI SDK evaluation](https://ai-sdk.dev/docs/ai-sdk-core/evaluation)) | Not needed: answers are a few numbers |
 
 ## Confidence is not correctness

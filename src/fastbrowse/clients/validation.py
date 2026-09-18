@@ -109,10 +109,12 @@ JEV_ATTEMPT_SECONDS = 15.0
 """Jev answers in about a second, so an attempt this old is stuck upstream, and a retry beats waiting on it."""
 LLM_ATTEMPT_SECONDS = 30.0
 """Six times the mean plan call, the slowest request a run makes; a live run stalled 60s on one attempt."""
-JEV_HEDGE_SECONDS = 3.0
-"""Three times a typical Jev call. A live run spent 34s of one task in Jev; a second request sent here wins those."""
-LLM_HEDGE_SECONDS = 8.0
-"""Twice the slowest typical purpose (RECOVER, about 3.9s). One PLAN call took 26.1s live while the rest took 3s."""
+JEV_HEDGE_SECONDS = 1.5
+"""Over twice the slowest of 25 measured gateway calls (0.28s median, 0.62s worst); a live run once spent 34s of
+one task in Jev, and a second request sent here wins those for a fraction of a cent."""
+LLM_HEDGE_SECONDS = 4.0
+"""About twice a typical read or verify (2 to 2.7s). Live runs saw single PLAN and READ calls take 7 to 9s while
+the rest took 2s; hedging here duplicates only that tail, and these calls cost a fraction of a cent."""
 
 
 async def post_with_retry(
