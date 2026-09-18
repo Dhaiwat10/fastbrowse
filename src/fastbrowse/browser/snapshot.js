@@ -2,9 +2,30 @@
 // Atomic single-evaluate observation of one frame's controls, viewport text, and a freshness fingerprint.
 // Adapted to fastbrowse's Control shape (role + operation set, not per-kind actions) and to traverse
 // open shadow roots. Runs once per frame session (main frame or an OOPIF); the Python side merges frames.
-(() => {
-  if (!document.body) return null;
+(mode => {
   const registry = window.__fastbrowse ||= { ids: new WeakMap(), nodes: new Map(), next: 1 };
+  if (!registry.track) {
+    const roots = new WeakSet();
+    const changed = () => { registry.lastMutation = performance.now(); };
+    const observer = new MutationObserver(changed);
+    registry.track = root => {
+      if (roots.has(root)) return;
+      roots.add(root);
+      observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true });
+      // Property changes and scrolling can affect controls without producing mutation records.
+      for (const event of ['input', 'change', 'scroll']) root.addEventListener(event, changed, true);
+      changed();
+    };
+    registry.track(document);
+  }
+  if (mode === 'fingerprint') return {
+    fingerprint: location.href + '|' + document.title + '|' +
+      (document.body ? document.body.innerText.length : 0) + '|' + scrollY,
+    ready: document.readyState === 'interactive' || document.readyState === 'complete',
+    quietFor: performance.now() - registry.lastMutation,
+    hidden: document.hidden,
+  };
+  if (!document.body) return null;
   const identity = e => {
     if (!registry.ids.has(e)) registry.ids.set(e, registry.next++);
     const id = registry.ids.get(e);
@@ -85,6 +106,8 @@
   // Traverse light DOM plus any open shadow roots, and same-origin same-process nested iframes.
   let inaccessible = 0;
   function* walk(root) {
+    // A document observer cannot see mutations inside shadow roots or child documents.
+    registry.track(root);
     for (const e of root.querySelectorAll(SELECTOR)) yield e;
     for (const e of root.querySelectorAll('*')) {
       if (e.shadowRoot) yield* walk(e.shadowRoot);
@@ -178,4 +201,4 @@
     url: location.href, title: document.title, viewport_text, document_key: String(performance.timeOrigin),
     controls: semantics, page_key, guards, inaccessible_frames: inaccessible,
   };
-})()
+})

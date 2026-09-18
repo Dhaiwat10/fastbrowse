@@ -37,7 +37,8 @@ from fastbrowse.page import (
     Page,
 )
 
-_SNAPSHOT_JS = (Path(__file__).with_name("snapshot.js")).read_text()
+_PAGE_JS = (Path(__file__).with_name("snapshot.js")).read_text()
+_SNAPSHOT_JS = _PAGE_JS + "('snapshot')"
 _CAPTURE_JS = (Path(__file__).with_name("capture.js")).read_text()
 _FINGERPRINT_JS = (
     "location.href + '|' + document.title + '|' + (document.body ? document.body.innerText.length : 0) + '|' + scrollY"
@@ -47,6 +48,31 @@ _SELECT_TEXT_JS = (
     "range.selectNodeContents(e); const selection = e.ownerDocument.getSelection(); "
     "selection.removeAllRanges(); selection.addRange(range); } "
 )
+
+_HIT_TEST_JS = (
+    "(id => { const e = window.__fastbrowse?.nodes.get(id); "
+    "if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled=\"true\"],[inert]') || "
+    "!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return null; "
+    "e.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'}); "
+    "const r = e.getBoundingClientRect(); let x = r.x + r.width / 2, y = r.y + r.height / 2; "
+    "if (!r.width || !r.height) return null; "
+    # Descend through open shadow roots: the document-level hit is only the outermost host.
+    "let node = e, doc = e.ownerDocument; while (true) { "
+    "const view = doc.defaultView; "
+    "if (x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight) return null; "
+    "let hit = doc.elementFromPoint(x, y); "
+    "while (hit?.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); "
+    "if (!inner || inner === hit) break; hit = inner; } "
+    "if (!node.contains(hit)) return 'covered'; "
+    "if (doc === document) break; "
+    "node = view.frameElement; if (!node) return null; "
+    "const frame = node.getBoundingClientRect(); "
+    "x = frame.x + (node.clientLeft + x) * frame.width / node.offsetWidth; "
+    "y = frame.y + (node.clientTop + y) * frame.height / node.offsetHeight; doc = node.ownerDocument; } "
+    "return [x, y]; })"
+)
+
+type _Point = tuple[float, float] | Literal["covered"] | None
 
 _BLOCK_KIND = {
     "heading": BlockKind.HEADING,
@@ -59,6 +85,7 @@ _BLOCK_KIND = {
 
 _SETTLE_SECONDS = 5.0
 _SETTLE_POLL_SECONDS = 0.1
+_SETTLE_QUIET_SECONDS = 0.2
 _SCREENSHOT_WAIT_SECONDS = 1.0
 _FOCUS_SETTLE_SECONDS = 0.3
 # Long enough for a suggestion request to come back over a slow connection, and paid only by a field
@@ -264,35 +291,40 @@ class CdpPage(Page):
                 return ActResult(outcome=StepOutcome.STALE, page_changed=False, detail="unknown control id")
         # A pending dialog already blocks the renderer's main thread; evaluating now would hang.
         before_fingerprint = ""
+        point: _Point = None
         if self._session.pending_dialog() is None:
-            before_fingerprint, live_guard = await self._before_action(target)
+            before_fingerprint, live_guard, point = await self._before_action(
+                target,
+                hit_test=action.operation
+                in {Operation.CLICK, Operation.FILL, Operation.SELECT, Operation.ENTER, Operation.UPLOAD},
+            )
             if target is not None and live_guard != target[3]:
                 return ActResult(
                     outcome=StepOutcome.STALE, page_changed=False, detail="control changed since observation"
                 )
 
-        outcome, detail = await self._dispatch(action, target)
+        outcome, detail = await self._dispatch(action, target, point)
         if outcome != StepOutcome.EXECUTED:
             return ActResult(outcome=outcome, page_changed=False, detail=detail)
         changed = await self._changed_since(before_fingerprint)
         return ActResult(outcome=StepOutcome.EXECUTED, page_changed=changed, detail=detail)
 
     async def _dispatch(
-        self, action: Action, target: tuple[str, str, int, list[object] | None] | None
+        self, action: Action, target: tuple[str, str, int, list[object] | None] | None, point: _Point
     ) -> tuple[StepOutcome, str | None]:
         match action.operation:
             case Operation.CLICK:
-                return await self._click(target)
+                return await self._click(target, point)
             case Operation.FILL:
                 return await self._fill(
-                    target, action.text or "", secret=action.secret, secret_origin=action.secret_origin
+                    target, action.text or "", point, secret=action.secret, secret_origin=action.secret_origin
                 )
             case Operation.SELECT:
-                return await self._select(target, action.text or "")
+                return await self._select(target, action.text or "", point)
             case Operation.ENTER:
-                return await self._key(target, "Enter")
+                return await self._key(target, "Enter", point)
             case Operation.ESCAPE:
-                return await self._key(None, "Escape")
+                return await self._key(None, "Escape", None)
             case Operation.SCROLL:
                 await self._scroll()
                 return StepOutcome.EXECUTED, None
@@ -304,7 +336,7 @@ class CdpPage(Page):
                 await self._session.switch_tab(action.tab_id)
                 return StepOutcome.EXECUTED, None
             case Operation.UPLOAD:
-                return await self._upload(target, action.files)
+                return await self._upload(target, action.files, point)
             case Operation.DIALOG:
                 if action.accept_dialog is None:
                     return StepOutcome.FAILED, "dialog requires accept_dialog"
@@ -315,11 +347,12 @@ class CdpPage(Page):
             case _:
                 assert_never(action.operation)
 
-    async def _click(self, target: tuple[str, str, int, list[object] | None] | None) -> tuple[StepOutcome, str | None]:
+    async def _click(
+        self, target: tuple[str, str, int, list[object] | None] | None, point: _Point
+    ) -> tuple[StepOutcome, str | None]:
         if target is None:
             return StepOutcome.FAILED, "click requires a target"
-        session_id, _frame, local_id, _guard = target
-        point = await self._hit_test(session_id, local_id)
+        session_id, _frame, _local_id, _guard = target
         if point is None:
             return StepOutcome.STALE, "target disconnected"
         if point == "covered":
@@ -331,6 +364,7 @@ class CdpPage(Page):
         self,
         target: tuple[str, str, int, list[object] | None] | None,
         text: str,
+        point: _Point,
         *,
         secret: bool = False,
         secret_origin: str | None = None,
@@ -338,7 +372,6 @@ class CdpPage(Page):
         if target is None:
             return StepOutcome.FAILED, "fill requires a target"
         session_id, _frame, local_id, _guard = target
-        point = await self._hit_test(session_id, local_id)
         if point is None:
             return StepOutcome.STALE, "target disconnected"
         if point == "covered":
@@ -421,12 +454,11 @@ class CdpPage(Page):
             )
 
     async def _select(
-        self, target: tuple[str, str, int, list[object] | None] | None, option: str
+        self, target: tuple[str, str, int, list[object] | None] | None, option: str, point: _Point
     ) -> tuple[StepOutcome, str | None]:
         if target is None:
             return StepOutcome.FAILED, "select requires a target"
         session_id, _frame, local_id, _guard = target
-        point = await self._hit_test(session_id, local_id)
         if point is None:
             return StepOutcome.STALE, "target disconnected"
         if point == "covered":
@@ -448,12 +480,11 @@ class CdpPage(Page):
         return StepOutcome.EXECUTED, None
 
     async def _key(
-        self, target: tuple[str, str, int, list[object] | None] | None, key: str
+        self, target: tuple[str, str, int, list[object] | None] | None, key: str, point: _Point
     ) -> tuple[StepOutcome, str | None]:
         session_id = target[0] if target is not None else self._session.active_session_id
         if target is not None:
             _session_id, _frame, local_id, _guard = target
-            point = await self._hit_test(session_id, local_id)
             if point is None:
                 return StepOutcome.STALE, "target disconnected"
             if point == "covered":
@@ -493,7 +524,7 @@ class CdpPage(Page):
         return StepOutcome.EXECUTED, None
 
     async def _upload(
-        self, target: tuple[str, str, int, list[object] | None] | None, files: tuple[Attachment, ...]
+        self, target: tuple[str, str, int, list[object] | None] | None, files: tuple[Attachment, ...], point: _Point
     ) -> tuple[StepOutcome, str | None]:
         if target is None:
             return StepOutcome.FAILED, "upload requires a target"
@@ -503,7 +534,6 @@ class CdpPage(Page):
         if total > self._config.max_upload_bytes:
             return StepOutcome.FAILED, f"{total} bytes exceeds max_upload_bytes ({self._config.max_upload_bytes})"
         session_id, _frame, local_id, _guard = target
-        point = await self._hit_test(session_id, local_id)
         if point is None:
             return StepOutcome.STALE, "target disconnected"
         if point == "covered":
@@ -636,78 +666,58 @@ class CdpPage(Page):
             )
         )
 
-    async def _hit_test(self, session_id: str, local_id: int) -> tuple[float, float] | Literal["covered"] | None:
-        script = (
-            "(id => { const e = window.__fastbrowse?.nodes.get(id); "
-            "if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled=\"true\"],[inert]') || "
-            "!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return null; "
-            "e.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'}); "
-            "const r = e.getBoundingClientRect(); let x = r.x + r.width / 2, y = r.y + r.height / 2; "
-            "if (!r.width || !r.height) return null; "
-            # Descend through open shadow roots: the document-level hit is only the outermost host.
-            "let node = e, doc = e.ownerDocument; while (true) { "
-            "const view = doc.defaultView; "
-            "if (x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight) return null; "
-            "let hit = doc.elementFromPoint(x, y); "
-            "while (hit?.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); "
-            "if (!inner || inner === hit) break; hit = inner; } "
-            "if (!node.contains(hit)) return 'covered'; "
-            "if (doc === document) break; "
-            "node = view.frameElement; if (!node) return null; "
-            "const frame = node.getBoundingClientRect(); "
-            "x = frame.x + (node.clientLeft + x) * frame.width / node.offsetWidth; "
-            "y = frame.y + (node.clientTop + y) * frame.height / node.offsetHeight; doc = node.ownerDocument; } "
-            "return [x, y]; })"
-            f"({local_id})"
-        )
-        result = await self._evaluate(session_id, script)
-        if result is None or result == "covered":
-            return result
-        return float(result[0]), float(result[1])
-
-    async def _live_guard(self, session_id: str, local_id: int) -> list[object] | None:
-        script = f"(() => {{ const r = window.__fastbrowse; return r ? r.guard(r.nodes.get({local_id})) : null; }})()"
-        return cast("list[object] | None", await self._evaluate(session_id, script))
-
     async def _fingerprint(self) -> str:
         result = await self._evaluate(self._session.active_session_id, _FINGERPRINT_JS)
         return str(result)
 
     async def _before_action(
-        self, target: tuple[str, str, int, list[object] | None] | None
-    ) -> tuple[str, list[object] | None]:
+        self, target: tuple[str, str, int, list[object] | None] | None, *, hit_test: bool
+    ) -> tuple[str, list[object] | None, _Point]:
         if target is None:
-            return await self._fingerprint(), None
-        session_id, _frame, local_id, _guard = target
-        if session_id != self._session.active_session_id:
-            fingerprint_task = asyncio.create_task(self._fingerprint())
-            guard_task = asyncio.create_task(self._live_guard(session_id, local_id))
-            try:
-                fingerprint, guard = await asyncio.gather(fingerprint_task, guard_task)
-            finally:
-                fingerprint_task.cancel()
-                guard_task.cancel()
-                await asyncio.gather(fingerprint_task, guard_task, return_exceptions=True)
-            return fingerprint, guard
-        result = await self._evaluate(
-            session_id,
-            f"(() => {{ const r = window.__fastbrowse; return [{_FINGERPRINT_JS}, "
-            f"r ? r.guard(r.nodes.get({local_id})) : null]; }})()",
-        )
-        return str(result[0]), cast("list[object] | None", result[1])
+            return await self._fingerprint(), None, None
+        session_id, _frame, local_id, guard = target
+        same_session = session_id == self._session.active_session_id
+
+        async def target_state() -> tuple[str, list[object] | None, _Point]:
+            # Guard validation and hit testing share a renderer task, so no page script can swap the
+            # verified control between them. Stale controls must never be scrolled into view.
+            result = await self._evaluate(
+                session_id,
+                "(() => { const r = window.__fastbrowse; "
+                f"const fingerprint = {_FINGERPRINT_JS if same_session else "''"}; "
+                f"const guard = r?.guard ? r.guard(r.nodes.get({local_id})) : null; "
+                f"const point = {json.dumps(hit_test)} && JSON.stringify(guard) === "
+                f"JSON.stringify({json.dumps(guard)}) ? ({_HIT_TEST_JS})({local_id}) : null; "
+                "return [fingerprint, guard, point]; })()",
+            )
+            point = result[2]
+            if point is not None and point != "covered":
+                point = (float(point[0]), float(point[1]))
+            return str(result[0]), cast("list[object] | None", result[1]), point
+
+        if same_session:
+            return await target_state()
+        fingerprint_task = asyncio.create_task(self._fingerprint())
+        target_task = asyncio.create_task(target_state())
+        try:
+            fingerprint, (_, live_guard, point) = await asyncio.gather(fingerprint_task, target_task)
+            return fingerprint, live_guard, point
+        finally:
+            fingerprint_task.cancel()
+            target_task.cancel()
+            await asyncio.gather(fingerprint_task, target_task, return_exceptions=True)
 
     async def _changed_since(self, before: str) -> bool:
         """Wait for the page to settle after an action, then report whether it changed.
 
         A click that navigates returns before the navigation starts, so an immediate fingerprint would describe
-        the old page. Settled means the document is loaded and two polls agree. A blocking JavaScript dialog
+        the old page. Settled means an interactive document with a quiet DOM. A blocking JavaScript dialog
         freezes the renderer, and an evaluate that fails mid-navigation is itself evidence of change.
         """
         deadline = time.monotonic() + _SETTLE_SECONDS
-        previous: str | None = None
         dialog = asyncio.create_task(self._session.wait_for_dialog())
         try:
-            await asyncio.sleep(_SETTLE_POLL_SECONDS)
+            await asyncio.sleep(_SETTLE_QUIET_SECONDS)
             while (remaining := deadline - time.monotonic()) > 0:
                 if self._session.pending_dialog() is not None:
                     return True
@@ -719,12 +729,11 @@ class CdpPage(Page):
                     if dialog in done or settled not in done:
                         return True
                     stable, current = settled.result()
-                    if stable or (current is not None and current == previous):
+                    if stable:
                         return current != before
-                    previous = current
                 except BrowserError:
                     # Navigation destroys the promise with its execution context. Only this read is retried.
-                    previous = None
+                    pass
                 finally:
                     settled.cancel()
                     await asyncio.gather(settled, return_exceptions=True)
@@ -739,14 +748,16 @@ class CdpPage(Page):
         # Hidden tabs throttle timers, so return a single sample for the caller to poll in that case.
         result = await self._evaluate(
             self._session.active_session_id,
-            "new Promise(resolve => { let previous = null; "
+            f"new Promise(resolve => {{ const sample = {_PAGE_JS}; "
             f"const deadline = performance.now() + {timeout_seconds * 1000}; "
             "const poll = () => { "
-            f"const current = document.readyState === 'complete' ? ({_FINGERPRINT_JS}) : null; "
-            "if (document.hidden) { resolve([false, current]); return; } "
-            "if ((current !== null && current === previous) || performance.now() >= deadline) { "
-            "resolve([true, current]); return; } previous = current; "
-            f"setTimeout(poll, {_SETTLE_POLL_SECONDS * 1000}); }}; "
+            "const state = sample('fingerprint'); "
+            f"const stable = state.ready && state.quietFor >= {_SETTLE_QUIET_SECONDS * 1000}; "
+            "if (stable || state.hidden || performance.now() >= deadline) { "
+            "resolve([stable, state.ready ? state.fingerprint : null]); return; } "
+            f"setTimeout(poll, state.ready ? Math.min({_SETTLE_POLL_SECONDS * 1000}, "
+            f"Math.max(1, {_SETTLE_QUIET_SECONDS * 1000} - state.quietFor)) "
+            f": {_SETTLE_POLL_SECONDS * 1000}); }}; "
             "poll(); })",
         )
         return bool(result[0]), cast("str | None", result[1])
