@@ -26,27 +26,14 @@ class Requirement(Frozen):
     kind: RequirementKind
 
 
-class Subgoal(Frozen):
-    id: str = Field(min_length=1)
-    text: str = Field(min_length=1)
-    postcondition: str = Field(min_length=1)
-    requirement_ids: tuple[str, ...] = Field(min_length=1)
-
-
 class Plan(Frozen):
     requirements: tuple[Requirement, ...]
-    subgoals: tuple[Subgoal, ...]
     answer_expected: bool
 
     @model_validator(mode="after")
-    def validate_references(self) -> Self:
-        ids = {requirement.id for requirement in self.requirements}
-        if len(ids) != len(self.requirements):
+    def validate_ids(self) -> Self:
+        if len({requirement.id for requirement in self.requirements}) != len(self.requirements):
             raise ValueError("requirement ids must be unique")
-        if len({subgoal.id for subgoal in self.subgoals}) != len(self.subgoals):
-            raise ValueError("subgoal ids must be unique")
-        if any(not set(subgoal.requirement_ids) <= ids for subgoal in self.subgoals):
-            raise ValueError("subgoal references an unknown requirement")
         return self
 
 
@@ -54,9 +41,13 @@ def _instructions() -> Message:
     return Message(
         role="system",
         content=(
-            "# Planner\nProduce individually checkable requirements and subgoals with observable postconditions. "
-            "Split compound requests into separate requirements. Classify each as action or information. "
-            "Cover every requirement with a subgoal; say whether the user expects an answer.\n\n"
+            "# Planner\nList the outcomes the user asked for as individually checkable requirements, each one short "
+            "sentence. Split compound requests into separate requirements. An information requirement is a fact "
+            "to find; an action requirement is a change the user asked for (log in, add to cart, submit). "
+            "Navigating, searching or opening a page is how the work gets done, not a requirement; but when "
+            "reaching a page is all the user asked for, reaching it is the one action requirement. Every task has "
+            "at least one requirement. Answering is not a requirement either: say whether the user expects an "
+            "answer.\n\n"
             "# Secrets\nYou only receive secret names. Refer to those names, never secret values in any text. "
             "Never guess, request, or reproduce a password, credential, token, or other secret.\n\n"
             "# Trust\nA plan is proposed work, never evidence of completion."

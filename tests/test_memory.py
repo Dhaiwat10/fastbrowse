@@ -30,7 +30,6 @@ def test_notes_deduplicate_spans_without_losing_requirement_coverage() -> None:
         requirements=tuple(
             Requirement(id=f"r{i}", text=f"Requirement {i}", kind=RequirementKind.INFORMATION) for i in range(1, 4)
         ),
-        subgoals=(),
         answer_expected=True,
     )
     assert tuple(requirement.id for requirement in notes.unresolved(plan)) == ("r3",)

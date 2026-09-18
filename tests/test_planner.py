@@ -10,16 +10,13 @@ from fastbrowse.models import (
     CostLine,
     LLMPurpose,
 )
-from fastbrowse.planner import Plan, Requirement, RequirementKind, Subgoal, make_plan
+from fastbrowse.planner import Plan, Requirement, RequirementKind, make_plan
 from fastbrowse.telemetry import Ledger
 
 
 def example_plan() -> Plan:
     return Plan(
         requirements=(Requirement(id="r1", text="Find the price", kind=RequirementKind.INFORMATION),),
-        subgoals=(
-            Subgoal(id="s1", text="Read product", postcondition="A quoted price is recorded", requirement_ids=("r1",)),
-        ),
         answer_expected=True,
     )
 
@@ -59,16 +56,6 @@ async def test_planning_reads_only_the_task_and_start_address_and_preserves_cost
     assert "individually checkable" in prompt
 
 
-@pytest.mark.parametrize("reference", ["unknown", ""])
-def test_plan_rejects_dangling_requirement_links(reference: str) -> None:
-    with pytest.raises(ValidationError):
-        Plan(
-            requirements=example_plan().requirements,
-            subgoals=(Subgoal(id="s1", text="Read", postcondition="Read", requirement_ids=(reference,)),),
-            answer_expected=True,
-        )
-
-
 def test_plan_rejects_duplicate_ids() -> None:
     with pytest.raises(ValidationError, match="unique"):
-        Plan(requirements=example_plan().requirements * 2, subgoals=example_plan().subgoals, answer_expected=True)
+        Plan(requirements=example_plan().requirements * 2, answer_expected=True)

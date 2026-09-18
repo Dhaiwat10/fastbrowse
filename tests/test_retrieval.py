@@ -253,7 +253,7 @@ async def test_short_read_batches_requirements_and_keeps_citations_without_llm()
     assert questions.keys() == {"version", "license"}
     assert all(isinstance(q, ChoiceQuestion) and "none" in q.criteria for q in questions.values())
     assert all("untrusted data" in q.instructions for q in questions.values())
-    draft = draft_answer(Plan(requirements=requirements, subgoals=(), answer_expected=True), notes)
+    draft = draft_answer(Plan(requirements=requirements, answer_expected=True), notes)
     assert draft is not None and len(draft.claims) == 2
     assert {claim.evidence_ids[0] for claim in draft.claims} == notes.evidence.keys()
     assert "License: BSD" in claim_check_questions(draft, notes)["unsupported_1"].instructions
@@ -449,7 +449,6 @@ async def test_compose_drops_uncited_and_unknown_claims_including_answer_text() 
             Requirement(id="r1", text="Find price", kind=RequirementKind.INFORMATION),
             Requirement(id="r2", text="Find shipping", kind=RequirementKind.INFORMATION),
         ),
-        subgoals=(),
         answer_expected=True,
     )
     result = await compose(llm, "Find price and shipping", plan, notes)
@@ -465,7 +464,7 @@ async def test_compose_drops_uncited_and_unknown_claims_including_answer_text() 
 
 async def test_compose_cannot_return_uncited_free_text_without_claims() -> None:
     llm = ScriptedLLM([{"answer": "Everything is complete", "claims": []}])
-    result = await compose(llm, "Do it", Plan(requirements=(), subgoals=(), answer_expected=True), Notes())
+    result = await compose(llm, "Do it", Plan(requirements=(), answer_expected=True), Notes())
     assert result.data.answer == "" and result.data.claims == ()
 
 
@@ -553,9 +552,7 @@ async def test_composition_and_claims_share_budget() -> None:
 
     llm = ScriptedLLM([{"answer": "", "claims": []}])
     ledger = Ledger(Limits(max_dollars=0.001))
-    composed = await compose(
-        llm, "Find it", Plan(requirements=(), subgoals=(), answer_expected=True), Notes(), ledger=ledger
-    )
+    composed = await compose(llm, "Find it", Plan(requirements=(), answer_expected=True), Notes(), ledger=ledger)
     jev = ScriptedJev({})
     with pytest.raises(BudgetExceeded):
         await check_claims(jev, composed.data, Notes(), Thresholds(), ledger=ledger)
@@ -586,7 +583,6 @@ async def test_only_a_confident_jev_no_lets_the_read_facts_stand_as_the_answer(
     notes = Notes((Fact(requirement_id="r1", text="The price is $12.", evidence=evidence),))
     plan = Plan(
         requirements=(Requirement(id="r1", text="Find price", kind=RequirementKind.INFORMATION),),
-        subgoals=(),
         answer_expected=True,
     )
     draft = draft_answer(plan, notes)
