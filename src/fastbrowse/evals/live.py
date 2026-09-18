@@ -45,6 +45,8 @@ class Outcome:
     data: object
     final_url: str | None
     """Only the fast arm can observe where it ended."""
+    quotes: tuple[tuple[str, str], ...] | None = None
+    """(url, quote) pairs located verbatim in page captures; the fast arm's evidence, None for hosted."""
 
 
 type Truth = Callable[[httpx.AsyncClient], Awaitable[object]]
@@ -127,7 +129,15 @@ def _godel(outcome: Outcome, truth: object) -> str | None:
 
 
 def _cart(outcome: Outcome, _: object) -> str | None:
-    return _answer_has(outcome, "backpack") or _ended_on(outcome, "/cart.html")
+    if outcome.quotes is None:
+        return _answer_has(outcome, "backpack")
+    # The cart page lists only what is in the cart, so a captured quote naming the backpack there is the
+    # page's word, where "no backpack was added" in the answer would pass a text check.
+    in_cart = any(
+        "backpack" in quote.casefold() and urlparse(url).path.rstrip("/") == "/cart.html"
+        for url, quote in outcome.quotes
+    )
+    return None if in_cart else f"no quote from /cart.html names the backpack: {outcome.quotes}"
 
 
 def _release(outcome: Outcome, truth: object) -> str | None:
@@ -202,7 +212,8 @@ async def fast_arm(
         http=http,
         on_event=lambda event: _on_fast_event(task, event),
     )
-    return Outcome(result.answer, result.data, result.final_url or task.start), result, result.cost
+    quotes = tuple((e.url, e.quote) for e in result.evidence)
+    return Outcome(result.answer, result.data, result.final_url or task.start, quotes), result, result.cost
 
 
 async def _on_fast_event(task: LiveTask, event: StepEvent | BrowserEvent) -> None:
