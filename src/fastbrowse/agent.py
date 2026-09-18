@@ -229,6 +229,10 @@ class Agent:
                     continue
                 raise _Stop(Status.NEEDS_LOGIN, f"sign-in required at {origin}")
             uncertain = decision.confidence < self._config.thresholds.recover_below
+            if uncertain and not raw.controls and await self._outwait(raw):
+                # Nothing to act on and no idea what to do is a page still rendering: a script-built app settles
+                # before it draws, and recovery on it saw an empty login form and spent 5 to 13s saying so.
+                continue
             if uncertain and state.ready_plan is None:
                 # Unsure without the requirements: the plan is already in flight and costs less than recovery.
                 await state.await_plan()
