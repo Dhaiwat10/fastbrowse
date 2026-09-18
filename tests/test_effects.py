@@ -45,3 +45,25 @@ def test_a_page_state_ignores_text_but_not_values() -> None:
     page = observation((TRIGGER,))
     assert state_key(page) == state_key(page.model_copy(update={"viewport_text": "12:01"}))
     assert state_key(page) != state_key(observation((TRIGGER.model_copy(update={"value": "One way"}),)))
+
+
+def test_a_value_set_on_the_field_an_overlay_stood_in_for_counts() -> None:
+    editor = control("editor", "Where from? ", "combobox", value="Lond")
+    choice = control("london", "London, United Kingdom", "option")
+    field = control("field", "Where from?", "combobox", value="London")
+    done = effect(observation((editor, choice)), observation((field,)))
+    assert done.set_something
+    # The label differs only in spacing, which is not a change.
+    assert done.summary.startswith("changed Where from? value: Lond -> London;")
+
+
+def test_a_chosen_suggestion_that_leaves_the_typed_text_counts() -> None:
+    editor = control("editor", "Where from?", "combobox", value="London")
+    choice = control("london", "London, United Kingdom", "option")
+    field = control("field", "Where from?", "combobox", value="London")
+    assert effect(observation((editor, choice)), observation((field,)), choice).set_something
+
+
+def test_an_option_no_field_shows_afterwards_set_nothing() -> None:
+    after = observation((TRIGGER.model_copy(update={"label": "Ticket type. Round trip", "expanded": False}),))
+    assert not effect(observation(OPTIONS), after, OPTIONS[0]).set_something

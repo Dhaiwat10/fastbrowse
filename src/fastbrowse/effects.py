@@ -30,7 +30,8 @@ def state_key(observation: Observation) -> str:
 
 
 def _short(value: object) -> str:
-    text = "empty" if value in (None, "") else str(value)
+    text = " ".join(str(value).split()) if value is not None else ""
+    text = text or "empty"
     return text if len(text) <= _TEXT else text[: _TEXT - 1] + "…"
 
 
@@ -40,7 +41,21 @@ def _listed(controls: list[Control]) -> str:
     return f"{count}: {names}" + (f" and {len(controls) - _SHOWN} more" if len(controls) > _SHOWN else "")
 
 
-def effect(before: Observation, after: Observation) -> Effect:
+def _plain(text: object) -> str:
+    return " ".join(str(text).split()).casefold()
+
+
+def _shows(control: Control, choice: str) -> bool:
+    """Whether a field now shows `choice`, whole or as the start of it ("London" for "London, United Kingdom")."""
+    shown = [_plain(control.value)] if control.value else []
+    if control.role == "combobox":
+        shown.append(_plain(control.label))
+    return any(choice in text or choice.startswith(text) for text in shown if text)
+
+
+def effect(before: Observation, after: Observation, chosen: Control | None = None) -> Effect:
+    """What changed from `before` to `after`. With `chosen`, the option clicked in between, a field showing it
+    counts as a value set: an autocomplete choice can leave the text that was typed exactly as it was."""
     old = {c.id: c for c in before.controls}
     new = {c.id: c for c in after.controls}
     parts: list[str] = []
@@ -49,13 +64,22 @@ def effect(before: Observation, after: Observation) -> Effect:
         parts.append(f"went to {_short(after.url)}")
     changes: list[str] = []
     setting = False
+    # A picker can open as an overlay with its own copy of the field, so the field the choice fills is a
+    # different element before and after. A control unmatched by id is compared with the one earlier control
+    # sharing its role and label, if exactly one did.
+    by_name: dict[tuple[str, str], list[Control]] = {}
+    for control in before.controls:
+        by_name.setdefault((control.role, control.label.strip()), []).append(control)
     for key, now in new.items():
         was = old.get(key)
         if was is None:
-            continue
+            namesakes = by_name.get((now.role, now.label.strip()), [])
+            if len(namesakes) != 1 or namesakes[0].id in new:
+                continue
+            was = namesakes[0]
         for name in ("label", "value", "checked", "selected", "expanded"):
             a, b = getattr(was, name), getattr(now, name)
-            if a != b:
+            if (_plain(a) != _plain(b)) if name == "label" else (a != b):
                 changes.append(f"{_short(was.label)} {name}: {_short(a)} -> {_short(b)}")
                 # A menu opening or closing is not a value set.
                 setting = setting or name != "expanded"
@@ -71,4 +95,7 @@ def effect(before: Observation, after: Observation) -> Effect:
         parts.append(f"showed {_listed(shown)}")
     if hidden:
         parts.append(f"removed {_listed(hidden)}")
+    if chosen is not None:
+        choice = _plain(chosen.label)
+        setting = setting or any(c.role not in SETTING_ROLES and _shows(c, choice) for c in after.controls)
     return Effect(summary="; ".join(parts) or "nothing visible changed", set_something=navigated or setting)

@@ -390,7 +390,7 @@ class Agent:
             if act.outcome is StepOutcome.EXECUTED and target is not None and target.role in SETTING_ROLES:
                 # Choosing an option has an intended effect to check: a menu that closed without the value
                 # changing still changes the page, and Google Flights' "One way" was clicked to the step limit.
-                done = effect(observation, await self._observe())
+                done = effect(observation, await self._observe(), target)
                 state.acted_from = None
                 if not done.set_something:
                     progressed = False
