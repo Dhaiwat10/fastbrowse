@@ -829,7 +829,9 @@ class CdpPage(Page):
             f"setTimeout(poll, state.ready ? Math.min({_SETTLE_POLL_SECONDS * 1000}, "
             f"Math.max(1, {_SETTLE_QUIET_SECONDS * 1000} - state.quietFor)) "
             f": {_SETTLE_POLL_SECONDS * 1000}); }}; "
-            "poll(); })",
+            # Wait for one rendered frame first: a menu shown in an animation frame callback mutates only when that
+            # frame runs, and a late frame would otherwise let 200ms of quiet pass before the menu exists.
+            "if (document.hidden) poll(); else requestAnimationFrame(() => setTimeout(poll, 0)); })",
         )
         return bool(result[0]), cast("str | None", result[1])
 
