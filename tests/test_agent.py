@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 # pyright: reportPrivateUsage=false
-from fastbrowse.agent import Agent, _follow_recovery, _RunState, _Stop, _unread
-from fastbrowse.config import Config
+from fastbrowse.agent import Agent, _follow_recovery, _history, _RunState, _Stop, _unread
+from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.llm import Generation
 from fastbrowse.memory import Notes
 from fastbrowse.models import Authorization, Limits, LLMPurpose, Operation, Status, StepOutcome
@@ -238,3 +238,16 @@ async def test_a_named_action_is_not_taken_over_a_confident_choice_or_on_a_contr
     assert _follow_recovery(state, observation((button,)), decision, uncertain=False) is None
     state.directed = (Operation.CLICK, "search")
     assert _follow_recovery(state, observation(()), decision, uncertain=True) is None
+
+
+def test_earlier_actions_stay_in_view_without_their_effects() -> None:
+    entries = [
+        HistoryEntry(
+            operation=Operation.FILL, target=f"field {i}", outcome=StepOutcome.EXECUTED, page_changed=True, effect="e"
+        )
+        for i in range(10)
+    ]
+    shown = _history(entries, ObservationLimits(history_entries=3, earlier_history_entries=4))
+    assert [entry.target for entry in shown] == [f"field {i}" for i in range(3, 10)]
+    assert [entry.effect for entry in shown] == [None] * 4 + ["e"] * 3
+    assert _history(entries[:2], ObservationLimits(history_entries=3)) == tuple(entries[:2])

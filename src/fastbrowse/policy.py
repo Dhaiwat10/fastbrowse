@@ -307,12 +307,11 @@ async def _evaluate(
 
 
 def _state(observation: Observation, controls: Sequence[Control], context: StepContext) -> JsonValue:
-    history = context.history[-10:]
     state: dict[str, JsonValue] = {
         "page": {"url": observation.url, "title": observation.title, "text": observation.viewport_text},
         "requirements": list(context.requirements),
         "notes": context.notes,
-        "recent_actions": [entry.model_dump(mode="json", exclude_none=True) for entry in history],
+        "recent_actions": [entry.model_dump(mode="json", exclude_none=True) for entry in context.history],
         "elements": [_element(c) for c in controls],
     }
     if context.secrets:

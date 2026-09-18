@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field, JsonValue
 
-from fastbrowse.config import Config
+from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.effects import SETTING_ROLES, effect, state_key
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, LLMError, Message
@@ -1034,7 +1034,7 @@ class Agent:
             subgoal=state.hint,
             requirements=tuple(r.text for r in state.ready_plan.requirements) if state.ready_plan else (),
             notes=state.notes.render(4000),
-            history=tuple(state.history[-self._config.observation.history_entries :]),
+            history=_history(state.history, self._config.observation),
             check_login=check_login,
             has_attachments=bool(state.attachments),
             secrets=secrets,
@@ -1075,6 +1075,13 @@ def _describe(control: Control) -> str:
     """Name which one was chosen, not just what it read: a label alone cannot identify one of six
     identically labelled buttons, in the step log or in the history the next choice is made from."""
     return f"{control.label} ({control.context})" if control.context else control.label
+
+
+def _history(history: Sequence[HistoryEntry], limits: ObservationLimits) -> tuple[HistoryEntry, ...]:
+    """The recent actions in full, after the earlier ones without the effects that make an entry long."""
+    split = len(history) - limits.history_entries
+    earlier = history[max(0, split - limits.earlier_history_entries) : max(0, split)]
+    return (*(entry.model_copy(update={"effect": None}) for entry in earlier), *history[max(0, split) :])
 
 
 def _controls_text(observation: Observation) -> str:
