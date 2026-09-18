@@ -39,10 +39,12 @@ import fastbrowse.run
 from fastbrowse.adapters.bitwarden import bitwarden_login
 from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser
 from fastbrowse.agent import Agent
+from fastbrowse.browser import CdpPage
 from fastbrowse.browser.recording import Recording
 from fastbrowse.clients.environment import load_settings
 from fastbrowse.evals.live_tasks import TASKS, Category, LiveTask, Outcome
 from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, StepEvent
+from fastbrowse.page import Observation
 from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
 
@@ -95,6 +97,33 @@ class _TimedRecording(Recording):
         await super().show_result(task, result)
 
 
+# A popup left open marks the rest of the page aria-hidden, which the agent rightly ignores and a grader
+# reading the form must not; so the grader's look lifts the marks, observes as the agent would, and restores them.
+_UNHIDE = """(() => {
+  const marked = [...document.querySelectorAll('[aria-hidden="true"],[inert]')];
+  window.__fastbrowseHidden = marked.map(e => [e, e.getAttribute('aria-hidden'), e.hasAttribute('inert')]);
+  marked.forEach(e => { e.removeAttribute('aria-hidden'); e.removeAttribute('inert'); });
+})()"""
+_RESTORE = """(() => {
+  for (const [e, hidden, inert] of window.__fastbrowseHidden || []) {
+    if (hidden !== null) e.setAttribute('aria-hidden', hidden);
+    if (inert) e.setAttribute('inert', '');
+  }
+  delete window.__fastbrowseHidden;
+})()"""
+
+
+class _GradedPage(CdpPage):
+    async def observe_all(self) -> Observation:
+        """Every control on the page, including those a popup has hidden from the agent."""
+        session_id = self._session.active_session_id
+        await self._evaluate(session_id, _UNHIDE)
+        try:
+            return await self.observe()
+        finally:
+            await self._evaluate(session_id, _RESTORE)
+
+
 class _ObservedAgent(Agent):
     """fastbrowse's agent, with the page it ended on observed once more after the run, for graders that read the
     page itself (what a form ended up holding) rather than anything the agent reported."""
@@ -105,9 +134,11 @@ class _ObservedAgent(Agent):
         result = await super().run(*args, **kwargs)
         try:
             observation = await self._page.observe()
+            hidden = await self._page.observe_all() if isinstance(self._page, _GradedPage) else None
         except Exception:  # a page that cannot be observed leaves nothing to grade, which the grader reports
             return result
-        _ObservedAgent.controls = tuple((c.label, c.value) for c in observation.controls)
+        controls = (*observation.controls, *(hidden.controls if hidden is not None else ()))
+        _ObservedAgent.controls = tuple((c.label, c.value) for c in controls)
         return result
 
 
@@ -119,6 +150,7 @@ async def fast_arm(
     with (
         mock.patch.object(fastbrowse.run, "Recording", _TimedRecording),
         mock.patch.object(fastbrowse.run, "Agent", _ObservedAgent),
+        mock.patch.object(fastbrowse.run, "CdpPage", _GradedPage),
     ):
         result = await run_task(
             task.task,
