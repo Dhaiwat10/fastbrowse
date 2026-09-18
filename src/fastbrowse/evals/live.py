@@ -19,6 +19,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 from urllib.parse import unquote, urlparse
 
 import httpx
@@ -231,6 +232,7 @@ async def run_arm(arm: str, task: LiveTask, http: httpx.AsyncClient, downloads: 
             row["trace"] = [f"{s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in result.steps]
             dollars: float | None = cost.known_dollars
             row["unknown_cost"] = cost.has_unknown
+            row["seconds_by_call"] = cost.seconds_by_call()
             row["cost_by_component"] = {
                 c: round(sum(line.dollars or 0 for line in cost.lines if line.component == c), 5)
                 for c in {line.component.value for line in cost.lines}
@@ -245,9 +247,13 @@ async def run_arm(arm: str, task: LiveTask, http: httpx.AsyncClient, downloads: 
         }
         return row
     failure = task.check(outcome, truth)
+    # Right and proven are graded apart: a correct answer the agent could not back with quotes is a
+    # different defect from a wrong one, and one pass/fail column hid which the suite was showing.
+    correct = failure is None
     if arm == "fast" and failure is None and status != Status.COMPLETE.value:
         failure = f"status {status}"
     return row | {
+        "correct": correct,
         "passed": failure is None,
         "failure": failure,
         "status": status,
@@ -289,7 +295,14 @@ async def main(argv: list[str]) -> int:
         passed = sum(bool(r["passed"]) for r in arm_rows)
         dollars = sum(float(d) for r in arm_rows if isinstance(d := r.get("dollars"), int | float))
         seconds = sum(float(s) for r in arm_rows if isinstance(s := r.get("seconds"), int | float))
-        print(f"{arm}: {passed}/{len(arm_rows)} passed, ${dollars:.4f}, {seconds:.0f}s")
+        correct = sum(bool(r.get("correct")) for r in arm_rows)
+        print(f"{arm}: {passed}/{len(arm_rows)} passed, {correct} correct, ${dollars:.4f}, {seconds:.0f}s")
+        calls: dict[str, float] = {}
+        for r in arm_rows:
+            for label, spent in cast(dict[str, float], r.get("seconds_by_call", {})).items():
+                calls[label] = calls.get(label, 0.0) + spent
+        for label, spent in sorted(calls.items(), key=lambda item: -item[1]):
+            print(f"  {label:18} {spent / len(arm_rows):5.1f}s a task")
     return 0
 
 

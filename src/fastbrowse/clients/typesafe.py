@@ -1,6 +1,7 @@
 """Direct TypeSafe System One transport, using caller-owned HTTP resources."""
 
 from collections.abc import Mapping
+from time import monotonic
 
 import httpx
 from pydantic import JsonValue
@@ -33,6 +34,7 @@ class TypeSafeJevClient:
         self._model = model
 
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        started = monotonic()
         response = await post(
             self._http,
             f"{self._base_url}/v1/systemone",
@@ -50,7 +52,9 @@ class TypeSafeJevClient:
                 model=model,
                 answers=parse_answers(payload.get("answers"), questions),
                 input_tokens=tokens,
-                cost=estimated_cost(tokens, token_count(usage.get("output_tokens", 0))),
+                cost=estimated_cost(tokens, token_count(usage.get("output_tokens", 0))).model_copy(
+                    update={"seconds": monotonic() - started}
+                ),
             )
         except (ValueError, TypeError, OverflowError) as error:
             raise response_error(response, f"Invalid Jev response ({error})") from None

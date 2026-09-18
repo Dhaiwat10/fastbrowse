@@ -118,10 +118,25 @@ class CostLine(Frozen):
     purpose: LLMPurpose | None = None
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
+    seconds: float | None = Field(default=None, ge=0)
+    """Wall time of the call, retries included. None for a line that is not one call, such as browser time."""
+
+    @property
+    def label(self) -> str:
+        return self.component.value if self.purpose is None else f"{self.component.value}:{self.purpose.value}"
 
 
 class CostBreakdown(Frozen):
     lines: tuple[CostLine, ...] = ()
+
+    def seconds_by_call(self) -> dict[str, float]:
+        """Wall time per kind of call. Calls can overlap (the plan runs beside the first steps), so the sum
+        can exceed the run's wall time."""
+        totals: dict[str, float] = {}
+        for line in self.lines:
+            if line.seconds is not None:
+                totals[line.label] = round(totals.get(line.label, 0.0) + line.seconds, 2)
+        return totals
 
     @property
     def known_dollars(self) -> float:

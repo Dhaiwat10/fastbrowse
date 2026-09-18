@@ -3,6 +3,7 @@
 import base64
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
+from time import monotonic
 from typing import assert_never
 
 import httpx
@@ -159,6 +160,7 @@ class OpenAICompatibleLLM:
         if self._reasoning_effort is not None:
             body["reasoning"] = {"effort": self._reasoning_effort.value}
         costs: list[CostLine] = []
+        started = monotonic()
         for attempt in range(2):
             if ledger is not None:
                 ledger.reserve(CostComponent.LLM)
@@ -192,7 +194,8 @@ class OpenAICompatibleLLM:
                     ]
                 )
             else:
-                return Generation(data=data, cost=_total_cost(costs, purpose))
+                cost = _total_cost(costs, purpose).model_copy(update={"seconds": monotonic() - started})
+                return Generation(data=data, cost=cost)
         raise AssertionError("unreachable")
 
 

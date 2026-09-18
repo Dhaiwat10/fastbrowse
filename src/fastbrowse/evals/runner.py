@@ -58,6 +58,7 @@ async def run_task(
         "seconds": round(time.monotonic() - started, 1),
         "dollars": round(result.cost.known_dollars, 5),
         "unknown_cost": result.cost.has_unknown,
+        "seconds_by_call": result.cost.seconds_by_call(),
         "steps": len(result.steps),
         "answer": result.answer,
         "data": result.data,

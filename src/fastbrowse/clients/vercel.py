@@ -14,6 +14,7 @@ probabilities may be JSON integers. This implementation makes no discovery calls
 """
 
 from collections.abc import Mapping
+from time import monotonic
 
 import httpx
 from pydantic import JsonValue
@@ -39,6 +40,7 @@ class VercelGatewayJevClient:
         self._http = http
 
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        started = monotonic()
         response = await post(
             self._http,
             "https://ai-gateway.vercel.sh/v4/ai/evaluation-model",
@@ -74,7 +76,7 @@ class VercelGatewayJevClient:
                 model="typesafe-ai/jev",
                 answers=parse_answers(payload.get("answers"), questions, gateway=True, confidence=confidence),
                 input_tokens=tokens,
-                cost=cost,
+                cost=cost.model_copy(update={"seconds": monotonic() - started}),
             )
         except (ValueError, TypeError, OverflowError) as error:
             raise response_error(response, f"Invalid gateway response ({error})") from None
