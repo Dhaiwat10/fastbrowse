@@ -235,44 +235,56 @@
     }
   };
   addDoc(document);
-  const reveals = [];
-  const collect = rules => {
-    for (const rule of rules) {
-      if (rule.cssRules?.length) collect(rule.cssRules);
-      for (const selector of (rule.selectorText || '').split(',')) {
-        // Split `a:hover b` into the hovered compound and what it reveals inside it. Rules that restyle the
-        // hovered element itself, or reveal a sibling or a pseudo-element, have nothing to offer here.
-        const m = selector.match(/^(.*?):hover([^\s>+~]*)\s*(>?)\s*([^+~]*)$/);
-        if (!m || !m[1].trim() || !m[4].trim() || m[4].includes('::')) continue;
-        reveals.push([(m[1] + m[2]).replaceAll(':hover', ''), `:scope ${m[3]} ${m[4].replaceAll(':hover', '')}`]);
-      }
-    }
-  };
-  for (const doc of docs) {
+  // Parsing every stylesheet each step is the slow part on a large site, so a document's hover rules are kept
+  // until its rule counts change (a new sheet, or rules a script inserted).
+  registry.hoverRules ||= new WeakMap();
+  const revealsIn = doc => {
+    const sheets = [];
     for (const sheet of doc.styleSheets) {
-      try { collect(sheet.cssRules); } catch { /* A cross-origin stylesheet cannot be read. */ }
+      try { sheets.push(sheet.cssRules); } catch { /* A cross-origin stylesheet cannot be read. */ }
     }
-  }
-  const offered = new Map(controls.map(c => [registry.nodes.get(c.id), c]));
-  let hovers = 0;
-  for (const [base, tail] of reveals.slice(0, 200)) {
-    for (const doc of docs) {
+    const version = sheets.map(rules => rules.length).join(',');
+    const cached = registry.hoverRules.get(doc);
+    if (cached?.version === version) return cached.reveals;
+    const reveals = new Map();
+    const collect = rules => {
+      for (const rule of rules) {
+        if (rule.cssRules?.length) collect(rule.cssRules);
+        for (const selector of (rule.selectorText || '').split(',')) {
+          // Split `a:hover b` into the hovered compound and what it reveals inside it. Rules that restyle the
+          // hovered element itself, or reveal a sibling or a pseudo-element, have nothing to offer here.
+          const m = selector.match(/^(.*?):hover([^\s>+~]*)\s*(>?)\s*([^+~]*)$/);
+          if (!m || !m[1].trim() || !m[4].trim() || m[4].includes('::')) continue;
+          const pair = [(m[1] + m[2]).replaceAll(':hover', '').trim(), `:scope ${m[3]} ${m[4].replaceAll(':hover', '')}`];
+          reveals.set(pair.join('\n'), pair);
+        }
+      }
+    };
+    for (const rules of sheets) collect(rules);
+    const found = [...reveals.values()].slice(0, 200);
+    registry.hoverRules.set(doc, { version, reveals: found });
+    return found;
+  };
+  const offered = new Set(controls.map(c => registry.nodes.get(c.id)));
+  // Bounded work: each candidate costs a query, and a stylesheet can name thousands of hoverable elements.
+  let hovers = 0, checked = 0;
+  for (const doc of docs) {
+    for (const [base, tail] of revealsIn(doc)) {
       let hosts = [];
-      try { hosts = [...doc.querySelectorAll(base)].slice(0, 50); } catch { continue; }
+      try { hosts = doc.querySelectorAll(base); } catch { continue; }
       for (const e of hosts) {
-        if (hovers >= 40 || e === doc.body || e === doc.documentElement || !visible(e)) continue;
+        if (hovers >= 40 || checked >= 400) break;
+        // A link or button's own hover rule restyles it or shows decoration; offering HOVER there as well as
+        // CLICK only gives the choice another way to be wrong.
+        if (offered.has(e) || e === doc.body || e === doc.documentElement || !visible(e)) continue;
         const r = e.getBoundingClientRect(), x = r.x + r.width / 2, y = r.y + r.height / 2;
         if (r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth || r.height > innerHeight) continue;
+        checked++;
         let hidden = false;
         try {
           hidden = [...e.querySelectorAll(tail)].some(t => !visible(t) && (t.textContent.trim() || t.querySelector('img,a')));
         } catch { continue; }
         if (!hidden) continue;
-        const known = offered.get(e);
-        if (known) {
-          if (!known.operations.includes('hover')) known.operations.push('hover');
-          continue;
-        }
         const image = e.querySelector('img[alt]');
         const label = firstLine(e.innerText) || e.getAttribute('aria-label') || image?.getAttribute('alt') ||
           e.getAttribute('title') || e.tagName.toLowerCase();
@@ -285,7 +297,7 @@
           frame_path: framePath(e.ownerDocument), submit_semantics: null, value: null, operations: ['hover'],
         };
         controls.push(c);
-        offered.set(e, c);
+        offered.add(e);
         hovers++;
       }
     }
