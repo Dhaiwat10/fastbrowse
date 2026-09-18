@@ -12,6 +12,7 @@ import contextlib
 import logging
 from collections.abc import Coroutine
 from dataclasses import dataclass
+from pathlib import Path
 from types import TracebackType
 from typing import Any, Self, cast
 
@@ -32,13 +33,14 @@ from fastbrowse.models import BrowserConnection as BrowserConnectionModel
 from fastbrowse.page import BrowserError, Dialog, Tab
 
 # Response-stage interception is enough: fastbrowse only needs the bytes of a save-as download, never to
-# rewrite a request. Document covers navigations to a downloadable URL; Other covers a fetch/anchor-click
-# download that never navigates the frame at all.
+# rewrite a request. Chrome also classifies download-attribute anchors as Document; intercepting Other
+# needlessly pauses favicons. Browser download events only expose paths on the browser's filesystem,
+# so they cannot deliver remote file bytes and changing context-wide behavior would affect unowned tabs.
 DOWNLOAD_PATTERNS: tuple[RequestPattern, ...] = (
     {"urlPattern": "*", "resourceType": "Document", "requestStage": "Response"},
-    {"urlPattern": "*", "resourceType": "Other", "requestStage": "Response"},
 )
 _ENABLE_DOMAINS = ("Page", "Runtime", "DOM")
+_TRACK_DOCUMENT_JS = Path(__file__).with_name("snapshot.js").read_text() + "('fingerprint')"
 
 
 class _HideEndpoint(logging.Filter):
@@ -267,6 +269,13 @@ class BrowserSession:
                 )
                 tasks.create_task(
                     self.client.send.Fetch.enable(params={"patterns": list(DOWNLOAD_PATTERNS)}, session_id=session_id)
+                )
+                # Track parsing and hydration before the first post-navigation read, so an already
+                # quiet document does not pay another full window just to install its observer.
+                tasks.create_task(
+                    self.client.send.Page.addScriptToEvaluateOnNewDocument(
+                        params={"source": _TRACK_DOCUMENT_JS}, session_id=session_id
+                    )
                 )
         except* BrowserError as errors:
             raise errors.exceptions[0] from errors

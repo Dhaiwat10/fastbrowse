@@ -3,6 +3,7 @@
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -109,6 +110,7 @@ class LLMPurpose(StrEnum):
     RECOVER = "recover"
     VERIFY = "verify"
     COMPOSE = "compose"
+    SHORTCUT = "shortcut"
 
 
 class CostLine(Frozen):
@@ -118,10 +120,25 @@ class CostLine(Frozen):
     purpose: LLMPurpose | None = None
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
+    seconds: float | None = Field(default=None, ge=0)
+    """Wall time of the call, retries included. None for a line that is not one call, such as browser time."""
+
+    @property
+    def label(self) -> str:
+        return self.component.value if self.purpose is None else f"{self.component.value}:{self.purpose.value}"
 
 
 class CostBreakdown(Frozen):
     lines: tuple[CostLine, ...] = ()
+
+    def seconds_by_call(self) -> dict[str, float]:
+        """Wall time per kind of call. Calls can overlap (the plan runs beside the first steps), so the sum
+        can exceed the run's wall time."""
+        totals: dict[str, float] = {}
+        for line in self.lines:
+            if line.seconds is not None:
+                totals[line.label] = round(totals.get(line.label, 0.0) + line.seconds, 2)
+        return totals
 
     @property
     def known_dollars(self) -> float:
@@ -170,6 +187,16 @@ class BrowserConnection(Frozen):
     """True when the browser runs on another host: tabs must be foregrounded and files move as bytes."""
 
 
+class LocalChrome(Frozen):
+    binary: str | None = None
+    """A name or path that replaces discovery of the Chrome binary."""
+    headed: bool = False
+    """Show the window, to watch a run."""
+    profile: Path | None = None
+    """A profile directory kept between runs, so a site signed into there stays signed in. Without one,
+    every run starts from a fresh profile that is deleted afterwards."""
+
+
 class Attachment(Frozen):
     name: str
     mime_type: str
@@ -179,6 +206,7 @@ class Attachment(Frozen):
 class Limits(Frozen):
     max_steps: int = Field(default=60, gt=0)
     max_jev_calls: int = Field(default=150, gt=0)
+    """Logical Jev evaluations. A hedged or retried request adds cost but not a call."""
     max_llm_calls: int = Field(default=40, gt=0)
     max_dollars: float | None = Field(default=None, gt=0)
     """Bounds Jev and LLM spend as it happens. A cloud browser bills when it stops, after the run, so its
@@ -212,6 +240,14 @@ class StepEvent(Frozen):
     step: StepResult
 
 
-type EventHandler = Callable[[StepEvent], Awaitable[None]]
+class BrowserEvent(Frozen):
+    """Sent once, when the browser is open and before the first step."""
+
+    type: Literal["browser"] = "browser"
+    live_url: str | None
+    """Where a cloud browser can be watched live; None for local Chrome."""
+
+
+type EventHandler = Callable[[StepEvent | BrowserEvent], Awaitable[None]]
 type UntilCheck = Callable[[str], Awaitable[bool]]
 """Caller assertion over the final page URL; COMPLETE requires it to return True when supplied."""

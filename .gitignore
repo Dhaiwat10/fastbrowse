@@ -6,3 +6,6 @@ artifacts/
 dist/
 .pytest_cache/
 .ruff_cache/
+
+# Synced by `vale sync`; only the house style is tracked.
+.vale/styles/write-good/

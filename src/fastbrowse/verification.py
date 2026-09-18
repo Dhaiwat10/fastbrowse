@@ -1,7 +1,8 @@
 """Deciding whether a run is actually finished, and whether its answer and extracted data hold up.
 
-Jev answers the cheap checks, all framed so "yes" means something is wrong; an LLM looks at a screenshot only
-when Jev's completion answer lands in the uncertain band.
+Jev answers the cheap checks: "is the task complete" (yes means done), and the unmet-requirement and claim
+checks, framed so "yes" means something is wrong. An LLM looks at a screenshot only when Jev's completion
+answer lands in the uncertain band.
 """
 
 from collections.abc import Mapping, Sequence

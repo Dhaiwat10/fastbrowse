@@ -1,11 +1,13 @@
 """Direct TypeSafe System One transport, using caller-owned HTTP resources."""
 
 from collections.abc import Mapping
+from time import monotonic
 
 import httpx
 from pydantic import JsonValue
 
 from fastbrowse.clients.validation import (
+    RequestUsage,
     estimated_cost,
     json_object,
     object_value,
@@ -14,8 +16,11 @@ from fastbrowse.clients.validation import (
     response_error,
     token_count,
     wire_questions,
+    with_discarded,
 )
 from fastbrowse.jev import JEV_MODEL, Evaluation, Question
+
+TYPESAFE_URL = "https://api.typesafe.ai"
 
 
 class TypeSafeJevClient:
@@ -24,7 +29,7 @@ class TypeSafeJevClient:
         api_key: str,
         *,
         http: httpx.AsyncClient,
-        base_url: str = "https://api.typesafe.ai",
+        base_url: str = TYPESAFE_URL,
         model: str = JEV_MODEL,
     ) -> None:
         self._api_key = api_key
@@ -33,11 +38,14 @@ class TypeSafeJevClient:
         self._model = model
 
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        started = monotonic()
+        sent = RequestUsage()
         response = await post(
             self._http,
             f"{self._base_url}/v1/systemone",
             self._api_key,
             {"model": self._model, "state": state, "questions": wire_questions(questions)},
+            usage=sent,
         )
         try:
             payload = json_object(response)
@@ -50,7 +58,9 @@ class TypeSafeJevClient:
                 model=model,
                 answers=parse_answers(payload.get("answers"), questions),
                 input_tokens=tokens,
-                cost=estimated_cost(tokens, token_count(usage.get("output_tokens", 0))),
+                cost=with_discarded(
+                    estimated_cost(tokens, token_count(usage.get("output_tokens", 0))), sent
+                ).model_copy(update={"seconds": monotonic() - started}),
             )
         except (ValueError, TypeError, OverflowError) as error:
             raise response_error(response, f"Invalid Jev response ({error})") from None

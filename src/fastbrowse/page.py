@@ -15,7 +15,7 @@ from fastbrowse.models import Artifact, Attachment, Frozen, Operation, StepOutco
 
 class Control(Frozen):
     id: str
-    """Stable within one observation only; a new observation re-issues ids."""
+    """Kept across observations for as long as the same DOM node survives."""
     frame_id: str | None
     frame_origin: str | None = None
     role: str
@@ -53,7 +53,8 @@ class Observation(Frozen):
     url: str
     title: str
     page_key: str
-    """Fingerprint of the observed page; `act` refuses to dispatch when the live page no longer matches."""
+    """Fingerprint of the observed page. `act` refuses a key other than the latest observation's, then re-checks
+    the target element itself before dispatch; an unrelated change elsewhere on the live page does not block it."""
     captured_at: datetime
     document_key: str = ""
     """Document identity, independent of field edits and scrolling, for access-wall checks."""
@@ -127,6 +128,8 @@ class Page(Protocol):
     def artifacts(self) -> tuple[Artifact, ...]: ...
 
     async def observe(self) -> Observation: ...
+
+    async def navigate(self, url: str) -> None: ...
 
     async def capture(self) -> Capture: ...
 

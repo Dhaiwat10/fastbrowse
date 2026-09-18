@@ -12,7 +12,7 @@ from tests.browser.test_browser import eval_value, find, observe_until, wait_unt
 from tests.test_policy import ScriptedJev
 from tests.test_retrieval import ScriptedLLM
 
-PLAN: JsonValue = {"requirements": [], "subgoals": [], "answer_expected": False}
+PLAN: JsonValue = {"requirements": [], "answer_expected": False}
 CONFIG = Config(thresholds=Thresholds(login_required_above=1))
 
 

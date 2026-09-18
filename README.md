@@ -21,19 +21,42 @@ Jev chooses each action, an LLM plans and reads, and code owns verification, saf
 
 Most browser agents generate each action from a screenshot. fastbrowse indexes the page into
 candidates and has [Jev](https://typesafe.ai), a choice model, **pick one**, so it cannot click
-something that was never on the page. An answer only counts if every fact in it is quoted verbatim
-from a stored capture of the page.
+something that was never on the page. Every claim in an answer cites a quote stored verbatim from
+the page, and Jev checks each claim against its quote.
 
-Same six live tasks, two passes each, against hosted Browser Use ([method](docs/evals.md)):
+Same six live tasks, two passes each, against hosted Browser Use measured the same day
+([method](docs/evals.md)):
 
-| | passed | time per task | cost per task |
-|:--|:--|:--|:--|
-| **fastbrowse** (cloud browser) | 11/12 | 26.7s | **$0.0160** |
-| hosted Browser Use | 11/12 | 27.4s | $0.4236 |
+| | passed | correct answer | median time | mean time | cost per task |
+|:--|:--|:--|:--|:--|:--|
+| **fastbrowse** (cloud browser) | **12/12** | 12/12 | **12.9s** | **15.4s** | **$0.0072** |
+| fastbrowse, previous build | 11/12 | | 27.5s | 26.7s | $0.0160 |
+| hosted Browser Use | 11/12 | 11/12 | 14.7s | 25.8s | $0.3767 |
 
-Twelve runs is a smoke test, not a benchmark: read it as "both finish these, at about the same
-speed, and fastbrowse costs about a twenty-sixth". Our miss was a correct answer that one claim's
-quote could not back, so it reported `unverified` instead of `complete`.
+**Speed.** This build more than halved the median, 27.5s to 12.9s, and now beats hosted Browser Use
+on median and mean at about a fiftieth of the cost. Best successful run per task, fastbrowse against hosted:
+pypi-version 9.5s against 18.1s, pypi-structured 11.8s against 15.7s, saucedemo-cart 20.0s against
+90.7s; hosted is still ahead by 1 to 2.6s on hn-top, github-license and wiki-godel. What did it: a
+direct address for the task proposed while the start page loads, a plan written from the task
+alone on a small model, settling on DOM quiet instead of every image and tracker, short facts picked
+by Jev, hedged requests against provider tails, and no low-confidence recovery for steps that do not act
+([details](docs/evals.md#results)).
+
+Twelve runs is a smoke test, not a benchmark: single runs swing by 4 to 5 seconds, and one
+wiki-godel run took 34s on a slow read. `passed` counts only `complete`; the hosted miss ended with
+"Task ended unexpectedly".
+
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
+  <img src="assets/architecture.svg" alt="The task is planned and the start page opened in parallel; each step indexes the page, Jev picks an operation and target, code gates it and acts; reads keep verbatim quotes, and the answer cites every claim.">
+</picture>
+
+Jev never writes an action, it picks one of the candidates on the page, so it cannot click something
+that is not there. The LLM plans, reads and writes. Code owns the gates: irreversible actions stop
+without `--authorize`, secrets reach models by name only, and every claim in an answer cites a
+quote from the page. More in [docs/design.md](docs/design.md).
 
 ## How it compares
 
@@ -58,13 +81,13 @@ Needs Python 3.14, [uv](https://docs.astral.sh/uv/), and Chrome (not needed with
 ```sh
 git clone https://github.com/agent-labs-dev/fastbrowse.git && cd fastbrowse
 uv sync
-cp .env.example .env            # then add a Jev key (AI_GATEWAY_API_KEY) and OPENROUTER_API_KEY
+cp .env.example .env            # add AI_GATEWAY_API_KEY or TYPESAFE_API_KEY, and OPENROUTER_API_KEY
 uv run fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
 
 ```
    0 read  -> executed
-complete ($0.0238, 1 steps)
+complete ($0.0071, 1 steps)
 The top story on Hacker News is titled "...".
 ```
 
@@ -74,9 +97,12 @@ answer, and cost by component.
 | Flag | Effect |
 |:--|:--|
 | `--start URL` | required: the page to open first |
-| `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`); far less likely to be bot-challenged |
+| `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`); far less likely to be bot-challenged. Prints a URL to watch it live |
+| `--headed` | show the local Chrome window |
+| `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in |
 | `--authorize` | allow submit, pay, delete and send; without it the run stops at `needs_confirmation` first |
 | `--secret NAME=ENV_VAR` | let the agent type `$ENV_VAR` on the start origin; models only see `NAME` |
+| `--bitwarden ITEM` | let the agent type that vault login's `username` and `password`, only where the item's saved URIs and their match detection allow |
 | `--max-steps N`, `--max-dollars N` | bound the run |
 | `--downloads DIR` | keep downloaded files |
 | `--json` | full result instead of the answer |
@@ -87,13 +113,34 @@ uv run fastbrowse "Log in as standard_user with the saved password and add the b
   --start https://www.saucedemo.com/ --secret password=SAUCE_PASSWORD --authorize
 ```
 
+### Signed-in sites
+
+Sign in once by hand in a profile of its own, then point runs at it. The agent reuses the session
+and never sees a password.
+
+```sh
+google-chrome --user-data-dir="$HOME/.fastbrowse/amazon" https://www.amazon.com/   # sign in, then close Chrome
+uv run fastbrowse "Add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
+  --start https://www.amazon.com/ --profile ~/.fastbrowse/amazon --headed
+```
+
+Or sign in from your vault: with the [Bitwarden CLI](https://bitwarden.com/help/cli/) signed in, name
+the item. Its values stay in this process and are typed only on a site the item's saved URIs cover.
+
+```sh
+export BW_SESSION="$(bw unlock --raw)"
+uv run fastbrowse "Sign in with the saved login, then add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
+  --start https://www.amazon.com/ --bitwarden Amazon --headed
+```
+
 ### Models
 
 The LLM defaults to `google/gemini-3.8-flash` at low reasoning effort, with
-`google/gemini-3.5-flash-lite` for typing field text. Override with `FASTBROWSE_LLM_MODEL` (every
-purpose), `FASTBROWSE_LLM_MODEL_<PURPOSE>` (`PLAN`, `READ`, `FIELD_TEXT`, `RECOVER`, `COMPOSE`,
-`VERIFY`) and `FASTBROWSE_LLM_REASONING` (`low`, `medium`, `high`). Flash-lite everywhere is faster
-but scored 8/12 live, so it is not the default.
+`google/gemini-3.5-flash-lite` for planning, proposing a direct address and typing field text.
+Override with `FASTBROWSE_LLM_MODEL` (every purpose), `FASTBROWSE_LLM_MODEL_<PURPOSE>` (`PLAN`,
+`READ`, `FIELD_TEXT`, `SHORTCUT`, `RECOVER`, `COMPOSE`, `VERIFY`) and `FASTBROWSE_LLM_REASONING`
+(`low`, `medium`, `high`). Flash-lite for every purpose is faster but scored 8/12 live, so it is
+used only where its output is checked downstream.
 
 ### Results
 
@@ -114,19 +161,47 @@ The exit code is 0 only for `complete`.
 ## Embed it
 
 ```python
+import asyncio
+
+from pydantic import BaseModel
+
 from fastbrowse import run_task
 from fastbrowse.models import Limits
 
-result = await run_task(
-    "Find the cheapest kettle and tell me its price.",
-    start="https://example.com/",
-    output_schema=Kettle,  # any pydantic model
-    limits=Limits(max_dollars=0.10),
-)
+
+class Release(BaseModel):
+    package: str
+    version: str
+
+
+async def main() -> None:
+    result = await run_task(
+        "Find the httpx package and report its name and latest released version.",
+        start="https://pypi.org/",
+        output_schema=Release,
+        limits=Limits(max_dollars=0.10),
+    )
+    print(result.status, result.data, f"${result.cost.known_dollars:.4f}")
+    for evidence in result.evidence:
+        print(f'  "{evidence.quote}" from {evidence.url}')
+
+
+asyncio.run(main())
+```
+
+```
+complete {'package': 'httpx', 'version': '0.28.1'} $0.0114
+  "httpx 0.28.1" from https://pypi.org/project/httpx/
+  "pip install httpx" from https://pypi.org/project/httpx/
 ```
 
 `run_task` builds the browser and clients, runs the agent, and closes the browser on every path.
 The result has `status`, `answer`, `data`, `evidence`, `final_url` and an itemized `cost`.
+
+Jev comes from Typesafe directly or through the Vercel AI Gateway, whichever key is set; with both,
+`FASTBROWSE_JEV_SOURCE` picks one, and `FASTBROWSE_JEV_BASE_URL` sends it through a proxy. Anything
+else, such as a cache or a recorded fixture, can be passed as `run_task(jev=...)`: an object with one
+`evaluate(state, questions)` method (the `JevClient` protocol in `jev.py`). The LLM works the same way.
 
 ## Safety model
 
@@ -143,14 +218,17 @@ The result has `status`, `answer`, `data`, `evidence`, `final_url` and an itemiz
 ## Evals and development
 
 ```sh
-uv run python -m fastbrowse.evals.runner                     # local fixtures, about $0.005 a task
+uv sync --all-extras                                         # the hosted-arm SDK too, which pyright checks
+uv run python -m fastbrowse.evals.runner                     # local fixtures, under half a cent a task
 uv run --extra browser-use python -m fastbrowse.evals.live   # live head-to-head; --arms fast skips hosted
-uv run ruff format . && uv run ruff check . && uv run pyright && uv run pytest && uv run python scripts/no_slop.py
+uv run ruff format . && uv run ruff check . && uv run pyright && uv run pytest
+uv run python scripts/no_slop.py && uv run vale sync && uv run vale README.md docs src scripts tests
 ```
 
 Grades come only from things the agent cannot write: requests the fixture server recorded, truth
-from a site's own API, or the URL the browser ended on. See [docs/evals.md](docs/evals.md) and
-[docs/design.md](docs/design.md).
+from a site's own API, or the URL the browser ended on. See [docs/evals.md](docs/evals.md),
+[docs/design.md](docs/design.md), and [docs/jev.md](docs/jev.md) for every Jev assumption checked against
+Typesafe's documentation.
 
 ## License
 

@@ -14,11 +14,13 @@ probabilities may be JSON integers. This implementation makes no discovery calls
 """
 
 from collections.abc import Mapping
+from time import monotonic
 
 import httpx
 from pydantic import JsonValue
 
 from fastbrowse.clients.validation import (
+    RequestUsage,
     dollars,
     estimated_cost,
     json_object,
@@ -28,20 +30,26 @@ from fastbrowse.clients.validation import (
     response_error,
     token_count,
     wire_questions,
+    with_discarded,
 )
 from fastbrowse.jev import Evaluation, Question
 from fastbrowse.models import CostBasis, CostComponent, CostLine
 
+GATEWAY_URL = "https://ai-gateway.vercel.sh"
+
 
 class VercelGatewayJevClient:
-    def __init__(self, api_key: str, *, http: httpx.AsyncClient) -> None:
+    def __init__(self, api_key: str, *, http: httpx.AsyncClient, base_url: str = GATEWAY_URL) -> None:
         self._api_key = api_key
         self._http = http
+        self._base_url = base_url.rstrip("/")
 
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        started = monotonic()
+        sent = RequestUsage()
         response = await post(
             self._http,
-            "https://ai-gateway.vercel.sh/v4/ai/evaluation-model",
+            f"{self._base_url}/v4/ai/evaluation-model",
             self._api_key,
             {"state": state, "questions": wire_questions(questions, gateway=True)},
             {
@@ -50,6 +58,7 @@ class VercelGatewayJevClient:
                 "ai-model-id": "typesafe-ai/jev",
                 "ai-evaluation-model-specification-version": "4",
             },
+            usage=sent,
         )
         try:
             payload = json_object(response)
@@ -74,7 +83,7 @@ class VercelGatewayJevClient:
                 model="typesafe-ai/jev",
                 answers=parse_answers(payload.get("answers"), questions, gateway=True, confidence=confidence),
                 input_tokens=tokens,
-                cost=cost,
+                cost=with_discarded(cost, sent).model_copy(update={"seconds": monotonic() - started}),
             )
         except (ValueError, TypeError, OverflowError) as error:
             raise response_error(response, f"Invalid gateway response ({error})") from None

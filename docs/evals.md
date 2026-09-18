@@ -1,6 +1,6 @@
 # Evals
 
-Every grade comes from something the agent cannot write: a request the fixture server recorded, truth fetched from a site's own API, or the URL the browser actually ended on. An agent's claim of success never counts.
+Grades rest on things the agent cannot write where the arm allows it: a request the fixture server recorded, truth fetched from a site's own API, the URL the browser ended on, or a quote captured verbatim from the page. Where an arm exposes none of these (hosted Browser Use has no final URL or quotes), its answer text is checked against the truth.
 
 ## Local fixtures
 
@@ -29,18 +29,21 @@ uv run --extra browser-use python -m fastbrowse.evals.live [--arms fast hosted] 
 
 The same prompts run through fastbrowse on a Browser Use Cloud browser and through hosted Browser Use. Truth is fetched at run time from PyPI's JSON API, the Hacker News API and GitHub's REST API, so grades follow the live site. Cost is metered: provider-reported Jev/LLM cost plus the browser and proxy cost returned when the cloud browser stops, and `total_cost_usd` for the hosted session.
 
-Both arms are graded on their answer. The fast arm is also graded on the URL it ended on. The hosted SDK exposes no final URL, so hosted navigation tasks rest on the answer alone.
+Both arms are graded on their answer. The fast arm is also graded on the URL it ended on, and on the cart task by a quote from `/cart.html` naming the backpack rather than by its answer. The hosted SDK exposes no final URL or quotes, so hosted navigation and cart tasks rest on the answer alone.
 
-Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys. Rows are appended to `artifacts/evals/live.jsonl` with status, error and step trace.
+Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys. Rows are appended to `artifacts/evals/live.jsonl` with status, error, step trace, `correct` (the task's check, which can include the final URL and quotes as above) and `passed` (the check plus a successful status: `complete` for fastbrowse, a stopped session for hosted) and `seconds_by_call` (wall time per model call, by component and purpose). The summary prints both, per arm.
 
 ## Results
 
-Two passes of all six live tasks, 2026-09-18, `google/gemini-3.8-flash` at low reasoning effort behind Jev. The hosted row is from 2026-09-17 and was not rerun:
+Two passes of all six live tasks on 2026-09-18, both arms the same day. The LLM is `google/gemini-3.8-flash` at low reasoning effort, with `google/gemini-3.5-flash-lite` for PLAN, SHORTCUT and FIELD_TEXT:
 
-| | passed | time per task | cost per task |
-|---|---|---|---|
-| fastbrowse on a cloud browser | 11/12 | 26.7s | $0.0160 |
-| hosted Browser Use | 11/12 | 27.4s | $0.4236 |
+| | passed | correct answer | median time | mean time | cost per task |
+|---|---|---|---|---|---|
+| fastbrowse on a cloud browser | 12/12 | 12/12 | 12.9s | 15.4s | $0.0072 |
+| fastbrowse, previous build | 11/12 | | 27.5s | 26.7s | $0.0160 |
+| hosted Browser Use | 11/12 | 11/12 | 14.7s | 25.8s | $0.3767 |
+
+Best successful run per task, fastbrowse against hosted Browser Use: pypi-version 9.5s against 18.1s, pypi-structured 11.8s against 15.7s, hn-top 12.1s against 9.5s, github-license 10.6s against 9.3s, wiki-godel 14.5s against 13.5s, saucedemo-cart 20.0s against 90.7s. Hosted Browser Use's mean is carried by Sauce Demo (79.9s, which failed, and 90.7s); ours by one wiki-godel run whose LLM read took 14.3s.
 
 **The cost gap is structural.** Picking from indexed candidates spends a fraction of the tokens that generating actions from screenshots does, and most of what is left is the LLM rather than Jev or the browser.
 
@@ -50,14 +53,24 @@ Two passes of all six live tasks, 2026-09-18, `google/gemini-3.8-flash` at low r
 - The plan running alongside the first steps instead of before them.
 - Merged and concurrent browser calls (a fill is 7 CDP calls, down from 13).
 - A 30s cap on a single LLM attempt, so a stuck request is retried rather than waited on.
+- A direct address for the task (the package, repository or article page) proposed by flash-lite while the start page loads, about 0.7s and hidden under the load. It stays on the start origin and returns nothing for account pages, carts and forms.
+- Settling after an action on an interactive document plus 200ms of DOM quiet, not on every image and tracker (a delayed-image navigation on the fixtures went from 1.41s to 0.67s).
+- Short facts read by one Jev choice over quoted spans before the LLM reader: 0.8s for the PyPI version, where the reader takes about 2.2s. Pages it cannot answer, or with too many candidates, fall back at little or no cost.
+
+- A plan written from the task alone, asked for outcomes rather than steps, on flash-lite: 0.8s a task against 3.7s, and lookups no longer carry "navigate" and "report" requirements no page can confirm.
+- Hedged requests: a second identical request after 1.5s for Jev and 4s for the LLM, first usable answer wins.
+- No low-confidence recovery for READ or DONE, which do not act on the page: Jev splitting DONE from READ on the page showing the answer used to cost 3 to 7s of recovery, and once the whole run.
+- An empty page Jev cannot act on is waited out rather than recovered on: script-built apps settle before they draw.
+
+**Where the time goes now.** Per task on the run above: READ 3.0s, Jev 2.6s, VERIFY 1.5s, COMPOSE 1.3s, PLAN 0.8s, SHORTCUT 0.7s, and no RECOVER. A lookup is now plan, one Jev step, one read and the done check; the LLM read is the next lever.
 
 The local fixtures, simpler sites on a local Chrome, averaged 9.8s a task on the same build.
 
-The one fastbrowse miss answered correctly but could not quote one of its claims, so it reported `unverified`; the grader counts only `complete`.
+`passed` needs a successful status as well as the check, and `correct answer` is the check alone: a run can hold the right answer yet fail to confirm it on the page, which the previous build did once on `saucedemo-cart`.
 
-**Twelve runs is a smoke test, and noise is several seconds a task:** two runs of an identical build came out 36.3s and 40.7s. Read the score as "both arms usually finish these tasks" and the cost column as the real finding.
+**Twelve runs is a smoke test, and noise is 4 to 5 seconds a task:** two runs of an identical build came out 36.3s and 40.7s. Read the score as "both arms finish most of these tasks" and the cost column as the real finding.
 
-**Model choice was measured, and the fast answer lost.** `evals.latency` times candidate models on the two request shapes a run is made of, and `google/gemini-3.5-flash-lite` was fastest on both (plan 1.6s against 5.9s). On the local fixtures that was free, but live it scored 8/12, so the default stays on `gemini-3.8-flash` everywhere except `FIELD_TEXT`, which only produces the string to type.
+**Model choice was measured per purpose.** `evals.latency` times candidate models on the request shapes a run is made of, and `google/gemini-3.5-flash-lite` was fastest on all of them. Flash-lite for every purpose scored 8/12 live, so it is used only where its output cannot become a conclusion unchecked: FIELD_TEXT, SHORTCUT, and PLAN, whose requirements the done check and VERIFY judge against the task text. PLAN on flash-lite went 12/12 live in an A/B against the default (12/12).
 
 Both suites depend on upstream availability: one pass scored 0/6 during a Jev `model_unavailable` outage. Re-read a red run before believing it is a regression.
 

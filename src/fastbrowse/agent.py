@@ -6,6 +6,7 @@ a DONE the verifier rejects at the end of the budget) is reported as what it is 
 
 import asyncio
 import hashlib
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ from fastbrowse.safety import (
     resolve_secret,
     secret_allowed,
 )
+from fastbrowse.shortcut import Shortcut, accept, propose_shortcut
 from fastbrowse.telemetry import BudgetExceeded, Ledger
 from fastbrowse.verification import (
     DoneVerdict,
@@ -63,7 +65,13 @@ GENERATE = "generate"
 # Long enough for a browser-verification page to run its check and hand over, short enough that a page
 # which never moves still ends as needs_login well inside a run's time budget.
 _INTERSTITIAL_SECONDS = 12.0
+# How long a shortcut may outlast the start page's load. Flash-lite answers in about 0.8s and a cloud page
+# loads in one to two, so a proposal later than this is an outlier costing more than it saves.
+_SHORTCUT_GRACE_SECONDS = 1.0
 _INTERSTITIAL_POLL_SECONDS = 0.5
+_NOT_ACTING = frozenset({Operation.READ, Operation.DONE})
+
+logger = logging.getLogger(__name__)
 
 type _Prepared = ComposedAnswer | asyncio.Task[Generation[ComposedAnswer]] | None
 """An answer ready before conclusion: the reader's facts Jev accepted as written, or a composer in flight."""
@@ -93,7 +101,7 @@ class _Stop(Exception):
 
 
 class _Unsure(Exception):
-    """The next action is authorized but not clearly the right one: a case for recovery, not for the caller."""
+    """The next action is authorized but not confidently the right one: a case for recovery, not for the caller."""
 
 
 @dataclass(slots=True)
@@ -155,6 +163,7 @@ class Agent:
         self,
         task: str,
         *,
+        start: str | None = None,
         inputs: Mapping[str, str] | None = None,
         attachments: Sequence[Attachment] = (),
         output_schema: type[BaseModel] | None = None,
@@ -165,18 +174,20 @@ class Agent:
         ledger = Ledger(limits or Limits())
         self._artifact_start = len(self._page.artifacts)
         state: _RunState | None = None
+        planning: asyncio.Task[Generation[Plan]] | None = None
         # The ledger checks `max_seconds` between operations; only a deadline around the awaits bounds a
         # browser or provider call that never returns.
         deadline = asyncio.timeout(ledger.limits.max_seconds)
         try:
             async with deadline:
-                observation = await self._observe()
-                # The plan is needed to read, to judge DONE and to answer, and the first fills and clicks
-                # usually come before all three, so it is written while they run instead of ahead of them.
-                planning = asyncio.create_task(make_plan(self._llm, task, observation, ledger=ledger))
+                # The plan is needed to read, to judge DONE and to answer, and the start page, the first fills
+                # and clicks all come before those, so it is written from the task while they run.
+                planning = asyncio.create_task(make_plan(self._llm, task, start=start, ledger=ledger))
+                history = [] if start is None else await self._open(task, start, ledger)
                 state = _RunState(
                     task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planning
                 )
+                state.history.extend(history)
                 return await self._loop(state, output_schema, until)
         except _Stop as stop:
             return self._result(state, ledger, stop.status, error=stop.error)
@@ -193,8 +204,8 @@ class Agent:
             return self._result(state, ledger, Status.ERROR, error=self._redactor.redact(str(error))[:500])
         finally:
             # A run can end before it ever needed the plan, and a plan still being written would bill it.
-            if state is not None:
-                await _discard(state.planning)
+            if planning is not None:
+                await _discard(planning)
 
     async def _loop(
         self, state: _RunState, output_schema: type[BaseModel] | None, until: UntilCheck | None
@@ -218,19 +229,24 @@ class Agent:
                     continue
                 raise _Stop(Status.NEEDS_LOGIN, f"sign-in required at {origin}")
             uncertain = decision.confidence < self._config.thresholds.recover_below
-            # The confidence gate exists to stop the agent acting on a page it does not understand, and a
-            # READ is not acting: it changes nothing and is what one does when unsure what the page says.
-            # Routing it to recovery spent the recovery budget on the page that held the answer.
+            if uncertain and not raw.controls and await self._outwait(raw):
+                # Nothing to act on and no idea what to do is a page still rendering: a script-built app settles
+                # before it draws, and recovery on it saw an empty login form and spent 5 to 13s saying so.
+                continue
             if uncertain and state.ready_plan is None:
                 # Unsure without the requirements: the plan is already in flight and costs less than recovery.
                 await state.await_plan()
                 continue
-            if (uncertain and decision.operation is not Operation.READ) or decision.operation is Operation.ESCALATE:
-                await self._recover(state, observation, f"uncertain next step ({decision.confidence:.2f})")
-                continue
             if decision.operation is Operation.DONE and _unread(await state.await_plan(), state.notes):
                 # DONE cannot hold while the plan still needs information nobody has read; reading is the move.
                 decision = decision.model_copy(update={"operation": Operation.READ, "target": None})
+            # The confidence gate exists to stop the agent acting on a page it does not understand. READ and DONE
+            # do not act: a read changes nothing, and DONE is judged again by `_finish`. Jev splitting DONE from
+            # READ on the page that shows the answer sent every such run to recovery, and one spent the whole
+            # recovery budget there and ended without an answer.
+            if (uncertain and decision.operation not in _NOT_ACTING) or decision.operation is Operation.ESCALATE:
+                await self._recover(state, observation, f"uncertain next step ({decision.confidence:.2f})")
+                continue
             if decision.operation is Operation.DONE:
                 result = await self._finish(state, observation, output_schema, until)
                 if result is not None:
@@ -240,6 +256,42 @@ class Agent:
                 await self._step(state, observation, decision)
             except _Unsure as unsure:
                 await self._recover(state, observation, str(unsure))
+
+    async def _open(self, task: str, start: str, ledger: Ledger) -> list[HistoryEntry]:
+        """Open `start`, or a direct address for the task on its site when one is proposed in time.
+
+        The proposal is written while the start page loads, so it costs no wall time unless it outlasts the load,
+        and the start page stays one BACK away for when the shortcut lands somewhere unhelpful.
+        """
+        proposing = asyncio.create_task(self._propose(task, start, ledger))
+        try:
+            await self._page.navigate(start)
+            proposal = await asyncio.wait_for(asyncio.shield(proposing), _SHORTCUT_GRACE_SECONDS)
+        except TimeoutError, LLMError:
+            return []
+        finally:
+            await _discard(proposing)
+        shortcut = accept(proposal.url, start)
+        if shortcut is None:
+            return []
+        try:
+            await self._page.navigate(shortcut)
+            # `accept` saw only the proposed address; a redirect can still land on another site.
+            landed = origin_of(await self._page.origin())
+        except BrowserError:
+            landed = None
+        if landed != origin_of(start):
+            logger.warning("shortcut %s did not stay on %s; returning to the start page", shortcut, start)
+            await self._page.navigate(start)
+            return []
+        note = f"opened {shortcut} directly instead of clicking there; the start page {start} is one BACK away"
+        return [HistoryEntry(operation=None, target=None, outcome=StepOutcome.EXECUTED, page_changed=True, note=note)]
+
+    async def _propose(self, task: str, start: str, ledger: Ledger) -> Shortcut:
+        # Recorded here, not by the caller: a proposal that finished is billed even when the run ends first.
+        generation = await propose_shortcut(self._llm, task, start, ledger=ledger)
+        ledger.record(generation.cost)
+        return generation.data
 
     async def _outwait(self, stuck: Observation) -> bool:
         """Re-observe until the page is no longer `stuck`, returning whether it moved in time."""
@@ -592,8 +644,17 @@ class Agent:
         wanted = [r for r in state.notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION]
         question = "\n".join(f"- {r.text}" for r in wanted) or state.task
         before = len(state.notes.facts)
-        await read(self._llm, capture, question, [r.id for r in wanted], state.notes, ledger=state.ledger)
-        return len(state.notes.facts) > before
+        await read(
+            self._llm,
+            capture,
+            question,
+            [r.id for r in wanted],
+            state.notes,
+            ledger=state.ledger,
+            jev=self._jev,
+            requirements=wanted,
+        )
+        return len(state.notes.facts) > before or any(state.notes.evidenced(r.id) for r in wanted)
 
     async def _recover(self, state: _RunState, observation: Observation, reason: str) -> None:
         state.recoveries += 1
@@ -753,7 +814,12 @@ class Agent:
             evidence.extend(extraction.evidence)
             verified = verified and extraction.problem is None
         status = Status.COMPLETE if verified else Status.UNVERIFIED
-        return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(evidence))
+        # The answer's notes and each schema field cite independently, so one quote backing a package name, its
+        # version and the answer came back three times; the same words on the same page are one citation.
+        cited: dict[tuple[str, str], Evidence] = {}
+        for item in evidence:
+            cited.setdefault((item.url, item.quote), item)
+        return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(cited.values()))
 
     def _context(self, state: _RunState, *, check_login: bool) -> StepContext:
         return StepContext(

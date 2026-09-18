@@ -1,12 +1,8 @@
-"""Fail the build on the punctuation and phrasing that mark text as machine-written.
+"""Fail the build on typographic punctuation: em and en dashes, and curly quotes.
 
-Prose in this repository is read by people deciding whether to trust the agent, so it is held to
-the same gate as the code. The two rules below are the ones a model breaks and a person does not:
-
-1. Typographic punctuation nobody reaches for on a keyboard: em and en dashes, curly quotes.
-   Write an ASCII hyphen, a comma, a colon, or two sentences.
-2. A lexicon of filler that survives no edit: words chosen to sound weighty rather than to say
-   something. Each entry is here because it carries no information a plain word would not.
+A house convention: prose here is plain ASCII, so write a hyphen, a comma, a colon, or two sentences.
+This checks every tracked text file, code and data included, which Vale cannot: Vale (`.vale.ini`) owns
+the wording rules and reads only prose in Markdown and in Python comments and docstrings.
 
 Escape one deliberately with `slop-ok: <reason>` on the same line, and say why it has to stay.
 
@@ -31,32 +27,6 @@ CHARACTERS = {
     chr(0x2019): "curly apostrophe",
 }
 
-PHRASES = (
-    "delve",
-    "seamless",
-    "tapestry",
-    "testament to",
-    "game-chang",
-    "unleash",
-    "supercharge",
-    "effortless",
-    "cutting-edge",
-    "state-of-the-art",
-    "ever-evolving",
-    "in today's",
-    "look no further",
-    "dive into",
-    "harness the power",
-    "unlock the",
-    "elevate your",
-    "at the end of the day",
-    "it's not just",
-    "meticulous",
-    "leverage",
-    "robust",
-)
-PHRASE_RE = re.compile("|".join(re.escape(phrase) for phrase in PHRASES), re.IGNORECASE)
-
 ALLOW = re.compile(r"slop-ok:\s*\S")
 
 
@@ -73,20 +43,11 @@ def offences(path: Path) -> list[str]:
         for column, character in enumerate(line, start=1):
             if name := CHARACTERS.get(character):
                 found.append(f"{path}:{number}:{column}: {name} ({character!r})")
-        for match in PHRASE_RE.finditer(line):
-            found.append(f"{path}:{number}:{match.start() + 1}: {match.group()!r} says nothing a plain word would not")
     return found
 
 
 def main(argv: list[str]) -> int:
-    here = Path(__file__)
-    found = [
-        offence
-        for path in tracked(argv)
-        # This file names every banned string, so checking it would always fail.
-        if path.resolve() != here.resolve()
-        for offence in offences(path)
-    ]
+    found = [offence for path in tracked(argv) for offence in offences(path)]
     for offence in found:
         print(offence)
     if found:

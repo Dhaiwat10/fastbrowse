@@ -62,9 +62,9 @@ async def test_direct_encodes_all_question_types_and_estimates_usage() -> None:
             json={
                 "answers": {
                     "col": choice_answer(),
-                    "bare": {"type": "noul", "probability": 0},
-                    "green": {"type": "noul", "probability": 0.02},
-                    "partial": {"type": "noul", "probability": 1},
+                    "bare": {"type": "noul", "noul": 0},
+                    "green": {"type": "noul", "noul": 0.02},
+                    "partial": {"type": "noul", "noul": 1},
                     "score": {
                         "type": "score",
                         "score": 1.99,
@@ -295,7 +295,7 @@ async def test_noul_probability_is_validated(probability: JsonValue) -> None:
             lambda _: httpx.Response(
                 200,
                 json={
-                    "answers": {"q": {"type": "noul", "probability": probability}},
+                    "answers": {"q": {"type": "noul", "noul": probability}},
                     "usage": {"input_tokens": 1},
                 },
             )

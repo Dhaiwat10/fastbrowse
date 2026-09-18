@@ -3,6 +3,7 @@
 import asyncio
 import math
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import assert_never
 
 import httpx
@@ -104,10 +105,38 @@ def response_error(response: httpx.Response, detail: str) -> JevError:
 
 RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0)
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
+_MAX_BACKOFF_SECONDS = 10.0
 JEV_ATTEMPT_SECONDS = 15.0
 """Jev answers in about a second, so an attempt this old is stuck upstream, and a retry beats waiting on it."""
 LLM_ATTEMPT_SECONDS = 30.0
-"""Six times the mean plan call, the slowest request a run makes; a live run stalled 60s on one attempt."""
+"""Leaves room for long reads and verification while bounding upstream stalls; flash-lite plans take about 0.8s."""
+JEV_HEDGE_SECONDS = 1.5
+"""Over twice the slowest of 25 measured gateway calls (0.28s median, 0.62s worst); a live run once spent 34s of
+one task in Jev, and a second request sent here wins those for a fraction of a cent."""
+LLM_HEDGE_SECONDS = 4.0
+"""About twice a typical read or verify (2 to 2.7s). Live runs saw single PLAN and READ calls take 7 to 9s while
+the rest took 2s; hedging here duplicates only that tail, and these calls cost a fraction of a cent."""
+
+
+@dataclass(slots=True)
+class RequestUsage:
+    unaccounted_requests: int = 0
+    """Requests that may have been billed but whose usage was not returned to the caller."""
+
+
+def with_discarded(cost: CostLine, usage: RequestUsage) -> CostLine:
+    """A Jev call's cost including requests raced and discarded: each carried the same input, so each is
+    charged as the one that answered, as an estimate."""
+    if not usage.unaccounted_requests:
+        return cost
+    sent = 1 + usage.unaccounted_requests
+    return cost.model_copy(
+        update={
+            "basis": CostBasis.ESTIMATED if cost.dollars is not None else CostBasis.UNKNOWN,
+            "dollars": None if cost.dollars is None else cost.dollars * sent,
+            "input_tokens": cost.input_tokens * sent,
+        }
+    )
 
 
 async def post_with_retry(
@@ -117,28 +146,107 @@ async def post_with_retry(
     headers: Mapping[str, str],
     *,
     attempt_seconds: float,
+    hedge_seconds: float,
     before_retry: Callable[[], None] | None = None,
+    usage: RequestUsage | None = None,
 ) -> httpx.Response | None:
     """Retry an overloaded or dropped request, which produced nothing and is always safe to repeat.
 
-    `before_retry` runs ahead of every repeat, so a budget counts each request actually sent: a request
-    that timed out may still have been billed. Returns None when the transport never completed, leaving
-    each client to name its own failure.
+    Each attempt is hedged: a request still unanswered after `hedge_seconds` is raced by an identical one,
+    because a provider's slowest calls are stalls, not work, and a fresh request tends to land on a healthy
+    replica. `before_retry` runs ahead of every repeat and every hedge, so a budget counts each request
+    actually sent. `usage` counts discarded or timed-out requests that may still have been billed.
+    Returns None when the transport never completed, leaving each client to name its own failure.
     """
     response: httpx.Response | None = None
     for attempt, delay in enumerate((*RETRY_DELAYS_SECONDS, None)):
         if attempt and before_retry is not None:
             before_retry()
-        try:
-            response = await http.post(url, json=body, headers=headers, timeout=attempt_seconds)
-        except httpx.HTTPError:
-            response = None
-        else:
-            if response.status_code not in RETRYABLE_STATUS:
-                return response
+        response = await _hedged(
+            http,
+            url,
+            body,
+            headers,
+            attempt_seconds=attempt_seconds,
+            hedge_seconds=hedge_seconds,
+            before_hedge=before_retry,
+            usage=usage,
+        )
+        if response is not None and response.status_code not in RETRYABLE_STATUS:
+            return response
         if delay is not None:
-            await asyncio.sleep(delay)
+            await asyncio.sleep(_backoff(response, delay))
     return response
+
+
+def _backoff(response: httpx.Response | None, delay: float) -> float:
+    """The server's own `Retry-After` when it sends one on a 429 or 529, as TypeSafe's SDK honours it; capped
+    so an overloaded provider cannot hold a run past its budget."""
+    if response is None:
+        return delay
+    for header, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        raw = response.headers.get(header)
+        if raw is None:
+            continue
+        try:
+            return min(max(float(raw) * scale, 0.0), _MAX_BACKOFF_SECONDS)
+        except ValueError:
+            break
+    return delay
+
+
+async def _hedged(
+    http: httpx.AsyncClient,
+    url: str,
+    body: dict[str, JsonValue],
+    headers: Mapping[str, str],
+    *,
+    attempt_seconds: float,
+    hedge_seconds: float,
+    before_hedge: Callable[[], None] | None,
+    usage: RequestUsage | None,
+) -> httpx.Response | None:
+    """The first usable response from one request, raced by a second if the first outlasts `hedge_seconds`."""
+    requests = {asyncio.create_task(_send(http, url, body, headers, attempt_seconds))}
+    winner: asyncio.Task[httpx.Response | None] | None = None
+    try:
+        done, _ = await asyncio.wait(requests, timeout=hedge_seconds)
+        if not done:
+            if before_hedge is not None:
+                before_hedge()
+            requests.add(asyncio.create_task(_send(http, url, body, headers, attempt_seconds)))
+        response: httpx.Response | None = None
+        pending = set(requests)
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for request in done:
+                response = request.result()
+                if response is not None and response.status_code not in RETRYABLE_STATUS:
+                    winner = request
+                    return response
+        return response
+    finally:
+        # The losing request is still open on the provider; cancel it and wait, so nothing outlives the call.
+        for request in requests:
+            request.cancel()
+        await asyncio.gather(*requests, return_exceptions=True)
+        if usage is not None:
+            for request in requests:
+                if request is winner:
+                    continue
+                result = None if request.cancelled() or request.exception() else request.result()
+                # Providers do not bill error statuses, so retries after those add no cost.
+                if result is None or result.is_success:
+                    usage.unaccounted_requests += 1
+
+
+async def _send(
+    http: httpx.AsyncClient, url: str, body: dict[str, JsonValue], headers: Mapping[str, str], attempt_seconds: float
+) -> httpx.Response | None:
+    try:
+        return await http.post(url, json=body, headers=headers, timeout=attempt_seconds)
+    except httpx.HTTPError:
+        return None
 
 
 async def post(
@@ -147,9 +255,13 @@ async def post(
     api_key: str,
     body: dict[str, JsonValue],
     headers: Mapping[str, str] | None = None,
+    *,
+    usage: RequestUsage | None = None,
 ) -> httpx.Response:
     auth = {"Authorization": f"Bearer {api_key}", **(headers or {})}
-    response = await post_with_retry(http, url, body, auth, attempt_seconds=JEV_ATTEMPT_SECONDS)
+    response = await post_with_retry(
+        http, url, body, auth, attempt_seconds=JEV_ATTEMPT_SECONDS, hedge_seconds=JEV_HEDGE_SECONDS, usage=usage
+    )
     if response is None:
         raise JevError("Jev transport failed")
     if response.status_code == 400 and "max_tokens_exceeded" in response.text:
@@ -164,9 +276,11 @@ def _probabilities(value: JsonValue, keys: set[str]) -> dict[str, float]:
     if not keys or set(raw) != keys:
         raise ValueError("probability keys differ from criteria")
     result = {key: probability(value) for key, value in raw.items()}
-    # Two-decimal wire rounding can put a valid distribution exactly on the tolerance boundary.
-    if abs(math.fsum(result.values()) - 1) > 0.02 + 1e-12:
-        raise ValueError("probabilities do not sum to one within 0.02")
+    # Each probability is rounded to two decimals on the wire, so the sum can drift by up to half a unit per
+    # option (the AI SDK's own check); a fixed 0.02 rejected valid answers over many options.
+    tolerance = max(0.02, 0.005 * len(result))
+    if abs(math.fsum(result.values()) - 1) > tolerance + 1e-12:
+        raise ValueError(f"probabilities do not sum to one within {tolerance}")
     return result
 
 
@@ -199,7 +313,10 @@ def parse_answers(
                     choice=choice, probabilities=probs, confidence=probability(confidence_value)
                 )
             case NoulQuestion():
-                answers[key] = NoulAnswer(probability=probability(answer.get("probability")))
+                # v1 of the direct API names P(yes) `noul` (https://docs.typesafe.ai/migrating-to-v1.md); the
+                # gateway maps it to a boolean answer's `probability`.
+                field = "probability" if gateway else "noul"
+                answers[key] = NoulAnswer(probability=probability(answer.get(field)))
             case ScoreQuestion():
                 probs = _probabilities(answer.get("probabilities"), {str(i) for i in range(len(question.criteria))})
                 score = number(answer.get("score"))
