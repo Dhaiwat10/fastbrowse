@@ -25,17 +25,33 @@ something that was never on the page. Every claim in an answer cites a verbatim 
 
 ![fastbrowse searching Google Flights for one-way nonstop London → New York flights: 45s run, shown at 3× speed](docs/assets/demo.gif)
 
-Same day, same cloud browser, same limits (30 steps, $0.25, 300s), each arm graded only on the tasks its
-output can be graded on ([tasks, method and per-category results](docs/evals.md#head-to-head)):
+### Against Browser Use
 
-| | graded on | passed | median time | cost per task | wasted actions per run |
-|:--|:--|:--|:--|:--|:--|
-| **fastbrowse** | all 21 tasks | **61/63** | 15.9s | $0.0101 | 0.7 |
-| [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | 6 navigation tasks (fastbrowse: 18/18, 8.5s, $0.0079) | 11/18 | 12.8s | **$0.0050** | 2.7 |
-| hosted Browser Use | 14 answer tasks (fastbrowse: 40/42, 17.0s, $0.0114) | 14/42 | 27.5s | $0.4015 | not reported |
+The same 14 answer tasks (lookups, sign-ins, checkout, Google Flights), three passes each, on the same
+cloud browser with the same limits (30 steps, $0.25, 300s):
 
-Where both pass a navigation task, jev-ultrafast costs less and is faster on `hn-comments`, while fastbrowse is
-faster on the other three. Every one of hosted Browser Use's 28 failures ran past the $0.25 cap.
+| | passed | median time | cost per task |
+|:--|:--|:--|:--|
+| **fastbrowse** | **40/42** | **17.0s** | **$0.011** |
+| Browser Use (hosted) | 14/42 | 27.5s | $0.40 |
+| | **2.9× the passes** | **1.6× faster** | **35× cheaper** |
+
+Every one of Browser Use's 28 failures ran past the $0.25 cap. In an earlier run with a $0.60 cap, it
+passed 6 of 8 such tasks at about 100s and $0.63 each. A later single pass of fastbrowse on current `main`
+passed all 21 tasks, answer tasks included (14/14, 21.5s median, $0.013).
+[Tasks, method and per-category results](docs/evals.md#head-to-head).
+
+### Why fastbrowse, against each kind of agent
+
+- **LLM agents that generate actions** (Browser Use and similar): Jev picks each action from the controls
+  that are on the page, so there is no invented selector to retry. A task costs a thirty-fifth as much,
+  and every claim in the answer cites a verbatim quote.
+- **Choice-model navigators** ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast)): the same
+  core technique, plus everything a real task needs. fastbrowse reads pages and returns cited answers,
+  signs in without showing a model the password, and stops before anything irreversible. On the six
+  navigation tasks both can run, it passes 18/18 against 11/18.
+- **Scripts:** there are no selectors to maintain. The same agent handles a date picker, a checkout and
+  a search box it has never seen.
 
 ## How it works
 
