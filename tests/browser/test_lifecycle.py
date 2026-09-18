@@ -4,8 +4,10 @@ import asyncio
 import importlib
 import subprocess
 import threading
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
@@ -309,6 +311,19 @@ def test_chrome_is_killed_and_reaped_on_shutdown_timeout(monkeypatch: pytest.Mon
     process.terminate.assert_called_once()
     process.kill.assert_called_once()
     assert process.wait.call_count == 2
+
+
+def test_a_chrome_that_exits_at_start_fails_at_once_with_its_own_error(tmp_path: Path) -> None:
+    binary = tmp_path / "chrome"
+    binary.write_text("#!/bin/sh\necho 'Running as root without --no-sandbox is not supported' >&2\nexit 1\n")
+    binary.chmod(0o755)
+    started = time.monotonic()
+    with (
+        pytest.raises(RuntimeError, match="status 1 before DevTools started:\nRunning as root"),
+        local_chrome(LocalChrome(binary=str(binary))),
+    ):
+        pass
+    assert time.monotonic() - started < 5
 
 
 @pytest.mark.parametrize(

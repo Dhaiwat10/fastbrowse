@@ -34,6 +34,7 @@ from fastbrowse.retrieval import (
     field_question,
     locate_quote,
     propose_text_fields,
+    propose_text_fields_from_notes,
     read,
     read_candidates,
 )
@@ -503,6 +504,45 @@ async def test_text_fields_are_kept_only_when_quoted_verbatim_from_the_page() ->
     assert value == "0.28.1" and evidence.quote == "httpx 0.28.1"
 
 
+async def test_a_text_field_off_the_final_page_is_taken_from_a_note_that_quotes_it() -> None:
+    earlier = capture((BlockKind.PARAGRAPH, "requests 2.33.0 released May 14, 2026"))
+    quote = locate_quote(earlier, "s0", "requests 2.33.0 released May 14, 2026")
+    assert quote is not None
+    notes = Notes((Fact(text="requests was released on May 14, 2026", evidence=quote),))
+    key = next(iter(notes.evidence))
+    llm = ScriptedLLM(
+        [
+            {
+                "fields": [
+                    {"field": "label", "value": "requests", "source_id": key, "quote": quote.quote},
+                    {"field": "license", "value": "httpx", "source_id": key, "quote": quote.quote},
+                ]
+            }
+        ]
+    )
+    fields = {name: Fields.model_fields["label"] for name in ("label", "license")}
+    found = await propose_text_fields_from_notes(llm, "Which is newer?", notes, fields)
+    # A value the cited quote does not contain is not taken, whatever the model says.
+    assert found == {"label": ("requests", quote)}
+
+
+async def test_a_name_the_task_gives_can_be_chosen_on_a_note_that_quotes_only_a_date() -> None:
+    earlier = capture((BlockKind.PARAGRAPH, "May 14, 2026"))
+    quote = locate_quote(earlier, "s0", "May 14, 2026")
+    assert quote is not None
+    notes = Notes((Fact(text="requests: May 14, 2026", evidence=quote),))
+    key = next(iter(notes.evidence))
+    proposal: dict[str, JsonValue] = {"field": "label", "value": "requests", "source_id": key, "quote": quote.quote}
+    fields = {"label": Fields.model_fields["label"]}
+    task = "Which has the more recent release, httpx or requests?"
+    assert await propose_text_fields_from_notes(ScriptedLLM([{"fields": [proposal]}]), task, notes, fields) == {
+        "label": ("requests", quote)
+    }
+    # Part of a word the task uses is not a name it gives.
+    partial: dict[str, JsonValue] = {**proposal, "value": "request"}
+    assert not await propose_text_fields_from_notes(ScriptedLLM([{"fields": [partial]}]), task, notes, fields)
+
+
 @pytest.mark.parametrize("limit", ["calls", "dollars"])
 @pytest.mark.parametrize("reader", ["read", "fields"])
 async def test_each_chunk_reserves_budget_before_request(limit: str, reader: str) -> None:
@@ -649,3 +689,42 @@ async def test_a_doubted_claim_is_dropped_only_if_the_rest_still_answers(omitted
         assert held is None
     else:
         assert held is not None and held.answer == "It says you are logged in."
+
+
+async def test_pruning_the_only_claim_for_a_requirement_is_an_omission() -> None:
+    from fastbrowse.jev import Evaluation, NoulAnswer
+    from fastbrowse.models import CostBasis, CostComponent, CostLine, Evidence
+    from fastbrowse.retrieval import Claim, ComposedAnswer
+    from fastbrowse.verification import check_claims
+
+    class Jev:
+        async def evaluate(self, state: object, questions: Mapping[str, Question]) -> Evaluation:
+            # The superlative is doubted, and the omission check would wave the price through alone.
+            answers = {key: NoulAnswer(probability=0.9 if key == "unsupported_0" else 0.05) for key in questions}
+            free = CostLine(component=CostComponent.JEV, basis=CostBasis.METERED, dollars=0.0)
+            return Evaluation(model="test", answers=answers, input_tokens=1, cost=free)
+
+    def fact(requirement: str, start: int, quote: str) -> Fact:
+        evidence = Evidence(
+            source_id="s",
+            url="https://books.test/travel",
+            frame_id=None,
+            captured_at=datetime.now(UTC),
+            capture_sha256="c",
+            start=start,
+            end=start + len(quote),
+            quote=quote,
+        )
+        return Fact(requirement_id=requirement, text=quote, evidence=evidence)
+
+    notes = Notes((fact("r1", 0, "A Year in Provence"), fact("r2", 40, "£56.88")))
+    requirements = (
+        Requirement(id="r1", text="Which book is the most expensive?", kind=RequirementKind.INFORMATION),
+        Requirement(id="r2", text="What does it cost?", kind=RequirementKind.INFORMATION),
+    )
+    claims = (
+        Claim(text="The most expensive is A Year in Provence.", evidence_ids=("c:0:18",)),
+        Claim(text="It costs £56.88.", evidence_ids=("c:40:46",)),
+    )
+    composed = ComposedAnswer(answer="unused", claims=claims, requirements=requirements)
+    assert await check_claims(Jev(), composed, notes, Thresholds()) is None

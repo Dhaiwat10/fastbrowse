@@ -32,6 +32,9 @@ class ObservationLimits(Frozen):
     max_offscreen_controls: int = Field(default=40, ge=0)
     viewport_text_chars: int = Field(default=6000, gt=0)
     history_entries: int = Field(default=6, ge=0)
+    earlier_history_entries: int = Field(default=14, ge=0)
+    """Actions before the recent ones, shown without their effects. With only the last six, a form filled in
+    eight steps lost its first field from view, and Jev typed the origin again instead of searching."""
     group_size: int = Field(default=30, gt=1)
     """Controls per group when a choice exceeds `max_choice_options` and selection goes group -> element."""
     max_choice_options: int = Field(default=240, gt=1, le=255)

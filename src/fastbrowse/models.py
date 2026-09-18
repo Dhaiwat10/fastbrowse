@@ -34,6 +34,7 @@ class Status(StrEnum):
 
 class Operation(StrEnum):
     CLICK = "click"
+    HOVER = "hover"
     FILL = "fill"
     SELECT = "select"
     ENTER = "enter"
@@ -46,6 +47,12 @@ class Operation(StrEnum):
     READ = "read"
     DONE = "done"
     ESCALATE = "escalate"
+
+
+TARGETED = frozenset(
+    {Operation.CLICK, Operation.HOVER, Operation.FILL, Operation.SELECT, Operation.ENTER, Operation.UPLOAD}
+)
+"""Operations aimed at one observed control, which is hit-tested before input reaches it."""
 
 
 class Decider(StrEnum):

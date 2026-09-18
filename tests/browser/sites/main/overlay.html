@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head><title>Overlay editor</title></head>
+<body>
+<div style="position:relative;width:300px;margin:40px">
+  <input id="from" aria-label="Where from?" role="combobox" aria-expanded="false">
+  <div id="editor" hidden style="position:absolute;left:-10px;top:-4px;background:#fff;border:1px solid #888">
+    <input id="typed" aria-label="Where from?" role="combobox" aria-expanded="true" aria-controls="places" style="width:320px">
+    <ul id="places" role="listbox"></ul>
+  </div>
+</div>
+<script>
+  const from = document.getElementById("from");
+  const editor = document.getElementById("editor");
+  const typed = document.getElementById("typed");
+  const places = document.getElementById("places");
+  // Clicking the field opens an editor over it and moves focus there a moment later; only that editor suggests places.
+  const open = () => { editor.hidden = false; typed.value = "Houston"; typed.focus(); typed.select(); };
+  if (location.search === "?late") {
+    // Here the editor opens only once typing starts, prefilled, and the keystroke that opened it is lost.
+    from.addEventListener("input", () => { from.value = ""; open(); }, {once: true});
+  } else {
+    from.addEventListener("click", () => { editor.hidden = false; setTimeout(() => typed.focus(), 50); });
+  }
+  typed.addEventListener("input", () => {
+    places.innerHTML = "";
+    for (const place of ["London", "Londonderry"].filter(p => typed.value && p.startsWith(typed.value))) {
+      const li = document.createElement("li");
+      li.setAttribute("role", "option");
+      li.textContent = place;
+      places.append(li);
+    }
+  });
+</script>
+</body>
+</html>

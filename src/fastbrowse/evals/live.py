@@ -43,6 +43,7 @@ from fastbrowse.browser import CdpPage
 from fastbrowse.browser.recording import Recording
 from fastbrowse.clients.environment import load_settings
 from fastbrowse.evals.live_tasks import TASKS, Category, LiveTask, Outcome
+from fastbrowse.evals.more_tasks import DEV, HELDOUT
 from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, StepEvent
 from fastbrowse.page import Observation
 from fastbrowse.run import run_task
@@ -403,6 +404,10 @@ async def run_arm(
     }
 
 
+SUITES: dict[str, tuple[LiveTask, ...]] = {"core": TASKS, "dev": DEV, "heldout": HELDOUT}
+"""`core` is the published suite; `dev` and `heldout` are the split in `more_tasks`."""
+
+
 def summarize(rows: list[dict[str, object]], arms: list[str]) -> None:
     for arm in arms:
         arm_rows = [r for r in rows if r["arm"] == arm]
@@ -428,6 +433,7 @@ def summarize(rows: list[dict[str, object]], arms: list[str]) -> None:
 async def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", nargs="*", default=[])
+    parser.add_argument("--suite", nargs="*", default=["core"], choices=list(SUITES), help="task sets to run")
     parser.add_argument("--category", nargs="*", default=[], choices=[c.value for c in Category])
     parser.add_argument("--bitwarden", action="store_true", help="login credentials from the vault items")
     parser.add_argument("--arms", nargs="*", default=list(ARMS), choices=ARMS)
@@ -437,7 +443,8 @@ async def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     tasks = [
         t
-        for t in TASKS
+        for suite in args.suite
+        for t in SUITES[suite]
         if (not args.only or t.id in args.only) and (not args.category or t.category.value in args.category)
     ]
     if "ultrafast" in args.arms:

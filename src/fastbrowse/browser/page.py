@@ -23,7 +23,7 @@ from cdp_use.cdp.page.commands import CaptureScreenshotParameters
 
 from fastbrowse.browser.session import BrowserSession
 from fastbrowse.config import Config
-from fastbrowse.models import Artifact, Attachment, Operation, StepOutcome
+from fastbrowse.models import TARGETED, Artifact, Attachment, Operation, StepOutcome
 from fastbrowse.page import (
     Action,
     ActResult,
@@ -51,6 +51,10 @@ _HIT_TEST_JS = (
     "(id => { const e = window.__fastbrowse?.nodes.get(id); "
     "if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled=\"true\"],[inert]') || "
     "!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return null; "
+    # Scrolling only when the control is not already in full view: a page scroll closes open menus and
+    # popups, so centring an option that was already visible dismissed its menu before the click landed.
+    "const w = e.ownerDocument.defaultView, v = e.getBoundingClientRect(); "
+    "if (v.top < 0 || v.left < 0 || v.bottom > w.innerHeight || v.right > w.innerWidth) "
     "e.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'}); "
     "const r = e.getBoundingClientRect(); let x = r.x + r.width / 2, y = r.y + r.height / 2; "
     "if (!r.width || !r.height) return null; "
@@ -70,6 +74,37 @@ _HIT_TEST_JS = (
     "return [x, y]; })"
 )
 
+# A deadline, not a wait: a field with no editor to open settles on the first frame.
+_HANDOFF_SECONDS = 0.6
+_HANDOFF_QUIET_SECONDS = 0.1
+
+# A field that opens an editor over itself when clicked (a search overlay, an airport picker) moves focus to
+# that editor; typing into the original, now hidden behind it, reaches no suggestion list. A person types
+# where focus went, so the fill follows focus to an editable field in the same document that covers the
+# spot ours occupied, and otherwise keeps the id it was given. The editor can take focus a frame or a timer
+# after the click, so the check waits for the click's DOM changes to go quiet, briefly, first.
+_HANDED_FOCUS_JS = (
+    "(id => new Promise(resolve => { const r = window.__fastbrowse, e = r?.nodes.get(id); "
+    "if (!e?.isConnected) { resolve(id); return; } "
+    "const decide = () => { const a = e.getRootNode().activeElement; "
+    "if (!e.isConnected || !a || a === e || e.contains(a)) return id; "
+    "const text = a.isContentEditable || a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && "
+    "!['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']"
+    ".includes(a.type)); if (!text || a.disabled || a.readOnly) return id; "
+    "const was = e.getBoundingClientRect(), now = a.getBoundingClientRect(); "
+    "const x = was.x + was.width / 2, y = was.y + was.height / 2; "
+    "if (x < now.left || x > now.right || y < now.top || y > now.bottom) return id; "
+    "if (!r.ids.has(a)) r.ids.set(a, r.next++); const n = r.ids.get(a); r.nodes.set(n, a); return n; }; "
+    f"const deadline = performance.now() + {_HANDOFF_SECONDS * 1000}; "
+    "const poll = () => { if (performance.now() - (r.lastMutation ?? 0) >= "
+    f"{_HANDOFF_QUIET_SECONDS * 1000} || performance.now() >= deadline) resolve(decide()); "
+    "else setTimeout(poll, 20); }; "
+    # Chrome can hold a cross-origin frame's animation frames indefinitely, and CI hung in pytest for an hour
+    # awaiting one; the timer starts the poll anyway once the deadline has passed.
+    "let started = false; const start = () => { if (!started) { started = true; poll(); } }; "
+    f"setTimeout(start, {_HANDOFF_SECONDS * 1000}); "
+    "if (e.ownerDocument.hidden) start(); else requestAnimationFrame(() => setTimeout(start, 0)); }))"
+)
 type _Point = tuple[float, float] | Literal["covered"] | None
 
 _BLOCK_KIND = {
@@ -296,8 +331,7 @@ class CdpPage(Page):
         if self._session.pending_dialog() is None:
             before_fingerprint, live_guard, point = await self._before_action(
                 target,
-                hit_test=action.operation
-                in {Operation.CLICK, Operation.FILL, Operation.SELECT, Operation.ENTER, Operation.UPLOAD},
+                hit_test=action.operation in TARGETED,
             )
             if target is not None and live_guard != target[3]:
                 return ActResult(
@@ -316,6 +350,8 @@ class CdpPage(Page):
         match action.operation:
             case Operation.CLICK:
                 return await self._click(target, point)
+            case Operation.HOVER:
+                return await self._hover(target, point)
             case Operation.FILL:
                 return await self._fill(
                     target, action.text or "", point, secret=action.secret, secret_origin=action.secret_origin
@@ -362,6 +398,19 @@ class CdpPage(Page):
         await self._click_point(session_id, point)
         if announced:
             await self._await_popup(session_id, _local_id)
+        return StepOutcome.EXECUTED, None
+
+    async def _hover(
+        self, target: tuple[str, str, int, list[object] | None] | None, point: _Point
+    ) -> tuple[StepOutcome, str | None]:
+        if target is None:
+            return StepOutcome.FAILED, "hover requires a target"
+        if point is None:
+            return StepOutcome.STALE, "target disconnected"
+        if point == "covered":
+            return StepOutcome.COVERED, None
+        # The pointer stays where it lands, so what the hover reveals is still shown when the page is next read.
+        await self._move(target[0], point)
         return StepOutcome.EXECUTED, None
 
     async def _announces_popup(self, session_id: str, local_id: int) -> bool:
@@ -425,43 +474,53 @@ class CdpPage(Page):
         # Ported from browser-use/jev-ultrafast (MIT), browser.py: fill clicks before typing.
         # Focus alone bypasses pointer handlers that open autocomplete and calendar pickers.
         await self._click_point(session_id, point)
-        if not await self._focus(session_id, local_id, prepare_fill=True, secret=secret):
-            return StepOutcome.FAILED, "target did not receive keyboard focus"
-        # A secret must be checked and inserted in one renderer task: CDP insertText would leave a
-        # navigation/focus race between checking the origin and dispatching the secret to the page.
-        script = (
-            "((id, text, origin) => { const e = window.__fastbrowse?.nodes.get(id); "
-            "if (!e?.isConnected || (origin !== null && e.ownerDocument.location.origin !== origin)) return false; "
-            "const doc = e.ownerDocument; if (e.getRootNode().activeElement !== e) return false; "
-            "if (typeof e.select === 'function') e.select(); else { const range = doc.createRange(); "
-            "range.selectNodeContents(e); const selection = doc.getSelection(); selection.removeAllRanges(); "
-            "selection.addRange(range); } "
-            "return doc.execCommand('insertText', false, text); })"
-            f"({local_id}, {json.dumps(text)}, {json.dumps(secret_origin if secret else None)})"
-        )
-        if secret:
-            inserted = await self._evaluate(session_id, script)
-            if not inserted:
-                return StepOutcome.FAILED, "secret origin or focus changed before insertion"
-        else:
-            await self._session.client.send.Input.insertText(params={"text": text}, session_id=session_id)
-        landed = await self._evaluate(
-            session_id,
-            # A framework may swap the field for a hydrated copy while the text is being inserted, which
-            # detaches the node we typed into even though the text landed. That copy is accepted only once
-            # ours is gone, and only when it is focused in the same document and now covers the point ours
-            # occupied: a field elsewhere holding the same text is not evidence that ours took it.
-            f"((e, text) => {{ const holds = n => !!n && (n.value ?? n.innerText) === text; "
-            "if (!e) return false; if (e.isConnected) return holds(e); "
-            "const was = window.__fastbrowse?.filled; if (!was) return false; "
-            "const now = was.doc.activeElement; if (!now || now.tagName !== was.tag) return false; "
-            "const r = now.getBoundingClientRect(); "
-            "const inPlace = was.x >= r.left && was.x <= r.right && was.y >= r.top && was.y <= r.bottom; "
-            "return inPlace && holds(now); })"
-            f"(window.__fastbrowse?.nodes.get({local_id}), {json.dumps(text)})",
-        )
-        if not landed:
-            return StepOutcome.FAILED, "field did not retain the supplied text"
+        if not secret:
+            local_id = int(await self._evaluate(session_id, f"({_HANDED_FOCUS_JS})({local_id})"))
+        for attempt in range(2):
+            if not await self._focus(session_id, local_id, prepare_fill=True, secret=secret):
+                return StepOutcome.FAILED, "target did not receive keyboard focus"
+            # A secret must be checked and inserted in one renderer task: CDP insertText would leave a
+            # navigation/focus race between checking the origin and dispatching the secret to the page.
+            script = (
+                "((id, text, origin) => { const e = window.__fastbrowse?.nodes.get(id); "
+                "if (!e?.isConnected || (origin !== null && e.ownerDocument.location.origin !== origin)) return false; "
+                "const doc = e.ownerDocument; if (e.getRootNode().activeElement !== e) return false; "
+                "if (typeof e.select === 'function') e.select(); else { const range = doc.createRange(); "
+                "range.selectNodeContents(e); const selection = doc.getSelection(); selection.removeAllRanges(); "
+                "selection.addRange(range); } "
+                "return doc.execCommand('insertText', false, text); })"
+                f"({local_id}, {json.dumps(text)}, {json.dumps(secret_origin if secret else None)})"
+            )
+            if secret:
+                inserted = await self._evaluate(session_id, script)
+                if not inserted:
+                    return StepOutcome.FAILED, "secret origin or focus changed before insertion"
+            else:
+                await self._session.client.send.Input.insertText(params={"text": text}, session_id=session_id)
+            landed = await self._evaluate(
+                session_id,
+                # The text can land in another field than ours: a framework may swap ours for a hydrated copy while
+                # the text is inserted, or focusing ours opens an editor over it that takes focus, a moment too
+                # late for the hand-off above to see. That field is accepted only when it is focused in the same
+                # document and covers the point ours occupied: a field elsewhere holding the same text is not
+                # evidence that ours took it.
+                f"((e, text) => {{ const holds = n => !!n && (n.value ?? n.innerText) === text; "
+                "if (e?.isConnected && holds(e)) return true; "
+                "const was = window.__fastbrowse?.filled; if (!was) return false; "
+                "const now = was.doc.activeElement; if (!now || now === e) return false; "
+                "const r = now.getBoundingClientRect(); "
+                "const inPlace = was.x >= r.left && was.x <= r.right && was.y >= r.top && was.y <= r.bottom; "
+                "return inPlace && holds(now); })"
+                f"(window.__fastbrowse?.nodes.get({local_id}), {json.dumps(text)})",
+            )
+            if landed:
+                break
+            # An editor that took focus after the hand-off looked, and so never got the text, is typed into
+            # once more, as a person would on seeing the text had gone nowhere.
+            handed = local_id if secret else int(await self._evaluate(session_id, f"({_HANDED_FOCUS_JS})({local_id})"))
+            if attempt or handed == local_id:
+                return StepOutcome.FAILED, "field did not retain the supplied text"
+            local_id = handed
         await self._await_suggestions(session_id, local_id)
         return StepOutcome.EXECUTED, None
 
@@ -605,7 +664,13 @@ class CdpPage(Page):
             return StepOutcome.STALE, "upload target disconnected"
         return StepOutcome.EXECUTED, None
 
+    async def _move(self, session_id: str, point: tuple[float, float]) -> None:
+        params: DispatchMouseEventParameters = {"type": "mouseMoved", "x": point[0], "y": point[1]}
+        await self._input(self._session.client.send.Input.dispatchMouseEvent(params=params, session_id=session_id))
+
     async def _click_point(self, session_id: str, point: tuple[float, float]) -> None:
+        # Arrive before pressing, as a pointer does: menus built on pointer events ignore a press with no hover.
+        await self._move(session_id, point)
         x, y = point
         for kind in ("mousePressed", "mouseReleased"):
             params: DispatchMouseEventParameters = {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1}
@@ -684,7 +749,7 @@ class CdpPage(Page):
         # replacement occupies the same place, rather than accepting a different field with the same text.
         prepare = (
             "const r = e.getBoundingClientRect(); window.__fastbrowse.filled = "
-            "{doc: e.ownerDocument, tag: e.tagName, x: r.x + r.width / 2, y: r.y + r.height / 2}; "
+            "{doc: e.ownerDocument, x: r.x + r.width / 2, y: r.y + r.height / 2}; "
             + (_SELECT_TEXT_JS if not secret else "")
             if prepare_fill
             else ""
@@ -805,7 +870,9 @@ class CdpPage(Page):
             f"setTimeout(poll, state.ready ? Math.min({_SETTLE_POLL_SECONDS * 1000}, "
             f"Math.max(1, {_SETTLE_QUIET_SECONDS * 1000} - state.quietFor)) "
             f": {_SETTLE_POLL_SECONDS * 1000}); }}; "
-            "poll(); })",
+            # Wait for one rendered frame first: a menu shown in an animation frame callback mutates only when that
+            # frame runs, and a late frame would otherwise let 200ms of quiet pass before the menu exists.
+            "if (document.hidden) poll(); else requestAnimationFrame(() => setTimeout(poll, 0)); })",
         )
         return bool(result[0]), cast("str | None", result[1])
 

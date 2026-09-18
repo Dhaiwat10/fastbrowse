@@ -427,3 +427,72 @@ async def test_fill_activates_picker_before_typing_and_offers_suggestion(
     option = find(obs, "York Central")
     assert (await page.act(Action(operation=Operation.CLICK, target_id=option.id), obs)).outcome is StepOutcome.EXECUTED
     assert find(await page.observe(), "Station").value == "York Central"
+
+
+async def test_frameset_pages_are_read_through_their_frames(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/frames.html")
+    # A frameset document has no text of its own: everything a user sees is in its frames.
+    assert "Left pane" in (await page.observe()).viewport_text
+    text = (await page.capture()).text
+    assert "Left pane" in text
+    assert "Right pane" in text
+
+
+async def test_a_table_cell_drawn_with_an_icon_is_not_read_as_blank(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/icons.html")
+    text = (await page.capture()).text
+    assert "| First | [flag icon] | [yes] |" in text
+    # A size or weight class shares the icon font's prefix without naming the glyph.
+    assert "| Second |  | [xmark icon] |" in text
+
+
+async def test_a_menu_shown_on_the_next_animation_frame_opens(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/animated.html")
+    obs = await page.observe()
+    opener = find(obs, "Trip type")
+    assert (await page.act(Action(operation=Operation.CLICK, target_id=opener.id), obs)).outcome == (
+        StepOutcome.EXECUTED
+    )
+    assert any(c.label == "One way" for c in (await page.observe()).controls)
+
+
+async def test_content_shown_only_under_the_pointer_is_reached_by_hovering(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/hovers.html")
+    obs = await page.observe()
+    hovers = [c for c in obs.controls if Operation.HOVER in c.operations]
+    # The two avatars and the menu reveal hidden content; the link's hover rule only recolours it.
+    assert sorted(c.label for c in hovers) == ["Products", "User Avatar", "User Avatar"]
+    assert [c.context for c in hovers if c.label == "User Avatar"] == ["1 of 2", "2 of 2"]
+    assert "grace" not in obs.viewport_text
+    second = next(c for c in hovers if c.context == "2 of 2")
+    result = await page.act(Action(operation=Operation.HOVER, target_id=second.id), obs)
+    assert result.outcome == StepOutcome.EXECUTED
+    assert result.page_changed
+    after = await page.observe()
+    assert "name: grace" in after.viewport_text
+    assert "name: ada" not in after.viewport_text
+    assert any(c.label == "View profile" for c in after.controls)
+
+
+async def test_a_visible_option_is_clicked_without_scrolling_its_menu_shut(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/menu.html")
+    obs = await page.observe()
+    trip = next(c for c in obs.controls if c.label == "Round trip" and c.role == "button")
+    await page.act(Action(operation=Operation.CLICK, target_id=trip.id), obs)
+    obs = await page.observe()
+    option = next(c for c in obs.controls if c.label == "One way")
+    result = await page.act(Action(operation=Operation.CLICK, target_id=option.id), obs)
+    assert result.outcome == StepOutcome.EXECUTED
+    after = await page.observe()
+    assert any(c.role == "button" and c.label == "One way" for c in after.controls)
+
+
+@pytest.mark.parametrize("opens", ["", "?late"])
+async def test_a_fill_follows_focus_to_the_editor_its_click_opened(page: CdpPage, main_site: str, opens: str) -> None:
+    await page.navigate(f"{main_site}/overlay.html{opens}")
+    obs = await page.observe()
+    field = next(c for c in obs.controls if c.label == "Where from?")
+    result = await page.act(Action(operation=Operation.FILL, target_id=field.id, text="Lond"), obs)
+    assert result.outcome == StepOutcome.EXECUTED
+    after = await page.observe()
+    assert [c.label for c in after.controls if c.role == "option"] == ["London", "Londonderry"]

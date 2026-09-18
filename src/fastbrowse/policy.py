@@ -24,7 +24,7 @@ from fastbrowse.jev import (
     NoulQuestion,
     Question,
 )
-from fastbrowse.models import CostComponent, CostLine, Frozen, Operation, StepOutcome
+from fastbrowse.models import TARGETED, CostComponent, CostLine, Frozen, Operation, StepOutcome
 from fastbrowse.page import Control, Observation
 from fastbrowse.telemetry import Ledger
 
@@ -56,6 +56,7 @@ operation is the one this question names. A later question picks the element ins
 
 OPERATION_LABELS: Mapping[Operation, str] = {
     Operation.CLICK: "Click an element, button, link, menu option, autocomplete suggestion or calendar day.",
+    Operation.HOVER: "Hover over an element to reveal content the page shows only under the pointer.",
     Operation.FILL: "Enter or replace text in an editable field.",
     Operation.SELECT: "Select a value in an observed dropdown.",
     Operation.ENTER: "Press Enter in a text field to submit or search for what it already contains.",
@@ -69,8 +70,6 @@ OPERATION_LABELS: Mapping[Operation, str] = {
     Operation.DONE: "Every requirement is visibly satisfied.",
     Operation.ESCALATE: "No offered operation can make progress.",
 }
-
-TARGETED = frozenset({Operation.CLICK, Operation.FILL, Operation.SELECT, Operation.ENTER, Operation.UPLOAD})
 
 
 class Reduction(StrEnum):
@@ -91,6 +90,8 @@ class HistoryEntry(Frozen):
     note: str | None = None
     text: str | None = None
     """Entered value, redacted before storage; secrets are represented only by a marker."""
+    effect: str | None = None
+    """What the action visibly did: the address, controls shown or removed, and values before and after."""
 
 
 class StepContext(Frozen):
@@ -168,7 +169,7 @@ def _offered_operations(
     available: list[Operation] = []
     for operation in Operation:
         match operation:
-            case Operation.CLICK | Operation.FILL | Operation.SELECT | Operation.ENTER:
+            case Operation.CLICK | Operation.HOVER | Operation.FILL | Operation.SELECT | Operation.ENTER:
                 if operation in indexed:
                     available.append(operation)
             case Operation.UPLOAD:
@@ -306,12 +307,11 @@ async def _evaluate(
 
 
 def _state(observation: Observation, controls: Sequence[Control], context: StepContext) -> JsonValue:
-    history = context.history[-10:]
     state: dict[str, JsonValue] = {
         "page": {"url": observation.url, "title": observation.title, "text": observation.viewport_text},
         "requirements": list(context.requirements),
         "notes": context.notes,
-        "recent_actions": [entry.model_dump(mode="json", exclude_none=True) for entry in history],
+        "recent_actions": [entry.model_dump(mode="json", exclude_none=True) for entry in context.history],
         "elements": [_element(c) for c in controls],
     }
     if context.secrets:

@@ -33,9 +33,30 @@
       source_path: sourcePath, ...extra });
   };
 
+  // A cell can say what it says with an image or an icon alone: a flag marking the winner, a tick for "yes".
+  // Its text is then empty and the table reads as if the cell were blank, so name what is drawn there: the
+  // image's alt text or label, or failing that the icon font's class, which is how those fonts name a glyph.
+  const ICON_CLASS = /^(?:glyphicon|fa|fas|far|bi|mdi|icon|ti|la)-(.+)$/;
+  // Font sizes, weights and effects share the prefix without naming a glyph.
+  const ICON_STYLE = /^(?:solid|regular|light|thin|duotone|brands|xs|sm|lg|xl|\d+x|fw|spin|pulse|border|inverse|stack.*|pull-.*|rotate-.*|flip-.*)$/;
+  const drawn = c => {
+    for (const e of c.querySelectorAll('img,svg,i,span,[role="img"]')) {
+      if (hidden(e)) continue;
+      const named = e.getAttribute('alt') || e.getAttribute('aria-label') || e.getAttribute('title')
+        || e.querySelector?.(':scope > title')?.textContent;
+      if (named?.trim()) return `[${clean(named)}]`;
+      for (const token of e.classList) {
+        const glyph = ICON_CLASS.exec(token);
+        if (glyph && !ICON_STYLE.test(glyph[1])) return `[${glyph[1].replace(/-/g, ' ')} icon]`;
+      }
+    }
+    return '';
+  };
+  const cellText = c => textOf(c) || drawn(c);
+
   const renderTable = table => {
     const rows = [...table.querySelectorAll(':scope > tr, :scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr')]
-      .map(row => [...row.querySelectorAll(':scope > th, :scope > td')].map(c => textOf(c).replace(/\|/g, '\\|')))
+      .map(row => [...row.querySelectorAll(':scope > th, :scope > td')].map(c => cellText(c).replace(/\|/g, '\\|')))
       .filter(cells => cells.length);
     if (!rows.length) return '';
     const lines = ['| ' + rows[0].join(' | ') + ' |', '| ' + rows[0].map(() => '---').join(' | ') + ' |'];
@@ -104,7 +125,7 @@
     walk(root);
     for (const e of root.querySelectorAll('*')) {
       if (e.shadowRoot) scope(e.shadowRoot, frame, `${source}/shadow:${identity(e)}`);
-      if (e.tagName === 'IFRAME') {
+      if (e.tagName === 'IFRAME' || e.tagName === 'FRAME') {
         let inner = null;
         try { inner = e.contentDocument; } catch { inner = null; }
         if (inner?.body) {

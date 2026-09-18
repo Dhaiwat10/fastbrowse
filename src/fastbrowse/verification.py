@@ -25,6 +25,7 @@ from fastbrowse.retrieval import (
     field_candidates,
     field_question,
     propose_text_fields,
+    propose_text_fields_from_notes,
 )
 from fastbrowse.telemetry import Ledger
 
@@ -220,6 +221,15 @@ async def check_claims(
         return composed
     if not kept:
         return None
+    # A claim can be doubted for proving too little (a title cited as "the most expensive" without the prices it
+    # beat), and the omission check then passed the price alone as the whole answer. A requirement the answer
+    # cited evidence for and no longer does is omitted, whatever the check says, so the composer writes it again.
+    cited = {key for claim in kept for key in claim.evidence_ids}
+    was_cited = {key for claim in composed.claims for key in claim.evidence_ids}
+    for requirement in composed.requirements:
+        supporting = {key for key, _ in notes.supporting(requirement.id)}
+        if supporting & was_cited and not supporting & cited:
+            return None
     pruned = composed.model_copy(update={"claims": kept, "answer": "\n\n".join(claim.text for claim in kept)})
     omission = {key: q for key, q in claim_check_questions(pruned, notes).items() if key == _OMITTED}
     if omission and _probability(await _ask(jev, pruned, omission, ledger), _OMITTED) > limit:
@@ -245,6 +255,7 @@ async def extract(
     capture: Capture,
     schema: type[BaseModel],
     *,
+    notes: Notes | None = None,
     ledger: Ledger | None = None,
 ) -> Extraction:
     """Text fields are proposed by the LLM and kept only when quoted verbatim from the page; other scalars are
@@ -254,7 +265,15 @@ async def extract(
     evidence: list[Evidence] = []
     text_fields = {name: field for name, field in schema.model_fields.items() if field.annotation is str}
     if text_fields:
-        proposed, _ = await propose_text_fields(llm, task, capture, text_fields, ledger=ledger)
+        # Notes first: they hold every page a comparison read, where the final page shows one side of it.
+        proposed = (
+            await propose_text_fields_from_notes(llm, task, notes, text_fields, ledger=ledger)
+            if notes is not None
+            else {}
+        )
+        unseen = {name: field for name, field in text_fields.items() if name not in proposed}
+        if unseen:
+            proposed |= (await propose_text_fields(llm, task, capture, unseen, ledger=ledger))[0]
         for name, (value, quoted) in proposed.items():
             values[name] = value
             evidence.append(quoted)

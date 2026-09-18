@@ -27,7 +27,7 @@
       // innerText omits shadow trees and child documents even when their content is visible.
       for (const e of root.querySelectorAll('*')) {
         if (e.shadowRoot) include(e.shadowRoot);
-        if (e.tagName === 'IFRAME') {
+        if (e.tagName === 'IFRAME' || e.tagName === 'FRAME') {
           let inner = null;
           try { inner = e.contentDocument; } catch { inner = null; }
           if (inner?.body) include(inner);
@@ -132,7 +132,7 @@
     for (const e of root.querySelectorAll(SELECTOR)) yield e;
     for (const e of root.querySelectorAll('*')) {
       if (e.shadowRoot) yield* walk(e.shadowRoot);
-      if (e.tagName === 'IFRAME') {
+      if (e.tagName === 'IFRAME' || e.tagName === 'FRAME') {
         let inner = null;
         try { inner = e.contentDocument; } catch { inner = null; }
         if (inner && inner.body) yield* walk(inner);
@@ -224,6 +224,85 @@
     }
     return scope ? nameOf(scope, label).slice(0, 120) : '';
   };
+  // Content a stylesheet shows only under the pointer (`.card:hover .caption`) is out of reach of every other
+  // operation. An element whose hover rule would reveal something now hidden is offered as a hover target.
+  const docs = [];
+  const addDoc = doc => {
+    if (!doc?.body || docs.includes(doc)) return;
+    docs.push(doc);
+    for (const frame of doc.querySelectorAll('iframe,frame')) {
+      try { addDoc(frame.contentDocument); } catch { /* A cross-origin frame is observed in its own session. */ }
+    }
+  };
+  addDoc(document);
+  // Parsing every stylesheet each step is the slow part on a large site, so a document's hover rules are kept
+  // until its rule counts change (a new sheet, or rules a script inserted).
+  registry.hoverRules ||= new WeakMap();
+  const revealsIn = doc => {
+    const sheets = [];
+    for (const sheet of doc.styleSheets) {
+      try { sheets.push(sheet.cssRules); } catch { /* A cross-origin stylesheet cannot be read. */ }
+    }
+    const version = sheets.map(rules => rules.length).join(',');
+    const cached = registry.hoverRules.get(doc);
+    if (cached?.version === version) return cached.reveals;
+    const reveals = new Map();
+    const collect = rules => {
+      for (const rule of rules) {
+        if (rule.cssRules?.length) collect(rule.cssRules);
+        for (const selector of (rule.selectorText || '').split(',')) {
+          // Split `a:hover b` into the hovered compound and what it reveals inside it. Rules that restyle the
+          // hovered element itself, or reveal a sibling or a pseudo-element, have nothing to offer here.
+          const m = selector.match(/^(.*?):hover([^\s>+~]*)\s*(>?)\s*([^+~]*)$/);
+          if (!m || !m[1].trim() || !m[4].trim() || m[4].includes('::')) continue;
+          const pair = [(m[1] + m[2]).replaceAll(':hover', '').trim(), `:scope ${m[3]} ${m[4].replaceAll(':hover', '')}`];
+          reveals.set(pair.join('\n'), pair);
+        }
+      }
+    };
+    for (const rules of sheets) collect(rules);
+    const found = [...reveals.values()].slice(0, 200);
+    registry.hoverRules.set(doc, { version, reveals: found });
+    return found;
+  };
+  const offered = new Set(controls.map(c => registry.nodes.get(c.id)));
+  // Bounded work: each candidate costs a query, and a stylesheet can name thousands of hoverable elements.
+  let hovers = 0, checked = 0;
+  for (const doc of docs) {
+    for (const [base, tail] of revealsIn(doc)) {
+      let hosts = [];
+      try { hosts = doc.querySelectorAll(base); } catch { continue; }
+      for (const e of hosts) {
+        if (hovers >= 40 || checked >= 400) break;
+        // A link or button's own hover rule restyles it or shows decoration; offering HOVER there as well as
+        // CLICK only gives the choice another way to be wrong.
+        if (offered.has(e) || e === doc.body || e === doc.documentElement || !visible(e)) continue;
+        const r = e.getBoundingClientRect(), x = r.x + r.width / 2, y = r.y + r.height / 2;
+        if (r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth || r.height > innerHeight) continue;
+        checked++;
+        let hidden = false;
+        try {
+          hidden = [...e.querySelectorAll(tail)].some(t => !visible(t) && (t.textContent.trim() || t.querySelector('img,a')));
+        } catch { continue; }
+        if (!hidden) continue;
+        const image = e.querySelector('img[alt]');
+        const label = firstLine(e.innerText) || e.getAttribute('aria-label') || image?.getAttribute('alt') ||
+          e.getAttribute('title') || e.tagName.toLowerCase();
+        const role = e.getAttribute('role') ||
+          { FIGURE: 'figure', LI: 'listitem', IMG: 'img', TR: 'row', TD: 'cell' }[e.tagName] || 'group';
+        const c = {
+          id: identity(e), role, label: label.slice(0, 200), offscreen: y < 0 || y >= innerHeight,
+          distance: (y < 0 || y >= innerHeight) ? 1 + Math.abs(y - innerHeight / 2) : 0,
+          sensitive: false, input_type: null, frame_origin: e.ownerDocument.location.origin,
+          frame_path: framePath(e.ownerDocument), submit_semantics: null, value: null, operations: ['hover'],
+        };
+        controls.push(c);
+        offered.add(e);
+        hovers++;
+      }
+    }
+  }
+
   const byLabel = new Map();
   for (const c of controls) {
     const key = JSON.stringify([c.role, c.label]);
@@ -237,23 +316,46 @@
       const context = contextOf(registry.nodes.get(c.id), twins, c.label);
       if (context) c.context = context;
     }
+    // Twins whose surroundings name none of them, like a row of identical avatars, still differ by position.
+    if (group.every(c => !c.context)) {
+      twins.sort((a, b) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+      for (const c of group) {
+        c.context = `${twins.indexOf(registry.nodes.get(c.id)) + 1} of ${twins.length}`;
+      }
+    }
   }
 
   // Python applies the configured caps after merging frames; keep the nearest controls first.
   controls.sort((a, b) => a.distance - b.distance);
 
-  const words = [], walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  const range = document.createRange();
-  let node;
-  while ((node = walker.nextNode())) {
-    const value = node.textContent.trim(), parent = node.parentElement;
-    if (!value || !parent || parent.closest('script,style,noscript,template') || !visible(parent)) continue;
-    range.selectNodeContents(node);
-    const r = range.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth) {
-      words.push(value);
+  // Text in a same-process child document is on screen as much as the parent's: a frameset page has no text of
+  // its own at all. Each child is read in its own coordinates, shifted by where its frame sits.
+  const words = [];
+  const readText = (doc, dx, dy) => {
+    if (!doc.body) return;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    const range = doc.createRange();
+    let node;
+    while ((node = walker.nextNode())) {
+      const value = node.textContent.trim(), parent = node.parentElement;
+      if (!value || !parent || parent.closest('script,style,noscript,template') || !visible(parent)) continue;
+      range.selectNodeContents(node);
+      const r = range.getBoundingClientRect();
+      const top = r.top + dy, left = r.left + dx;
+      if (r.width > 0 && r.height > 0 && top + r.height > 0 && top < innerHeight && left + r.width > 0
+        && left < innerWidth) {
+        words.push(value);
+      }
     }
-  }
+    for (const frame of doc.querySelectorAll('iframe,frame')) {
+      let inner = null;
+      try { inner = frame.contentDocument; } catch { inner = null; }
+      if (!inner) continue;
+      const f = frame.getBoundingClientRect();
+      readText(inner, dx + f.left + frame.clientLeft, dy + f.top + frame.clientTop);
+    }
+  };
+  readText(document, 0, 0);
   const viewport_text = words.join('\n');
 
   const guards = {};

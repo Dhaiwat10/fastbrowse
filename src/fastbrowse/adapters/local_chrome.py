@@ -10,6 +10,8 @@ import time
 import urllib.request
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager, nullcontext
+from pathlib import Path
+from typing import IO
 
 from fastbrowse.models import BrowserConnection, LocalChrome
 
@@ -62,13 +64,17 @@ def local_chrome(options: LocalChrome) -> Generator[BrowserConnection]:
     binary = find_chrome(options.binary)
     if binary is None:
         raise RuntimeError("Chrome is not installed")
-    port = free_port()
     kept = options.profile
     with (
         nullcontext(str(kept.expanduser()))
         if kept
-        else tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as profile
+        else tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as profile,
+        tempfile.TemporaryFile() as log,
     ):
+        # Chrome picks its own port and writes it to the profile. Choosing a free port here and handing it over
+        # left a window in which something else could take it, and Chrome then never answered.
+        active = Path(profile) / "DevToolsActivePort"
+        active.unlink(missing_ok=True)
         proc = subprocess.Popen(
             [
                 binary,
@@ -76,17 +82,17 @@ def local_chrome(options: LocalChrome) -> Generator[BrowserConnection]:
                 # Headless defaults to 800x600, where responsive sites collapse their header into a
                 # toggle and the control the agent needs is not in the page at all.
                 "--window-size=1280,900",
-                f"--remote-debugging-port={port}",
+                "--remote-debugging-port=0",
                 f"--user-data-dir={profile}",
                 "--no-first-run",
                 "--disable-popup-blocking",
                 "about:blank",
             ],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=log,
         )
         try:
-            yield BrowserConnection(cdp_url=_wait_for_ws(port), live_url=None, remote=False)
+            yield BrowserConnection(cdp_url=_wait_for_ws(active, proc, log), live_url=None, remote=False)
         finally:
             proc.terminate()
             try:
@@ -96,13 +102,24 @@ def local_chrome(options: LocalChrome) -> Generator[BrowserConnection]:
                 proc.wait()
 
 
-def _wait_for_ws(port: int, timeout: float = 15.0) -> str:
+def _wait_for_ws(active: Path, proc: subprocess.Popen[bytes], log: IO[bytes], timeout: float = 30.0) -> str:
+    """Wait for Chrome to report its DevTools address, failing with its own output if it exits or never does."""
     deadline = time.monotonic() + timeout
     while True:
+        if proc.poll() is not None:
+            raise RuntimeError(f"Chrome exited with status {proc.returncode} before DevTools started{_tail(log)}")
         try:
+            port = int(active.read_text().split("\n")[0])
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
                 return str(json.load(response)["webSocketDebuggerUrl"])
-        except OSError:
+        except OSError, ValueError:
+            # Not written yet, written only partly, or written and not yet listening.
             if time.monotonic() > deadline:
-                raise
+                raise RuntimeError(f"Chrome did not start DevTools within {timeout:.0f}s{_tail(log)}") from None
             time.sleep(0.1)
+
+
+def _tail(log: IO[bytes]) -> str:
+    log.seek(0)
+    text = log.read()[-2000:].decode(errors="replace").strip()
+    return f":\n{text}" if text else ""

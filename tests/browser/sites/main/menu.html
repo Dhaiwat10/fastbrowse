@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head><title>Menu</title></head>
+<body style="margin:0">
+<div style="height:600px"></div>
+<button id="trip" aria-haspopup="listbox" aria-expanded="false">Round trip</button>
+<ul id="list" role="listbox" hidden style="margin:0;padding:0;list-style:none">
+  <li role="option" aria-selected="true">Round trip</li>
+  <li role="option" aria-selected="false">One way</li>
+</ul>
+<div style="height:3000px"></div>
+<script>
+  const trip = document.getElementById("trip");
+  const list = document.getElementById("list");
+  const close = () => { list.hidden = true; trip.setAttribute("aria-expanded", "false"); };
+  trip.addEventListener("click", () => { list.hidden = false; trip.setAttribute("aria-expanded", "true"); });
+  // Like many menu widgets, a scroll dismisses the open list.
+  addEventListener("scroll", close);
+  for (const option of list.children) {
+    option.addEventListener("click", () => { trip.textContent = option.textContent; close(); });
+  }
+</script>
+</body>
+</html>
