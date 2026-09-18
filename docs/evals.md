@@ -80,46 +80,48 @@ The first pass of the suite scored 5/14. Each fix since was found by a failing t
 
 ### Head to head
 
-Run on 2026-09-18. Every arm used a Browser Use Cloud browser and the same limits: 30 steps, $0.25 and 300s per task.
-- **fastbrowse:** `google/gemini-3.8-flash` at low reasoning effort, with `google/gemini-3.5-flash-lite` for PLAN, SHORTCUT and FIELD_TEXT. Three passes on the build at `5fa4442`.
-- **jev-ultrafast** at `452c1ad`: Jev through the AI Gateway (no `TYPESAFE_API_KEY` was available), with its default text helper, `inception/mercury-2.5` with reasoning off. Three passes.
-- **Hosted Browser Use:** its default model, `claude-opus-4.7`, in its own browser. One pass, the most the $15 budget allowed.
+Run on 2026-09-18. Every arm used a Browser Use Cloud browser and the same limits: 30 steps, $0.25 and 300s per task. Three passes per arm.
+- **fastbrowse:** `google/gemini-3.8-flash` at low reasoning effort, with `google/gemini-3.5-flash-lite` for PLAN, SHORTCUT, FIELD_TEXT and VERIFY, on the build at `93413e1` (#23).
+- **jev-ultrafast** at `452c1ad`: Jev through the AI Gateway (no `TYPESAFE_API_KEY` was available), with its default text helper, `inception/mercury-2.5` with reasoning off.
+- **Hosted Browser Use:** its default model, `claude-opus-4.7`, in its own browser.
 
-Each arm meets the others only on the tasks both can be graded on (see `arms` above), so there are two headline tables, not one.
+Each arm meets the others only on the tasks both can be graded on (see `arms` above), so there are two headline tables, not one. `wasted actions per run` counts escalations, actions that failed or changed nothing, and an action repeated on the same target, from each run's trace (`scripts/h2h_report.py`); hosted Browser Use returns no trace to count.
 
 **Answer tasks** (lookups, sign-ins, checkout and Flights), fastbrowse against hosted Browser Use:
 
-| | passed | correct answer | median time | mean time | cost per task |
-|:--|:--|:--|:--|:--|:--|
-| fastbrowse | 36/42 | 36/42 | 21.5s | 29.2s | $0.0151 |
-| hosted Browser Use | 5/14 | 5/14 | 28.5s | 29.3s | $0.3878 (2 unknown) |
+| | passed | correct answer | median time | mean time | cost per task | wasted actions per run |
+|:--|:--|:--|:--|:--|:--|:--|
+| fastbrowse | 40/42 | 40/42 | 17.0s | 25.1s | $0.0114 | 0.9 |
+| hosted Browser Use | 14/42 | 14/42 | 27.5s | 28.9s | $0.4015 (6 unknown) | not reported |
 
 **Navigation tasks**, fastbrowse against jev-ultrafast:
 
-| | passed | correct answer | median time | mean time | cost per task |
-|:--|:--|:--|:--|:--|:--|
-| fastbrowse | 15/18 | 15/18 | 10.1s | 23.9s | $0.0115 |
-| jev-ultrafast | 8/18 | 11/18 | 11.9s | 20.4s | $0.0044 |
+| | passed | correct answer | median time | mean time | cost per task | wasted actions per run |
+|:--|:--|:--|:--|:--|:--|:--|
+| fastbrowse | 18/18 | 18/18 | 8.5s | 18.8s | $0.0079 | 0.6 |
+| jev-ultrafast | 11/18 | 11/18 | 12.8s | 22.3s | $0.0050 | 2.7 |
 
 Per category:
 
 | category | fastbrowse | hosted Browser Use | jev-ultrafast |
 |:--|:--|:--|:--|
-| lookup | 18/21, median 15.6s, $0.0166 | 4/7, 18.0s, $0.3911 (2 unknown) | |
-| login | 15/15, 22.6s, $0.0061 | 1/5, 39.9s, $0.3624 | |
-| checkout | 3/3, 41.1s, $0.0201 | 0/1, 48.3s, $0.3776 | |
-| safety | 3/3, 29.7s, $0.0043 | | |
-| widget | 0/3, 91.7s, $0.0442 | 0/1, 40.1s, $0.5085 | |
-| navigate | 15/18, 10.1s, $0.0115 | | 8/18, 11.9s, $0.0044 |
+| lookup | 20/21, median 13.7s, $0.0097 | 9/21, 16.2s, $0.4467 (6 unknown) | |
+| login | 15/15, 21.6s, $0.0043 | 5/15, 44.3s, $0.3382 | |
+| checkout | 3/3, 42.4s, $0.0161 | 0/3, 46.8s, $0.3802 | |
+| safety | 3/3, 48.1s, $0.0048 | | |
+| widget | 2/3, 64.0s, $0.0545 | 0/3, 38.4s, $0.5133 | |
+| navigate | 18/18, 8.5s, $0.0079 | | 11/18, 12.8s, $0.0050 |
+
+The three arms cost $0.64, $0.09 and $14.45 in total.
 
 **Where fastbrowse loses.**
-- `pypi-newer` 0/3: comparing two packages re-fills the search box until the step limit ([#7](https://github.com/agent-labs-dev/fastbrowse/issues/7)).
-- `google-flights` 0/3 and `flights-search` 0/3: switching the trip type from inside the date picker does not take, and the unchanged page is counted as progress, so Done and Search repeat until the step limit ([#12](https://github.com/agent-labs-dev/fastbrowse/issues/12)). jev-ultrafast fails `flights-search` too (0/3, looping on the Stops filter). Both pass jev-ultrafast's own README goal, a one-way search with no filter, on the same browser: fastbrowse in 14.6s and 2 steps, jev-ultrafast in 26.4s and 14 steps.
-- Cost against jev-ultrafast: where both pass a navigation task, jev-ultrafast is two to three times cheaper, and faster on `hn-comments` (6.5s median against 10.1s). fastbrowse's extra is its LLM done check (about 2.5s) and its plan and shortcut calls. It is faster on `arxiv-open`, `github-open`, `pypi-open` and `wiki-open`.
+- `pypi-newer` 2/3: the failed run stopped `stuck` when the done check would not confirm a correct comparison. All three runs filled the search box four times for two searches ([#7](https://github.com/agent-labs-dev/fastbrowse/issues/7)).
+- `google-flights` 2/3, with 7.3 wasted actions a run: the failed run stopped `stuck` after recovery decided no flights existed. The runs that passed went round Done and Search on a date picker that Search reopened, each click a change, so the stall count never grew ([#12](https://github.com/agent-labs-dev/fastbrowse/issues/12)). `flights-search` passed 3/3 but took a median of 65.2s.
+- Against jev-ultrafast, where both pass (`wiki-open`, `pypi-open`, `github-open`, `hn-comments`), jev-ultrafast is cheaper on all four, by $0.0001 to $0.0021 a task, and faster on `hn-comments` (6.8s median against 12.8s). fastbrowse is faster on the other three (7.1 to 8.5s against 12.2 to 12.7s), because its direct address reaches those pages with no steps.
 
 **Where the others lose.**
-- jev-ultrafast: `wiki-open` 0/3 ended on errors (a read timeout, and its text helper returning no usable value), `arxiv-open` 0/3 hit the step limit or the same text-helper error, and `pypi-open` stopped `blocked` once. Three runs reached the right page without saying DONE, which is why its correct count is above its pass count.
-- Hosted Browser Use: every failed session cost more than the $0.25 cap ($0.37 to $0.92) and ended `error` ("Task ended unexpectedly") or with "[Session cost limit reached]", so the shared cap is what fails it. Re-run once with a $0.60 cap, it passed 6 of those 8 tasks (all but `saucedemo-locked-out` and `saucedemo-checkout`, which again ended "Task ended unexpectedly"), at a median of 103.5s and $0.63 a task, $0.43 to $0.79 and again above the cap. So hosted Browser Use can do most of these tasks given the budget: at 30 to 160 times fastbrowse's cost per task, and on the sign-ins (102 to 128s against a 22.6s median) about five times its time. Two such sessions' costs are missing from the SDK result; the session list puts them at $0.57 and $0.75. Its lookups answered with 0 or 1 steps and no browser cost, so they came from the model or a search tool rather than the page.
+- jev-ultrafast: `arxiv-open` 0/3 and `flights-search` 0/3 ran to the 30-step limit, and one `wiki-open` run ended on a `Page.navigate` timeout.
+- Hosted Browser Use: all 28 failed sessions cost more than the $0.25 cap ($0.37 to $0.92) and ended "Task ended unexpectedly" or "[Session cost limit reached]". For the six structured tasks that text is not valid JSON, so the SDK raised and their cost was not reported. The shared cap is what fails it: an earlier run with a $0.60 cap passed 6 of 8 such tasks, at a median of 103.5s and $0.63 a task. Its passing lookups cost $0.21 to $0.31 a task against fastbrowse's $0.004 to $0.007, at about the same time (`hn-top` 12.0s against 12.1s, `github-license` 9.7s against 13.2s).
 
 **Where the time went, and what took it back.** On the first measured build a task averaged 44.2s: about two thirds LLM, a tenth Jev, the rest browser round trips. In order of effect:
 - Low reasoning effort on every LLM call.

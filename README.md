@@ -28,13 +28,14 @@ something that was never on the page. Every claim in an answer cites a verbatim 
 Same day, same cloud browser, same limits (30 steps, $0.25, 300s), each arm graded only on the tasks its
 output can be graded on ([tasks, method and per-category results](docs/evals.md#head-to-head)):
 
-| | graded on | passed | median time | cost per task |
-|:--|:--|:--|:--|:--|
-| **fastbrowse** | all 21 tasks | 54/63 | 19.6s | $0.0135 |
-| [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | 6 navigation tasks (fastbrowse: 15/18, 10.1s, $0.0115) | 8/18 | 11.9s | **$0.0044** |
-| hosted Browser Use | 14 answer tasks (fastbrowse: 36/42, 21.5s, $0.0151) | 5/14 | 28.5s | $0.3878 |
+| | graded on | passed | median time | cost per task | wasted actions per run |
+|:--|:--|:--|:--|:--|:--|
+| **fastbrowse** | all 21 tasks | **61/63** | 15.9s | $0.0101 | 0.7 |
+| [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | 6 navigation tasks (fastbrowse: 18/18, 8.5s, $0.0079) | 11/18 | 12.8s | **$0.0050** | 2.7 |
+| hosted Browser Use | 14 answer tasks (fastbrowse: 40/42, 17.0s, $0.0114) | 14/42 | 27.5s | $0.4015 | not reported |
 
-jev-ultrafast is cheaper where both pass; hosted Browser Use's 9 failures all ran past the $0.25 cap.
+Where both pass a navigation task, jev-ultrafast costs less and is faster on `hn-comments`, while fastbrowse is
+faster on the other three. Every one of hosted Browser Use's 28 failures ran past the $0.25 cap.
 
 ## How it works
 
