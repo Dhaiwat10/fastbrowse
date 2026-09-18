@@ -25,9 +25,10 @@ FREE = CostLine(component=CostComponent.JEV, basis=CostBasis.ESTIMATED, dollars=
 class ScriptedJev:
     """Picks `pick` for every choice whose criteria contain it, else the first option."""
 
-    def __init__(self, pick: Mapping[str, str], *, reject_offscreen: bool = False) -> None:
+    def __init__(self, pick: Mapping[str, str], *, reject_offscreen: bool = False, noul: float = 0.8) -> None:
         self.pick = pick
         self.reject_offscreen = reject_offscreen
+        self.noul = noul
         self.requests: list[Mapping[str, Question]] = []
 
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
@@ -44,7 +45,7 @@ class ScriptedJev:
                         choice=choice, probabilities={o: float(o == choice) for o in options}, confidence=0.9
                     )
                 case NoulQuestion():
-                    answers[key] = NoulAnswer(probability=0.8)
+                    answers[key] = NoulAnswer(probability=self.noul)
                 case _:
                     raise AssertionError(question)
         return Evaluation(model="test", answers=answers, input_tokens=10, cost=FREE)
@@ -129,3 +130,17 @@ async def test_each_request_including_groups_and_retries_needs_budget(retry: boo
     with pytest.raises(BudgetExceeded):
         await decide(jev, observation(controls), context(), config, ledger=ledger)
     assert len(jev.requests) == 1 and ledger.jev_calls == 1
+
+
+async def test_duplicate_labels_reach_the_chooser_with_their_context() -> None:
+    twins = tuple(
+        button(i).model_copy(update={"label": "Add to cart", "context": name})
+        for i, name in enumerate(("Sauce Labs Backpack", "Sauce Labs Bike Light"))
+    )
+    jev = ScriptedJev({"operation": "click", "click_target": "b1"})
+    await decide(jev, observation(twins), context(subgoal="Add the Bike Light"), Config())
+    question = jev.requests[0]["click_target"]
+    assert isinstance(question, ChoiceQuestion)
+    rendered = question.model_dump_json()
+    assert '"context":"Sauce Labs Backpack"' in rendered
+    assert '"context":"Sauce Labs Bike Light"' in rendered

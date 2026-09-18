@@ -74,11 +74,29 @@ async def test_field_writer_receives_popup_context_and_other_field_values() -> N
 async def test_missing_personal_information_still_stops_without_filling() -> None:
     target = field("Account number")
     page = Mock(spec=Page)
-    agent = Agent(page, ScriptedJev({}), ScriptedLLM([{"missing": True, "text": ""}]))
+    agent = Agent(page, ScriptedJev({}, noul=0.1), ScriptedLLM([{"missing": True, "text": ""}]))
     with pytest.raises(_Stop) as stopped:
         await agent._generate_text(await run_state(), observation((target,)), target)  # pyright: ignore[reportPrivateUsage]
     assert stopped.value.status is Status.NEEDS_INPUT
     page.act.assert_not_called()
+
+
+async def test_a_value_the_task_states_is_asked_for_again_rather_than_ending_the_run() -> None:
+    target = field("Last Name")
+    llm = ScriptedLLM([{"missing": True, "text": ""}, {"missing": False, "text": "Lovelace"}])
+    agent = Agent(Mock(spec=Page), ScriptedJev({}, noul=0.9), llm)
+
+    assert await agent._generate_text(await run_state(), observation((target,)), target) == "Lovelace"  # pyright: ignore[reportPrivateUsage]
+    assert "never invent one" in llm.calls[1][1][-1].content
+
+
+async def test_a_second_missing_verdict_ends_the_run() -> None:
+    target = field("Account number")
+    llm = ScriptedLLM([{"missing": True, "text": ""}, {"missing": True, "text": ""}])
+    agent = Agent(Mock(spec=Page), ScriptedJev({}, noul=0.9), llm)
+    with pytest.raises(_Stop) as stopped:
+        await agent._generate_text(await run_state(), observation((target,)), target)  # pyright: ignore[reportPrivateUsage]
+    assert stopped.value.status is Status.NEEDS_INPUT
 
 
 @pytest.mark.parametrize("outcome", [StepOutcome.EXECUTED, StepOutcome.STALE])
@@ -95,3 +113,28 @@ async def test_recovery_hint_is_consumed_only_when_action_progresses(outcome: St
     agent = Agent(page, jev, ScriptedLLM([]))
     await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
     assert state.hint == (None if outcome is StepOutcome.EXECUTED else "Open the origin picker")
+
+
+async def test_step_log_names_which_twin_was_clicked() -> None:
+    twins = tuple(
+        Control(
+            id=f"add{i}",
+            frame_id=None,
+            role="button",
+            label="Add to cart",
+            context=name,
+            operations=frozenset({Operation.CLICK}),
+        )
+        for i, name in enumerate(("Sauce Labs Backpack", "Sauce Labs Bike Light"))
+    )
+    obs = observation(twins)
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    jev = ScriptedJev({"operation": "click", "click_target": "add1"})
+    decision = await decide(jev, obs, context(), Config())
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    agent = Agent(page, jev, ScriptedLLM([]))
+    await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
+    assert state.steps[0].target == "Add to cart (Sauce Labs Bike Light)"
+    assert state.history[0].target == "Add to cart (Sauce Labs Bike Light)"

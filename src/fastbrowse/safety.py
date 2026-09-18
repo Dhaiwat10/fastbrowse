@@ -43,6 +43,7 @@ def irreversible_question(task: str, operation: Operation, control: Control) -> 
         instructions=(
             f"The agent is about to {operation.value} the element labelled {control.label!r} while doing this task: "
             f"{task}\n"
+            + (f"It sits under {control.context!r} on the page.\n" if control.context else "")
             + (f"Enter submits this form: {control.submit_semantics}\n" if operation is Operation.ENTER else "")
             + "Would doing so commit something that cannot be undone, such as spending money, sending a "
             "message, submitting an application, or deleting or publishing data?"

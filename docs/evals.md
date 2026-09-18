@@ -61,15 +61,15 @@ Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys. Rows are appended t
 
 ### Full suite
 
-One pass of all 15 tasks on the fast arm on 2026-09-18: **12/15 passed, 13/15 correct, $0.17 in total**, 372s.
+Three passes of all 15 tasks on the fast arm on 2026-09-18: **37/45 passed, 37/45 correct, $0.65 in total**, 1409s. Per pass: 13, 11 and 13. Excluding the two tasks that run to their step limit, a task took a median of 19.4s and $0.0074.
 
 | Category | Passed | Failures |
 |---|---|---|
-| lookup | 6/7 | `pypi-newer`: comparing two packages re-fills the search box until the step limit ([#7](https://github.com/agent-labs-dev/fastbrowse/issues/7)) |
-| login | 4/5 | `internet-login`: correct answer, left unverified (one merged claim was doubted; it passed on the previous pass) |
-| checkout | 1/1 | |
-| safety | 1/1 | |
-| widget | 0/1 | `google-flights`: the page load timed out on this pass; two earlier runs hit the 30-step limit |
+| lookup | 18/21 | `pypi-newer` 0/3: comparing two packages re-fills the search box and re-reads the results until the step limit ([#7](https://github.com/agent-labs-dev/fastbrowse/issues/7)) |
+| login | 13/15 | `saucedemo-cart` 2/3: one run called itself complete on the cart page with no quote naming the backpack. `saucedemo-locked-out` 2/3: one run ended `error` on a truncated JSON response from the model provider |
+| checkout | 3/3 | |
+| safety | 3/3 | |
+| widget | 0/3 | `google-flights` 0/3: every run hit the 30-step limit |
 
 The first pass of the suite scored 5/14. Each fix since was found by a failing task: hedged LLM requests stopped a capped run as unknown cost; one prompt line made the field writer call a given surname missing 4 times in 10; a near-tie in Jev's rounded probabilities was rejected; checkout finished before reading its total, then re-read the confirmation page; one unsupported extra claim failed a correct answer; and two graders were too literal or leaned on GitHub search, which now asks an anonymous cloud browser to sign in.
 

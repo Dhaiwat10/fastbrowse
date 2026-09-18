@@ -198,6 +198,47 @@
     controls.push(base);
   }
 
+  // Controls that read the same cannot be told apart by their label, and a hint naming the right one
+  // ("Add to cart under Sauce Labs Backpack") has nothing to match on. Give each twin the widest ancestor
+  // that holds it and none of its twins, named by that ancestor's heading or its own first line of text.
+  // Only labels that actually collide pay for it.
+  const HEADINGS = 'h1,h2,h3,h4,h5,h6,[role="heading"],legend,caption,th,dt,summary';
+  const firstLine = text => (text || '').split('\n').map(s => s.replace(/\s+/g, ' ').trim()).find(Boolean) || '';
+  const nameOf = (scope, label) => {
+    const aria = (scope.getAttribute('aria-label') || '').trim();
+    if (aria && aria !== label) return aria;
+    for (const heading of scope.querySelectorAll(HEADINGS)) {
+      const text = firstLine(heading.innerText);
+      if (text && text !== label) return text;
+    }
+    const text = scope.innerText || '';
+    return firstLine(label ? text.split(label).join(' ') : text);
+  };
+  const contextOf = (element, twins, label) => {
+    // The widest twin-free ancestor is the card, row or section the twins repeat over. A narrower one names
+    // the button's own wrapper, which on a shop is its price rather than the product it belongs to.
+    let scope = null;
+    for (let e = element.parentElement; e && e !== e.ownerDocument.body; e = e.parentElement) {
+      if (twins.some(twin => twin !== element && e.contains(twin))) break;
+      scope = e;
+    }
+    return scope ? nameOf(scope, label).slice(0, 120) : '';
+  };
+  const byLabel = new Map();
+  for (const c of controls) {
+    const key = JSON.stringify([c.role, c.label]);
+    if (!byLabel.has(key)) byLabel.set(key, []);
+    byLabel.get(key).push(c);
+  }
+  for (const group of byLabel.values()) {
+    if (group.length < 2) continue;
+    const twins = group.map(c => registry.nodes.get(c.id));
+    for (const c of group) {
+      const context = contextOf(registry.nodes.get(c.id), twins, c.label);
+      if (context) c.context = context;
+    }
+  }
+
   // Python applies the configured caps after merging frames; keep the nearest controls first.
   controls.sort((a, b) => a.distance - b.distance);
 

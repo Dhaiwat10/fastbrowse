@@ -65,7 +65,7 @@ def page_state(observation: Observation, notes: Notes, max_note_chars: int = 800
         # pass completion even though the requested filters were never applied.
         "controls": [
             control.model_dump(
-                mode="json", include={"label", "role", "value", "checked", "selected"}, exclude_none=True
+                mode="json", include={"label", "context", "role", "value", "checked", "selected"}, exclude_none=True
             )
             for control in observation.controls
         ],
