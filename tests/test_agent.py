@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 # pyright: reportPrivateUsage=false
+from fastbrowse import agent as agent_module
 from fastbrowse.agent import (
     Agent,
     _follow_recovery,
@@ -22,14 +23,14 @@ from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.llm import Generation
 from fastbrowse.memory import Fact, Notes
 from fastbrowse.models import Authorization, Decider, Limits, LLMPurpose, Operation, Status, StepOutcome, StepResult
-from fastbrowse.page import ActResult, Control, Observation, Page
+from fastbrowse.page import ActResult, BlockKind, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.policy import HistoryEntry, decide
 from fastbrowse.telemetry import Ledger
 from fastbrowse.verification import LLMVerdict
 from tests.test_memory import evidence
 from tests.test_policy import FREE, ScriptedJev, context, observation
-from tests.test_retrieval import ScriptedLLM
+from tests.test_retrieval import ScriptedLLM, capture
 
 
 async def run_state() -> _RunState:
@@ -433,3 +434,30 @@ def test_the_verifier_cannot_hold_open_a_requirement_the_notes_cite(
         Fact(requirement_id=r, text=r, evidence=evidence(start=i)) for i, r in enumerate(("httpx", "compare"))
     )
     assert _verified(LLMVerdict(complete=complete, missing=missing), plan, notes) is accepted
+
+
+@pytest.mark.parametrize("draws", [True, False])
+async def test_a_read_waits_for_an_empty_page_to_draw_and_never_reads_nothing(
+    monkeypatch: pytest.MonkeyPatch, draws: bool
+) -> None:
+    monkeypatch.setattr(agent_module, "_INTERSTITIAL_SECONDS", 0.05)
+    monkeypatch.setattr(agent_module, "_INTERSTITIAL_POLL_SECONDS", 0.01)
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="When was httpx released?", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    empty = observation(())
+    drawn = observation((_button("Search"),)).model_copy(update={"page_key": "drawn"})
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=drawn if draws else empty)
+    llm = ScriptedLLM([])
+    agent = Agent(page, ScriptedJev({}), llm)
+    agent._capture = AsyncMock(side_effect=[capture(), capture((BlockKind.PARAGRAPH, "httpx 0.28.1"))])
+    agent._read = AsyncMock(wraps=agent._read)
+    decision = await decide(ScriptedJev({"operation": "read"}), empty, context(), Config())
+    await agent._step(state, empty, decision)
+    assert agent._read.await_args is not None
+    read_text = agent._read.await_args.args[1].text
+    assert read_text == ("httpx 0.28.1" if draws else "")
+    assert llm.calls == []

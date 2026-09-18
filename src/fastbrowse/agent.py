@@ -383,7 +383,12 @@ class Agent:
         typed: str | None = None
         effect_now: str | None = None
         if decision.operation is Operation.READ:
-            progressed, changed = await self._read(state), False
+            capture = await self._capture()
+            # A script-built page can be captured before it draws: a PyPI search read an empty page three times,
+            # recovered, and went round until the time limit. Wait for it to draw, as an unsure step does.
+            if not capture.text.strip() and await self._outwait(observation):
+                capture = await self._capture()
+            progressed, changed = await self._read(state, capture), False
             state.read_here = True
             act = ActResult(outcome=StepOutcome.EXECUTED, page_changed=False)
         else:
@@ -882,6 +887,10 @@ class Agent:
         capture = capture or await self._capture()
         plan = await state.await_plan()
         wanted = [r for r in state.notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION]
+        if not capture.text.strip():
+            # Nothing on the page can evidence anything, so the reader is not asked.
+            trace("read", url=self._redactor.redact(capture.url), chars=0, wanted=[r.id for r in wanted])
+            return False
         # Unresolved requirements may refer to an earlier one; keep the task's constraints in every read.
         question = state.task + "\n\nRequirements still to evidence:\n" + "\n".join(f"- {r.text}" for r in wanted)
         before = len(state.notes.facts)
