@@ -13,6 +13,12 @@ class Thresholds(Frozen):
     login_required_above: float = 0.70
     irreversible_above: float = 0.50
     done_accept_from: float = 0.85
+    done_confirmed_from: float = 0.50
+    """With every action requirement confirmed, the holistic done answer that accepts without the LLM verifier.
+    Jev scores a page that is right 0.49 to 0.91 as done and a near miss (the organisation instead of the
+    repository, search results, a related article) 0.04 or less, so doubt between the two is not a near miss."""
+    requirement_confirmed_below: float = 0.30
+    """A requirement's "not satisfied" answer under which it counts as confirmed; near misses scored 0.65 or more."""
     claim_problem_above: float = 0.70
     """Any "yes = something is wrong" answer check above this rejects the claim."""
     value_stated_above: float = 0.50
