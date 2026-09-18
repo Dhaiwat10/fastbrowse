@@ -5,6 +5,7 @@ Models only ever see secret names. Values are resolved here, at dispatch time, f
 
 import json
 import re
+from collections.abc import Mapping
 from urllib.parse import quote, quote_plus, urlsplit
 
 from fastbrowse.jev import NoulQuestion
@@ -66,6 +67,20 @@ async def resolve_secret(resolver: SecretResolver, name: str, origin: str) -> st
     if ref is None or not secret_allowed(ref, origin):
         return None
     return await resolver.resolve(name, origin)
+
+
+class ScopedSecrets:
+    """Secret values held in this process, each usable only on one origin: the `SecretResolver` for a run."""
+
+    def __init__(self, values: Mapping[str, str], origin: str) -> None:
+        self._values = dict(values)
+        self._origin = origin
+
+    def available(self) -> tuple[SecretRef, ...]:
+        return tuple(SecretRef(name=name, origins=(self._origin,)) for name in self._values)
+
+    async def resolve(self, name: str, origin: str) -> str | None:
+        return self._values.get(name) if origin == self._origin else None
 
 
 class Redactor:

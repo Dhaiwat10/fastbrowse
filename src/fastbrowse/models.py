@@ -181,6 +181,8 @@ class Limits(Frozen):
     max_jev_calls: int = Field(default=150, gt=0)
     max_llm_calls: int = Field(default=40, gt=0)
     max_dollars: float | None = Field(default=None, gt=0)
+    """Bounds Jev and LLM spend as it happens. A cloud browser bills when it stops, after the run, so its
+    cost is reported in the result but cannot stop the run that incurred it."""
     max_seconds: float | None = Field(default=None, gt=0)
 
 

@@ -14,22 +14,19 @@ import sys
 from pathlib import Path
 
 from fastbrowse.clients.environment import ConfigurationError
-from fastbrowse.models import Authorization, Limits, SecretRef, StepEvent
+from fastbrowse.models import Authorization, Limits, StepEvent
 from fastbrowse.run import run_task
-from fastbrowse.safety import origin_of
+from fastbrowse.safety import ScopedSecrets, origin_of
 
 
-class EnvironmentSecrets:
-    def __init__(self, names: dict[str, str], origin: str) -> None:
-        self._names = names
-        self._origin = origin
-
-    def available(self) -> tuple[SecretRef, ...]:
-        return tuple(SecretRef(name=name, origins=(self._origin,)) for name in self._names)
-
-    async def resolve(self, name: str, origin: str) -> str | None:
-        variable = self._names.get(name)
-        return os.environ.get(variable) if variable and origin == self._origin else None
+def _secrets(pairs: list[tuple[str, str]], start: str) -> ScopedSecrets | None:
+    """Values read from the named variables now, so a missing one fails before a browser is opened."""
+    if not pairs:
+        return None
+    missing = [variable for _, variable in pairs if variable not in os.environ]
+    if missing:
+        raise ConfigurationError(f"--secret names unset variables: {', '.join(missing)}")
+    return ScopedSecrets({name: os.environ[variable] for name, variable in pairs}, origin_of(start))
 
 
 def _secret(pair: str) -> tuple[str, str]:
@@ -68,12 +65,11 @@ async def _print_step(event: StepEvent) -> None:
 
 
 async def run(args: argparse.Namespace) -> int:
-    names = dict(args.secret)
     result = await run_task(
         args.task,
         start=args.start,
         browser_api_key=_browser_key(args.cloud),
-        secrets=EnvironmentSecrets(names, origin_of(args.start)) if names else None,
+        secrets=_secrets(args.secret, args.start),
         limits=Limits(max_steps=args.max_steps, max_dollars=args.max_dollars),
         authorization=Authorization(irreversible_actions=args.authorize),
         downloads=args.downloads,
