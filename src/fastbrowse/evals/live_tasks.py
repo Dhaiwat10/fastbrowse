@@ -5,7 +5,6 @@ Login tasks use published demo credentials, or a Bitwarden vault item of the sam
 """
 
 import asyncio
-import base64
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -45,6 +44,9 @@ class Outcome:
     """Where the browser ended; hosted Browser Use's SDK does not say, so it is None there."""
     quotes: tuple[tuple[str, str], ...] | None = None
     """(url, quote) pairs located verbatim in page captures; the fast arm's evidence, None for hosted."""
+    controls: tuple[tuple[str, str | None], ...] | None = None
+    """(label, value) of every control on the page the run ended on, observed after the run by the harness, not
+    reported by the agent; None where an arm has no final page."""
 
 
 type Truth = Callable[[httpx.AsyncClient], Awaitable[object]]
@@ -227,24 +229,42 @@ _FLIGHT_DAY = date.today() + timedelta(days=28)
 _PRICE = re.compile(r"[£$€]\s?\d[\d,]*")
 
 
-def _flight_results(outcome: Outcome) -> str | None:
-    """The search Google ran: the results URL's `tfs` parameter is base64 that spells out the travel date."""
-    if outcome.final_url is None:
+def _flight_results(outcome: Outcome, *, one_way_nonstop: bool) -> str | None:
+    """The search Google ran, read from the form and results it rendered at the end of the run. The URL is no
+    guide: a search typed as a query stays on /travel/flights?q=..., and an unsubmitted form can carry the date."""
+    if outcome.controls is None:
         return None
-    url = urlparse(outcome.final_url)
-    tfs = parse_qs(url.query).get("tfs", [""])[0]
-    searched = base64.urlsafe_b64decode(tfs + "=" * (-len(tfs) % 4)) if tfs else b""
-    if url.path != "/travel/flights/search" or _FLIGHT_DAY.isoformat().encode() not in searched:
-        return f"ended on {outcome.final_url}, not a flights search for {_FLIGHT_DAY}"
-    return None
+    values = {label.strip(): value or "" for label, value in outcome.controls}
+    departure = f"{_FLIGHT_DAY:%a, %b} {_FLIGHT_DAY.day}"
+    day = f"{_FLIGHT_DAY:%A, %B} {_FLIGHT_DAY.day}"
+    wanted = {"Where from?": "London", "Where to?": "New York", "Departure": departure}
+    if one_way_nonstop:
+        wanted["Change ticket type. One way"] = "One way"
+    wrong = [f"{label}={values.get(label)!r}" for label, part in wanted.items() if part not in values.get(label, "")]
+    if one_way_nonstop and not any(label.startswith("Nonstop, Stops, Selected") for label in values):
+        wrong.append("no nonstop filter")
+    # A result row names its day ("Leaves ... on Friday, October 16", or "Select flight" in some renderings); the
+    # date picker's cells name the year as well, so they never match.
+    rows = [label for label in values if day in label and str(_FLIGHT_DAY.year) not in label]
+    if not any("Leaves" in label or "Select flight" in label for label in rows):
+        wrong.append(f"no results leaving {day}")
+    return (
+        f"ended on {outcome.final_url}, not a flights search for {_FLIGHT_DAY}: {', '.join(wrong)}" if wrong else None
+    )
 
 
 def _flight_search(outcome: Outcome, _: object) -> str | None:
     """Google Flights has no public API to check a fare against, so this grades the search Google ran, and the
     answer must name a price."""
-    if failure := _flight_results(outcome):
+    if failure := _flight_results(outcome, one_way_nonstop=False):
         return failure
     return None if _PRICE.search(outcome.answer or "") else f"answer names no price: {outcome.answer!r}"
+
+
+def _flight_search_run(outcome: Outcome, _: object) -> str | None:
+    if outcome.controls is None:
+        return "no final page to grade"
+    return _flight_results(outcome, one_way_nonstop=True)
 
 
 def _arrived(check: Callable[[str], str | None]) -> Check:
@@ -474,7 +494,7 @@ TASKS: tuple[LiveTask, ...] = (
         "https://www.google.com/travel/flights",
         f"Search for one-way nonstop flights from London to New York on {_FLIGHT_DAY:%-d %B %Y}.",
         lambda _: _constant(None),
-        _arrived(lambda url: _flight_results(Outcome(None, None, url))),
+        _flight_search_run,
         Category.NAVIGATE,
         arms=("fast", "ultrafast"),
     ),
