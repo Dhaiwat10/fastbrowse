@@ -23,7 +23,7 @@ Most browser agents generate each action from a screenshot. fastbrowse indexes t
 candidates and has [Jev](https://typesafe.ai), a choice model, **pick one**, so it cannot click
 something that was never on the page. Every claim in an answer cites a verbatim quote from the page.
 
-![fastbrowse finding one-way Zürich → London flights on Google Flights in 14.6s](docs/assets/demo.gif)
+![fastbrowse searching Google Flights for one-way nonstop London → New York flights: 45s run, shown at 3× speed](docs/assets/demo.gif)
 
 Same day, same cloud browser, same limits (30 steps, $0.25, 300s), each arm graded only on the tasks its
 output can be graded on ([tasks, method and per-category results](docs/evals.md#head-to-head)):
