@@ -1,0 +1,31 @@
+extends: existence
+message: "'%s' says nothing a plain word would not."
+level: error
+ignorecase: true
+tokens:
+  - delve
+  - seamless(ly)?
+  - tapestry
+  - testament to
+  - game-chang\w*
+  - unleash\w*
+  - supercharg\w*
+  - effortless(ly)?
+  - cutting-edge
+  - state-of-the-art
+  - ever-evolving
+  - in today's
+  - look no further
+  - dive into
+  - harness the power
+  - unlock the
+  - elevate your
+  - at the end of the day
+  - it's not just
+  - meticulous(ly)?
+  - leverag\w*
+  - robust(ly|ness)?
+  - comprehensive(ly)?
+  - it's worth noting
+  - worth noting
+  - needless to say

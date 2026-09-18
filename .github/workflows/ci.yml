@@ -16,6 +16,8 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pyright
-      # Prose is part of the product surface: ban the punctuation and filler that mark text as machine-written.
+      # Prose is part of the product surface: ASCII punctuation everywhere, and Vale's wording rules on prose.
       - run: uv run python scripts/no_slop.py
+      - run: uv run vale sync
+      - run: uv run vale README.md docs src scripts tests
       - run: uv run pytest -q

@@ -33,7 +33,13 @@ build-backend = "hatchling.build"
 packages = ["src/fastbrowse"]
 
 [dependency-groups]
-dev = ["pytest>=8.4,<9", "pytest-asyncio>=1,<2", "ruff>=0.14,<1", "pyright>=1.1.400"]
+dev = [
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1,<2",
+    "ruff>=0.14,<1",
+    "pyright>=1.1.400",
+    "vale==3.22.0.0",
+]
 
 [tool.ruff]
 line-length = 120
