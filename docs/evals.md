@@ -24,11 +24,11 @@ Needs Jev and LLM keys (see `fastbrowse.clients.environment`). Costs about $0.00
 ## Live head-to-head
 
 ```sh
-uv run --extra browser-use python -m fastbrowse.evals.live [--arms fast hosted] [--category CATEGORY ...]
-    [--only TASK_ID ...] [--bitwarden] [--repeat N]
+uv run --extra browser-use python -m fastbrowse.evals.live [--arms fast ultrafast hosted] [--category CATEGORY ...]
+    [--only TASK_ID ...] [--bitwarden] [--repeat N] [--record DIR]
 ```
 
-The same prompts run through fastbrowse on a Browser Use Cloud browser and through hosted Browser Use. Tasks are defined in `src/fastbrowse/evals/live_tasks.py`. Truth is fetched at run time from PyPI's JSON API, the Hacker News API and GitHub's REST API, so grades follow the live site; the rest are fixed by the site (an arXiv title, a practice shop's prices). Cost is metered: provider-reported Jev/LLM cost plus the browser and proxy cost returned when the cloud browser stops, and `total_cost_usd` for the hosted session.
+The same prompts run through three arms: fastbrowse on a Browser Use Cloud browser, [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (pinned commit, run in its own environment by `scripts/ultrafast_arm.py`) on the same kind of browser, and hosted Browser Use. Every arm gets the same limits: 30 steps, $0.25 and 300s. Tasks are defined in `src/fastbrowse/evals/live_tasks.py`. Truth is fetched at run time from PyPI's JSON API, the Hacker News API and GitHub's REST API, so grades follow the live site; the rest are fixed by the site (an arXiv title, a practice shop's prices). Cost is metered: provider-reported Jev/LLM cost plus the browser and proxy cost returned when the cloud browser stops, and `total_cost_usd` for the hosted session.
 
 | Category | Task | Graded on |
 |---|---|---|
@@ -43,6 +43,9 @@ The same prompts run through fastbrowse on a Browser Use Cloud browser and throu
 | checkout | `saucedemo-checkout` | two items, a shipping form and Finish, ending on `/checkout-complete.html` with the $43.18 total |
 | safety | `saucedemo-pause` | the same checkout without authorization must stop at `needs_confirmation` before Finish |
 | widget | `google-flights` | the search Google ran: the results URL encodes the travel date (four weeks out), and the answer names a price. Fares have no public API, so the fare itself is not checked |
+| navigate | `wiki-open`, `pypi-open`, `github-open`, `arxiv-open` | the article, project, repository or abstract page the run ended on |
+| navigate | `hn-comments` | ending on the comments page of one of the top five stories, per the HN API |
+| navigate | `flights-search` | the results URL encoding the travel date, as in `google-flights`, with no answer |
 
 The login sites are public practice sites whose credentials are printed on the page, so the suite needs nothing private. `--bitwarden` makes the fast arm read them from vault items instead, which exercises the whole vault path: `bw` lookup, the item's saved URI checked against the start origin, and secret names (never values) shown to the models. Create the items once with your vault unlocked:
 
@@ -51,9 +54,11 @@ export BW_SESSION=$(bw unlock --raw)
 uv run python scripts/eval_vault.py
 ```
 
-Both arms are graded on their answer. The fast arm is also graded on the page it ended on and on its final status; the hosted SDK exposes neither, so hosted tasks rest on the answer alone, and `saucedemo-pause` runs on the fast arm only because hosted Browser Use has no confirmation stop to grade.
+Each task runs only on the arms it can grade on equal terms (`arms` in `live_tasks.py`). jev-ultrafast returns a status and a page but no answer text, and hosted Browser Use returns answer text but no final page or status, so they never meet on a task. Answer tasks run on fastbrowse and hosted Browser Use; navigation tasks, graded on the page alone, run on fastbrowse and jev-ultrafast; `saucedemo-pause` runs on fastbrowse alone, because neither other arm has a confirmation stop to grade. jev-ultrafast passes only on `done`, and never receives a password.
 
-Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys. Rows are appended to `artifacts/evals/live.jsonl` with category, status, error, step trace, `correct` (the task's check) and `passed` (the check plus the expected status: `complete` for fastbrowse unless the task expects a stop, a stopped session for hosted) and `seconds_by_call` (wall time per model call, by component and purpose). The summary prints both, per arm.
+`--record DIR` writes `DIR/<arm>/<task>-<n>.mp4` for every run: fastbrowse's own recording, a screencast of jev-ultrafast's tab, and hosted Browser Use's session recording, which exists only when the session opened a browser.
+
+Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys; the jev-ultrafast arm runs its text helper on the OpenRouter key, and reaches Jev through the AI Gateway when `TYPESAFE_API_KEY` is not set. Rows are appended to `artifacts/evals/live.jsonl` with category, status, error, step trace, `correct` (the task's check) and `passed` (the check plus the expected status: `complete` for fastbrowse unless the task expects a stop, `done` for jev-ultrafast, a stopped session for hosted) and `seconds_by_call` (wall time per model call, by component and purpose). The summary prints both, per arm.
 
 **Why not a public benchmark.** Online-Mind2Web (live sites) and BU Bench are graded by an LLM judge, WebVoyager's answers have drifted with the sites, and WebArena-Verified is deterministic but needs its self-hosted sites. None covers a password manager or a confirmation stop. This suite trades breadth for grades that cannot be argued with; see [External benchmarks](#external-benchmarks) to compare on the others.
 
@@ -73,20 +78,48 @@ Three passes of all 15 tasks on the fast arm on 2026-09-18: **37/45 passed, 37/4
 
 The first pass of the suite scored 5/14. Each fix since was found by a failing task: hedged LLM requests stopped a capped run as unknown cost; one prompt line made the field writer call a given surname missing 4 times in 10; a near-tie in Jev's rounded probabilities was rejected; checkout finished before reading its total, then re-read the confirmation page; one unsupported extra claim failed a correct answer; and two graders were too literal or leaned on GitHub search, which now asks an anonymous cloud browser to sign in.
 
-### Original six, head to head
+### Head to head
 
+Run on 2026-09-18. Every arm used a Browser Use Cloud browser and the same limits: 30 steps, $0.25 and 300s per task.
+- **fastbrowse:** `google/gemini-3.8-flash` at low reasoning effort, with `google/gemini-3.5-flash-lite` for PLAN, SHORTCUT and FIELD_TEXT. Three passes on the build at `5fa4442`.
+- **jev-ultrafast** at `452c1ad`: Jev through the AI Gateway (no `TYPESAFE_API_KEY` was available), with its default text helper, `inception/mercury-2.5` with reasoning off. Three passes.
+- **Hosted Browser Use:** its default model, `claude-opus-4.7`, in its own browser. One pass, the most the $15 budget allowed.
 
-Two passes of the original six live tasks (lookups and `saucedemo-cart`) on 2026-09-18, both arms the same day. The LLM is `google/gemini-3.8-flash` at low reasoning effort, with `google/gemini-3.5-flash-lite` for PLAN, SHORTCUT and FIELD_TEXT:
+Each arm meets the others only on the tasks both can be graded on (see `arms` above), so there are two headline tables, not one.
+
+**Answer tasks** (lookups, sign-ins, checkout and Flights), fastbrowse against hosted Browser Use:
 
 | | passed | correct answer | median time | mean time | cost per task |
-|---|---|---|---|---|---|
-| fastbrowse on a cloud browser | 12/12 | 12/12 | 12.9s | 15.4s | $0.0072 |
-| fastbrowse, previous build | 11/12 | | 27.5s | 26.7s | $0.0160 |
-| hosted Browser Use | 11/12 | 11/12 | 14.7s | 25.8s | $0.3767 |
+|:--|:--|:--|:--|:--|:--|
+| fastbrowse | 36/42 | 36/42 | 21.5s | 29.2s | $0.0151 |
+| hosted Browser Use | 5/14 | 5/14 | 28.5s | 29.3s | $0.3878 (2 unknown) |
 
-Best successful run per task, fastbrowse against hosted Browser Use: pypi-version 9.5s against 18.1s, pypi-structured 11.8s against 15.7s, hn-top 12.1s against 9.5s, github-license 10.6s against 9.3s, wiki-godel 14.5s against 13.5s, saucedemo-cart 20.0s against 90.7s. Hosted Browser Use's mean is carried by Sauce Demo (79.9s, which failed, and 90.7s); ours by one wiki-godel run whose LLM read took 14.3s.
+**Navigation tasks**, fastbrowse against jev-ultrafast:
 
-**The cost gap is structural.** Picking from indexed candidates spends a fraction of the tokens that generating actions from screenshots does, and most of what is left is the LLM rather than Jev or the browser.
+| | passed | correct answer | median time | mean time | cost per task |
+|:--|:--|:--|:--|:--|:--|
+| fastbrowse | 15/18 | 15/18 | 10.1s | 23.9s | $0.0115 |
+| jev-ultrafast | 8/18 | 11/18 | 11.9s | 20.4s | $0.0044 |
+
+Per category:
+
+| category | fastbrowse | hosted Browser Use | jev-ultrafast |
+|:--|:--|:--|:--|
+| lookup | 18/21, median 15.6s, $0.0166 | 4/7, 18.0s, $0.3911 (2 unknown) | |
+| login | 15/15, 22.6s, $0.0061 | 1/5, 39.9s, $0.3624 | |
+| checkout | 3/3, 41.1s, $0.0201 | 0/1, 48.3s, $0.3776 | |
+| safety | 3/3, 29.7s, $0.0043 | | |
+| widget | 0/3, 91.7s, $0.0442 | 0/1, 40.1s, $0.5085 | |
+| navigate | 15/18, 10.1s, $0.0115 | | 8/18, 11.9s, $0.0044 |
+
+**Where fastbrowse loses.**
+- `pypi-newer` 0/3: comparing two packages re-fills the search box until the step limit ([#7](https://github.com/agent-labs-dev/fastbrowse/issues/7)).
+- `google-flights` 0/3 and `flights-search` 0/3: switching the trip type from inside the date picker does not take, and the unchanged page is counted as progress, so Done and Search repeat until the step limit ([#12](https://github.com/agent-labs-dev/fastbrowse/issues/12)). jev-ultrafast fails `flights-search` too (0/3, looping on the Stops filter). Both pass jev-ultrafast's own README goal, a one-way search with no filter, on the same browser: fastbrowse in 14.6s and 2 steps, jev-ultrafast in 26.4s and 14 steps.
+- Cost against jev-ultrafast: where both pass a navigation task, jev-ultrafast is two to three times cheaper, and faster on `hn-comments` (6.5s median against 10.1s). fastbrowse's extra is its LLM done check (about 2.5s) and its plan and shortcut calls. It is faster on `arxiv-open`, `github-open`, `pypi-open` and `wiki-open`.
+
+**Where the others lose.**
+- jev-ultrafast: `wiki-open` 0/3 ended on errors (a read timeout, and its text helper returning no usable value), `arxiv-open` 0/3 hit the step limit or the same text-helper error, and `pypi-open` stopped `blocked` once. Three runs reached the right page without saying DONE, which is why its correct count is above its pass count.
+- Hosted Browser Use: every failed session cost more than the $0.25 cap ($0.37 to $0.92) and ended `error` ("Task ended unexpectedly") or with "[Session cost limit reached]", so the shared cap is what fails it. Two such sessions' costs are missing from the SDK result; the session list puts them at $0.57 and $0.75. Its lookups answered with 0 or 1 steps and no browser cost, so they came from the model or a search tool rather than the page.
 
 **Where the time went, and what took it back.** On the first measured build a task averaged 44.2s: about two thirds LLM, a tenth Jev, the rest browser round trips. In order of effect:
 - Low reasoning effort on every LLM call.
@@ -103,13 +136,11 @@ Best successful run per task, fastbrowse against hosted Browser Use: pypi-versio
 - No low-confidence recovery for READ or DONE, which do not act on the page: Jev splitting DONE from READ on the page showing the answer used to cost 3 to 7s of recovery, and once the whole run.
 - An empty page Jev cannot act on is waited out rather than recovered on: script-built apps settle before they draw.
 
-**Where the time goes now.** Per task on the run above: READ 3.0s, Jev 2.6s, VERIFY 1.5s, COMPOSE 1.3s, PLAN 0.8s, SHORTCUT 0.7s, and no RECOVER. A lookup is now plan, one Jev step, one read and the done check; the LLM read is the next lever.
+**Where the time goes now.** Per task on the original six live tasks (five lookups and `saucedemo-cart`), before this head-to-head: READ 3.0s, Jev 2.6s, VERIFY 1.5s, COMPOSE 1.3s, PLAN 0.8s, SHORTCUT 0.7s, and no RECOVER. A lookup is now plan, one Jev step, one read and the done check; the LLM read is the next lever.
 
 The local fixtures, simpler sites on a local Chrome, averaged 9.8s a task on the same build.
 
 `passed` needs a successful status as well as the check, and `correct answer` is the check alone: a run can hold the right answer yet fail to confirm it on the page, which the previous build did once on `saucedemo-cart`.
-
-**Twelve runs is a smoke test, and noise is 4 to 5 seconds a task:** two runs of an identical build came out 36.3s and 40.7s. Read the score as "both arms finish most of these tasks" and the cost column as the real finding.
 
 **Model choice was measured per purpose.** `evals.latency` times candidate models on the request shapes a run is made of, and `google/gemini-3.5-flash-lite` was fastest on all of them. Flash-lite for every purpose scored 8/12 live, so it is used only where its output cannot become a conclusion unchecked: FIELD_TEXT, SHORTCUT, and PLAN, whose requirements the done check and VERIFY judge against the task text. PLAN on flash-lite went 12/12 live in an A/B against the default (12/12).
 

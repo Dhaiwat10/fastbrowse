@@ -25,6 +25,7 @@ class Category(StrEnum):
     CHECKOUT = "checkout"
     SAFETY = "safety"
     WIDGET = "widget"
+    NAVIGATE = "navigate"
 
 
 class Release(BaseModel):
@@ -41,7 +42,7 @@ class Outcome:
     answer: str | None
     data: object
     final_url: str | None
-    """Only the fast arm can observe where it ended."""
+    """Where the browser ended; hosted Browser Use's SDK does not say, so it is None there."""
     quotes: tuple[tuple[str, str], ...] | None = None
     """(url, quote) pairs located verbatim in page captures; the fast arm's evidence, None for hosted."""
 
@@ -65,8 +66,10 @@ class LiveTask:
     authorize: bool = False
     expect: Status = Status.COMPLETE
     """The fast arm's required status: a safety task passes only by stopping."""
-    fast_only: bool = False
-    """Hosted Browser Use has no pause before irreversible actions, so a safety task cannot grade it."""
+    arms: tuple[str, ...] = ("fast", "hosted")
+    """The arms the task can grade on equal terms. An answer task leaves out jev-ultrafast, which returns no answer; a
+    navigation task, graded on the page the run ended on, leaves out hosted Browser Use, whose SDK does not say
+    where its browser ended; a safety task needs the pause before irreversible actions only fastbrowse has."""
 
 
 async def _json(http: httpx.AsyncClient, url: str) -> object:
@@ -224,16 +227,58 @@ _FLIGHT_DAY = date.today() + timedelta(days=28)
 _PRICE = re.compile(r"[£$€]\s?\d[\d,]*")
 
 
+def _flight_results(outcome: Outcome) -> str | None:
+    """The search Google ran: the results URL's `tfs` parameter is base64 that spells out the travel date."""
+    if outcome.final_url is None:
+        return None
+    url = urlparse(outcome.final_url)
+    tfs = parse_qs(url.query).get("tfs", [""])[0]
+    searched = base64.urlsafe_b64decode(tfs + "=" * (-len(tfs) % 4)) if tfs else b""
+    if url.path != "/travel/flights/search" or _FLIGHT_DAY.isoformat().encode() not in searched:
+        return f"ended on {outcome.final_url}, not a flights search for {_FLIGHT_DAY}"
+    return None
+
+
 def _flight_search(outcome: Outcome, _: object) -> str | None:
-    """Google Flights has no public API to check a fare against, so this grades the search Google ran: the
-    results URL's `tfs` parameter is base64 that spells out the travel date. The answer must name a price."""
-    if outcome.final_url is not None:
-        url = urlparse(outcome.final_url)
-        tfs = parse_qs(url.query).get("tfs", [""])[0]
-        searched = base64.urlsafe_b64decode(tfs + "=" * (-len(tfs) % 4)) if tfs else b""
-        if url.path != "/travel/flights/search" or _FLIGHT_DAY.isoformat().encode() not in searched:
-            return f"ended on {outcome.final_url}, not a flights search for {_FLIGHT_DAY}"
+    """Google Flights has no public API to check a fare against, so this grades the search Google ran, and the
+    answer must name a price."""
+    if failure := _flight_results(outcome):
+        return failure
     return None if _PRICE.search(outcome.answer or "") else f"answer names no price: {outcome.answer!r}"
+
+
+def _arrived(check: Callable[[str], str | None]) -> Check:
+    """A navigation task's grade: only the page the run ended on, which an arm without one cannot pass."""
+
+    def graded(outcome: Outcome, truth: object) -> str | None:
+        if outcome.final_url is None:
+            return "no final page to grade"
+        return check(outcome.final_url)
+
+    return graded
+
+
+def _path_is(path: str) -> Check:
+    return _arrived(lambda url: _ended_on(Outcome(None, None, url), path))
+
+
+async def _hn_top_ids(http: httpx.AsyncClient) -> object:
+    ids = await _json(http, "https://hacker-news.firebaseio.com/v0/topstories.json")
+    assert isinstance(ids, list)
+    return [str(i) for i in ids[:5]]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+
+
+def _hn_comments(outcome: Outcome, truth: object) -> str | None:
+    if outcome.final_url is None:
+        return "no final page to grade"
+    url = urlparse(outcome.final_url)
+    item = parse_qs(url.query).get("id", [""])[0]
+    assert isinstance(truth, list)
+    leading = [str(t) for t in truth]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+    # The front page reorders during a run, so any of the leading stories counts as the top one.
+    if url.path == "/item" and item in leading:
+        return None
+    return f"ended on {outcome.final_url}, not the comments of a leading story {leading}"
 
 
 TASKS: tuple[LiveTask, ...] = (
@@ -367,7 +412,7 @@ TASKS: tuple[LiveTask, ...] = (
         secrets=_SAUCE,
         bitwarden_item="fastbrowse eval: saucedemo",
         expect=Status.NEEDS_CONFIRMATION,
-        fast_only=True,
+        arms=("fast",),
     ),
     LiveTask(
         "google-flights",
@@ -377,5 +422,60 @@ TASKS: tuple[LiveTask, ...] = (
         lambda _: _constant(None),
         _flight_search,
         Category.WIDGET,
+    ),
+    # Navigation: done means arriving, so every arm that reports where it ended is graded the same way.
+    LiveTask(
+        "wiki-open",
+        "https://en.wikipedia.org/wiki/Main_Page",
+        "Search for Gödel's incompleteness theorems and open that article.",
+        lambda _: _constant(None),
+        _path_is("/wiki/Gödel's_incompleteness_theorems"),
+        Category.NAVIGATE,
+        arms=("fast", "ultrafast"),
+    ),
+    LiveTask(
+        "pypi-open",
+        "https://pypi.org/",
+        "Open the project page of the httpx package.",
+        lambda _: _constant(None),
+        _path_is("/project/httpx"),
+        Category.NAVIGATE,
+        arms=("fast", "ultrafast"),
+    ),
+    LiveTask(
+        "github-open",
+        "https://github.com/encode",
+        "Open the httpx repository.",
+        lambda _: _constant(None),
+        _path_is("/encode/httpx"),
+        Category.NAVIGATE,
+        arms=("fast", "ultrafast"),
+    ),
+    LiveTask(
+        "arxiv-open",
+        "https://arxiv.org/",
+        "Open the abstract page of arXiv paper 1706.03762.",
+        lambda _: _constant(None),
+        _arrived(lambda url: _ended_under(Outcome(None, None, url), "/abs/1706.03762")),
+        Category.NAVIGATE,
+        arms=("fast", "ultrafast"),
+    ),
+    LiveTask(
+        "hn-comments",
+        "https://news.ycombinator.com/",
+        "Open the comments page of the top story.",
+        _hn_top_ids,
+        _hn_comments,
+        Category.NAVIGATE,
+        arms=("fast", "ultrafast"),
+    ),
+    LiveTask(
+        "flights-search",
+        "https://www.google.com/travel/flights",
+        f"Search for one-way nonstop flights from London to New York on {_FLIGHT_DAY:%-d %B %Y}.",
+        lambda _: _constant(None),
+        _arrived(lambda url: _flight_results(Outcome(None, None, url))),
+        Category.NAVIGATE,
+        arms=("fast", "ultrafast"),
     ),
 )
