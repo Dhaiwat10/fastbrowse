@@ -1,5 +1,6 @@
 """Spend and call accounting against `Limits`, checked before each call rather than discovered after."""
 
+import logging
 from dataclasses import dataclass, field
 from time import monotonic
 
@@ -61,3 +62,13 @@ class Ledger:
 
     def breakdown(self) -> CostBreakdown:
         return CostBreakdown(lines=tuple(self.lines))
+
+
+TRACE = logging.getLogger("fastbrowse.trace")
+"""Why a run went the way it did, one record per judgement, for evals to keep beside each result: ids, verdicts,
+scores and redacted addresses, never page text. Nothing is built unless DEBUG is enabled on this logger."""
+
+
+def trace(event: str, **fields: object) -> None:
+    if TRACE.isEnabledFor(logging.DEBUG):
+        TRACE.debug(event, extra={"trace": {"event": event, **fields}})
