@@ -814,7 +814,12 @@ class Agent:
             evidence.extend(extraction.evidence)
             verified = verified and extraction.problem is None
         status = Status.COMPLETE if verified else Status.UNVERIFIED
-        return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(evidence))
+        # The answer's notes and each schema field cite independently, so one quote backing a package name, its
+        # version and the answer came back three times; the same words on the same page are one citation.
+        cited: dict[tuple[str, str], Evidence] = {}
+        for item in evidence:
+            cited.setdefault((item.url, item.quote), item)
+        return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(cited.values()))
 
     def _context(self, state: _RunState, *, check_login: bool) -> StepContext:
         return StepContext(
