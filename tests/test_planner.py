@@ -1,5 +1,4 @@
 from collections.abc import Sequence
-from datetime import UTC, datetime
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -10,9 +9,7 @@ from fastbrowse.models import (
     CostComponent,
     CostLine,
     LLMPurpose,
-    Operation,
 )
-from fastbrowse.page import Control, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind, Subgoal, make_plan
 from fastbrowse.telemetry import Ledger
 
@@ -51,40 +48,15 @@ class PlannerLLM:
         return Generation(data=schema.model_validate_json(self.plan.model_dump_json()), cost=self.cost)
 
 
-def observation() -> Observation:
-    return Observation(
-        url="https://shop.test",
-        title="Shop",
-        page_key="key",
-        captured_at=datetime(2026, 1, 1, tzinfo=UTC),
-        controls=(
-            Control(
-                id="pw",
-                frame_id=None,
-                role="textbox",
-                label="password_name",
-                operations=frozenset({Operation.FILL}),
-                sensitive=True,
-                value="SECRET_VALUE",
-            ),
-        ),
-        omitted_controls=0,
-        viewport_text="Product page",
-        tabs=(),
-    )
-
-
-async def test_planning_uses_redacted_markdown_context_and_preserves_cost() -> None:
+async def test_planning_reads_only_the_task_and_start_address_and_preserves_cost() -> None:
     llm = PlannerLLM()
-    result = await make_plan(llm, "Find the price", observation())
+    result = await make_plan(llm, "Find the price", start="https://shop.test/")
     purpose, messages = llm.calls[0]
     prompt = "\n".join(message.content for message in messages)
     assert purpose is LLMPurpose.PLAN
     assert result.data == example_plan() and result.cost == llm.cost
-    assert "# Task" in prompt and "# Observation" in prompt
-    assert "SECRET_VALUE" not in prompt and "password_name" in prompt
+    assert "# Task\nFind the price" in prompt and "# Start page\nhttps://shop.test/" in prompt
     assert "individually checkable" in prompt
-    assert observation().controls[0].value == "SECRET_VALUE"
 
 
 @pytest.mark.parametrize("reference", ["unknown", ""])

@@ -173,16 +173,16 @@ class Agent:
         ledger = Ledger(limits or Limits())
         self._artifact_start = len(self._page.artifacts)
         state: _RunState | None = None
+        planning: asyncio.Task[Generation[Plan]] | None = None
         # The ledger checks `max_seconds` between operations; only a deadline around the awaits bounds a
         # browser or provider call that never returns.
         deadline = asyncio.timeout(ledger.limits.max_seconds)
         try:
             async with deadline:
+                # The plan is needed to read, to judge DONE and to answer, and the start page, the first fills
+                # and clicks all come before those, so it is written from the task while they run.
+                planning = asyncio.create_task(make_plan(self._llm, task, start=start, ledger=ledger))
                 history = [] if start is None else await self._open(task, start, ledger)
-                observation = await self._observe()
-                # The plan is needed to read, to judge DONE and to answer, and the first fills and clicks
-                # usually come before all three, so it is written while they run instead of ahead of them.
-                planning = asyncio.create_task(make_plan(self._llm, task, observation, ledger=ledger))
                 state = _RunState(
                     task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planning
                 )
@@ -203,8 +203,8 @@ class Agent:
             return self._result(state, ledger, Status.ERROR, error=self._redactor.redact(str(error))[:500])
         finally:
             # A run can end before it ever needed the plan, and a plan still being written would bill it.
-            if state is not None:
-                await _discard(state.planning)
+            if planning is not None:
+                await _discard(planning)
 
     async def _loop(
         self, state: _RunState, output_schema: type[BaseModel] | None, until: UntilCheck | None
