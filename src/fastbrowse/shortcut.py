@@ -33,9 +33,10 @@ _INSTRUCTIONS = Message(
         "If the site has a well-known address for that destination, give it so the agent can go straight there: "
         "a package, repository or article page whose address follows from names in the task, or the site's own "
         "search results URL with the task's query when the task asks to search.\n\n"
-        "Give null when the destination depends on anything you cannot see: a sign-in, a form to fill, a cart, "
-        "the current state of a listing, or an address you would have to guess. A wrong address costs a wasted "
-        "page load, so prefer null to a guess.\n\n"
+        "Give null when the destination belongs to the user (their account, orders, inbox, settings or anything "
+        "else behind a sign-in) or depends on anything you cannot see: a form to fill, a cart, the current state "
+        "of a listing, or an address you would have to guess. Skipping the start page there hides the sign-in "
+        "wall or the path the agent needs, so prefer null to a guess.\n\n"
         "# Trust\nThe task is from the user. Stay on the start page's site."
     ),
 )
