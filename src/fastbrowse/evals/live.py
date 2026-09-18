@@ -29,7 +29,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest import mock
 
 import httpx
@@ -38,6 +38,7 @@ from pydantic import BaseModel
 import fastbrowse.run
 from fastbrowse.adapters.bitwarden import bitwarden_login
 from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser
+from fastbrowse.agent import Agent
 from fastbrowse.browser.recording import Recording
 from fastbrowse.clients.environment import load_settings
 from fastbrowse.evals.live_tasks import TASKS, Category, LiveTask, Outcome
@@ -94,11 +95,31 @@ class _TimedRecording(Recording):
         await super().show_result(task, result)
 
 
+class _ObservedAgent(Agent):
+    """fastbrowse's agent, with the page it ended on observed once more after the run, for graders that read the
+    page itself (what a form ended up holding) rather than anything the agent reported."""
+
+    controls: tuple[tuple[str, str | None], ...] | None = None
+
+    async def run(self, *args: Any, **kwargs: Any) -> RunResult:
+        result = await super().run(*args, **kwargs)
+        try:
+            observation = await self._page.observe()
+        except Exception:  # a page that cannot be observed leaves nothing to grade, which the grader reports
+            return result
+        _ObservedAgent.controls = tuple((c.label, c.value) for c in observation.controls)
+        return result
+
+
 async def fast_arm(
     task: LiveTask, http: httpx.AsyncClient, downloads: Path, *, bitwarden: bool, record: Path | None
 ) -> tuple[Outcome, RunResult, float | None]:
     _TimedRecording.ended = None
-    with mock.patch.object(fastbrowse.run, "Recording", _TimedRecording):
+    _ObservedAgent.controls = None
+    with (
+        mock.patch.object(fastbrowse.run, "Recording", _TimedRecording),
+        mock.patch.object(fastbrowse.run, "Agent", _ObservedAgent),
+    ):
         result = await run_task(
             task.task,
             start=task.start,
@@ -113,7 +134,7 @@ async def fast_arm(
             record=record,
         )
     quotes = tuple((e.url, e.quote) for e in result.evidence)
-    outcome = Outcome(result.answer, result.data, result.final_url or task.start, quotes)
+    outcome = Outcome(result.answer, result.data, result.final_url or task.start, quotes, _ObservedAgent.controls)
     return outcome, result, _TimedRecording.ended
 
 
@@ -202,7 +223,11 @@ async def ultrafast_arm(
     }
     dollars = float(cast(float, report["jev_dollars"])) + float(cast(float, report["text_dollars"])) + browser
     report["dollars"] = None if report["unmetered_requests"] else round(dollars, 5)
-    return Outcome(None, None, cast(str | None, report["final_url"])), report
+    controls = report.get("controls")
+    observed = (
+        None if controls is None else tuple((str(label), value) for label, value in cast(list[list[Any]], controls))
+    )
+    return Outcome(None, None, cast(str | None, report["final_url"]), controls=observed), report
 
 
 async def hosted_arm(

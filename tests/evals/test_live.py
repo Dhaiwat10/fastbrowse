@@ -1,4 +1,5 @@
 import runpy
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -91,3 +92,49 @@ def test_hn_comments_accepts_any_leading_story() -> None:
     check = task("hn-comments").check
     assert check(Outcome(None, None, "https://news.ycombinator.com/item?id=2"), ["1", "2"]) is None
     assert check(Outcome(None, None, "https://news.ycombinator.com/item?id=9"), ["1", "2"]) is not None
+
+
+def _flights_page(day: date, *, trip: str = "One way", nonstop: bool = True) -> tuple[tuple[str, str | None], ...]:
+    """The controls a Google Flights results page rendered for a search, as the harness observes them."""
+    return (
+        (f"Change ticket type. {trip}", trip),
+        ("Where from?", "London"),
+        ("Where to?", "New York"),
+        ("Departure", f"{day:%a, %b} {day.day}"),
+        *((("Nonstop, Stops, Selected", ""),) if nonstop else ()),
+        (
+            f"From 846 US dollars. Nonstop flight with JetBlue. Leaves Heathrow at 8:15 AM on {day:%A, %B} {day.day}",
+            None,
+        ),
+    )
+
+
+def test_a_flights_search_is_graded_on_the_form_google_rendered_not_the_url() -> None:
+    check = task("flights-search").check
+    day = date.today() + timedelta(days=28)
+    query = "https://www.google.com/travel/flights?q=flights%20from%20London%20to%20New%20York"
+    assert check(Outcome(None, None, query, controls=_flights_page(day)), None) is None
+    assert check(Outcome(None, None, query, controls=_flights_page(day, trip="Round trip")), None) is not None
+    assert check(Outcome(None, None, query, controls=_flights_page(day, nonstop=False)), None) is not None
+    assert check(Outcome(None, None, query, controls=_flights_page(day + timedelta(days=1))), None) is not None
+    assert check(Outcome(None, None, query), None) is not None
+
+
+def test_a_filled_form_without_results_is_not_a_search() -> None:
+    day = date.today() + timedelta(days=28)
+    unsent = (
+        *_flights_page(day)[:-1],
+        (f"{day:%A, %B} {day.day}, {day.year} , 517 US dollars, Cheapest price", None),
+    )
+    assert task("flights-search").check(
+        Outcome(None, None, "https://www.google.com/travel/flights", controls=unsent), None
+    )
+
+
+def test_the_flights_answer_task_needs_the_search_and_a_price() -> None:
+    check = task("google-flights").check
+    page = _flights_page(date.today() + timedelta(days=28), trip="Round trip", nonstop=False)
+    assert check(Outcome("JetBlue, $846", None, "https://www.google.com/travel/flights", controls=page), None) is None
+    assert check(Outcome("JetBlue", None, "https://www.google.com/travel/flights", controls=page), None) is not None
+    # Hosted Browser Use reports no page, so only its answer is graded.
+    assert check(Outcome("JetBlue, $846", None, None), None) is None
