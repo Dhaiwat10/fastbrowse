@@ -211,6 +211,15 @@ async def check_claims(
         return composed
     if not kept:
         return None
+    # A claim can be doubted for proving too little (a title cited as "the most expensive" without the prices it
+    # beat), and the omission check then passed the price alone as the whole answer. A requirement the answer
+    # cited evidence for and no longer does is omitted, whatever the check says, so the composer writes it again.
+    cited = {key for claim in kept for key in claim.evidence_ids}
+    was_cited = {key for claim in composed.claims for key in claim.evidence_ids}
+    for requirement in composed.requirements:
+        supporting = {key for key, _ in notes.supporting(requirement.id)}
+        if supporting & was_cited and not supporting & cited:
+            return None
     pruned = composed.model_copy(update={"claims": kept, "answer": "\n\n".join(claim.text for claim in kept)})
     omission = {key: q for key, q in claim_check_questions(pruned, notes).items() if key == _OMITTED}
     if omission and _probability(await _ask(jev, pruned, omission, ledger), _OMITTED) > limit:
