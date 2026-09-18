@@ -69,6 +69,7 @@ _INTERSTITIAL_SECONDS = 12.0
 # loads in one to two, so a proposal later than this is an outlier costing more than it saves.
 _SHORTCUT_GRACE_SECONDS = 1.0
 _INTERSTITIAL_POLL_SECONDS = 0.5
+_NOT_ACTING = frozenset({Operation.READ, Operation.DONE})
 
 logger = logging.getLogger(__name__)
 
@@ -228,19 +229,20 @@ class Agent:
                     continue
                 raise _Stop(Status.NEEDS_LOGIN, f"sign-in required at {origin}")
             uncertain = decision.confidence < self._config.thresholds.recover_below
-            # The confidence gate exists to stop the agent acting on a page it does not understand, and a
-            # READ is not acting: it changes nothing and is what one does when unsure what the page says.
-            # Routing it to recovery spent the recovery budget on the page that held the answer.
             if uncertain and state.ready_plan is None:
                 # Unsure without the requirements: the plan is already in flight and costs less than recovery.
                 await state.await_plan()
                 continue
-            if (uncertain and decision.operation is not Operation.READ) or decision.operation is Operation.ESCALATE:
-                await self._recover(state, observation, f"uncertain next step ({decision.confidence:.2f})")
-                continue
             if decision.operation is Operation.DONE and _unread(await state.await_plan(), state.notes):
                 # DONE cannot hold while the plan still needs information nobody has read; reading is the move.
                 decision = decision.model_copy(update={"operation": Operation.READ, "target": None})
+            # The confidence gate exists to stop the agent acting on a page it does not understand. READ and DONE
+            # do not act: a read changes nothing, and DONE is judged again by `_finish`. Jev splitting DONE from
+            # READ on the page that shows the answer sent every such run to recovery, and one spent the whole
+            # recovery budget there and ended without an answer.
+            if (uncertain and decision.operation not in _NOT_ACTING) or decision.operation is Operation.ESCALATE:
+                await self._recover(state, observation, f"uncertain next step ({decision.confidence:.2f})")
+                continue
             if decision.operation is Operation.DONE:
                 result = await self._finish(state, observation, output_schema, until)
                 if result is not None:
