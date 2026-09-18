@@ -39,9 +39,16 @@ FIELD_TEXT_LLM = "google/gemini-3.5-flash-lite"
 # SHORTCUT shares that asymmetry: its only output is an address code confines to the start origin, and a
 # wrong one costs a page load and a BACK, not a conclusion. It runs while the start page loads, so its
 # latency is hidden only while it stays under a page load.
+#
+# PLAN joined them once it was written from the task alone and asked for outcomes only. Flash-lite then
+# wrote the same requirements as the default on the six live tasks and on compound probes ("find the price
+# and email it to Alice" keeps the email), in 0.7s against 1.5 to 8.5s, and went 12/12 live. A lookup waits
+# on the plan before its first read, so that spread was wall time. A dropped requirement is still caught
+# downstream: the done check and VERIFY judge the task text itself, not the plan.
 DEFAULT_MODELS = dict.fromkeys(LLMPurpose, DEFAULT_LLM) | {
     LLMPurpose.FIELD_TEXT: FIELD_TEXT_LLM,
     LLMPurpose.SHORTCUT: FIELD_TEXT_LLM,
+    LLMPurpose.PLAN: FIELD_TEXT_LLM,
 }
 
 # gemini-3.8-flash reasons before every answer unless told otherwise, and cannot be told not to: it

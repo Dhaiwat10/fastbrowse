@@ -99,7 +99,7 @@ uv run fastbrowse "Log in as standard_user with the saved password and add the b
 ### Models
 
 The LLM defaults to `google/gemini-3.8-flash` at low reasoning effort, with
-`google/gemini-3.5-flash-lite` for typing field text. Override with `FASTBROWSE_LLM_MODEL` (every
+`google/gemini-3.5-flash-lite` for planning, proposing a direct address and typing field text. Override with `FASTBROWSE_LLM_MODEL` (every
 purpose), `FASTBROWSE_LLM_MODEL_<PURPOSE>` (`PLAN`, `READ`, `FIELD_TEXT`, `SHORTCUT`, `RECOVER`, `COMPOSE`,
 `VERIFY`) and `FASTBROWSE_LLM_REASONING` (`low`, `medium`, `high`). Flash-lite everywhere is faster
 but scored 8/12 live, so it is not the default.
