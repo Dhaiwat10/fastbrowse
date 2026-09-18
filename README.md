@@ -141,7 +141,7 @@ The exit code is 0 only for `complete`.
 | `needs_confirmation` | stopped before an irreversible action; re-run with `--authorize` |
 | `needs_login` | a sign-in wall that no `--secret` covers |
 | `needs_input` | a field needs a value you did not give, which is never invented |
-| `stuck` | recovery ran out without the page moving |
+| `stuck` | recovery ran out without reaching a page state the run had not seen |
 | `budget_exceeded` | a step, call, time or dollar limit was reached |
 | `observation_limit` | the page has more controls than Jev can take in |
 | `error` | a model or browser failure |

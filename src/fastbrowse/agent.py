@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, Field, JsonValue
 
 from fastbrowse.config import Config
+from fastbrowse.effects import SETTING_ROLES, effect, state_key
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, LLMError, Message
 from fastbrowse.memory import Notes
@@ -139,6 +140,10 @@ class _RunState:
     )
     """How often each action was taken from each page, to tell a cycle from progress."""
     last_page: tuple[str, str] | None = None
+    seen: set[str] = field(default_factory=set[str])
+    """Page states the run has been in. Only reaching a new one restores the recovery budget."""
+    acted_from: Observation | None = None
+    """The page the last action was taken on, until the next observation says what it did."""
     ready_plan: Plan | None = None
     read_here: bool = False
     """This page has been read since it last changed."""
@@ -242,6 +247,14 @@ class Agent:
         while True:
             state.ledger.check()
             observation = await self._observe()
+            self._note_effect(state, observation)
+            # Recoveries are spent on being stuck, not on the whole run, so a page state never seen before restores
+            # the budget. Any change did before, and a run going round four pages, each step a change, recovered
+            # without end until its step limit.
+            key = state_key(observation)
+            if key not in state.seen:
+                state.seen.add(key)
+                state.recoveries = 0
             raw = self._raw_observation or observation
             origin = origin_of(raw.url)
             page = (raw.url, raw.document_key)
@@ -341,6 +354,7 @@ class Agent:
         started = time.monotonic()
         label = _describe(decision.target) if decision.target else decision.tab_id
         typed: str | None = None
+        effect_now: str | None = None
         if decision.operation is Operation.READ:
             progressed, changed = await self._read(state), False
             state.read_here = True
@@ -360,12 +374,28 @@ class Agent:
             state.taken[signature] += 1
             if decision.operation is not Operation.SCROLL and state.taken[signature] > _REPEATS_BEFORE_CYCLE:
                 progressed = False
+            state.acted_from = observation
+            target = decision.target
+            if act.outcome is StepOutcome.EXECUTED and target is not None and target.role in SETTING_ROLES:
+                # Choosing an option has an intended effect to check: a menu that closed without the value
+                # changing still changes the page, and Google Flights' "One way" was clicked to the step limit.
+                done = effect(observation, await self._observe())
+                state.acted_from = None
+                if not done.set_something:
+                    progressed = False
+                    act = act.model_copy(update={"detail": f"no effect: {done.summary}"})
+                effect_now = done.summary
         if changed:
             state.edited.clear()
             state.read_here = False
         state.history.append(
             HistoryEntry(
-                operation=decision.operation, target=label, outcome=act.outcome, page_changed=changed, text=typed
+                operation=decision.operation,
+                target=label,
+                outcome=act.outcome,
+                page_changed=changed,
+                text=typed,
+                effect=effect_now,
             )
         )
         step = StepResult(
@@ -381,14 +411,20 @@ class Agent:
         )
         await self._record_step(state, step)
         if progressed:
-            # Recoveries are spent on being stuck here, not on the whole run: a step that moved the page
-            # forward means the earlier recovery worked, so the next dead end gets the full budget again.
-            state.unchanged = state.recoveries = 0
+            state.unchanged = 0
             state.hint = None
         else:
             state.unchanged += 1
         if state.unchanged >= self._config.stall.unchanged_actions:
             await self._recover(state, observation, f"{state.unchanged} actions without visible progress")
+
+    @staticmethod
+    def _note_effect(state: _RunState, observation: Observation) -> None:
+        """Record on the last action what it did, which the next choice and recovery both read."""
+        before, state.acted_from = state.acted_from, None
+        if before is None or not state.history or state.history[-1].effect is not None:
+            return
+        state.history[-1] = state.history[-1].model_copy(update={"effect": effect(before, observation).summary})
 
     async def _observe(self) -> Observation:
         """Every observation models see has resolved secret values blanked, wherever the page echoes them."""
@@ -789,7 +825,11 @@ class Agent:
         state.unchanged = 0
         if state.recoveries > self._config.stall.max_recoveries:
             raise _Stop(Status.STUCK, reason)
-        steps = "\n".join(f"- {s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in state.steps[-10:])
+        steps = "\n".join(
+            f"- {h.operation.value if h.operation else 'open'} {h.target or ''} -> {h.outcome.value}"
+            + (f": {h.effect}" if h.effect else "")
+            for h in state.history[-10:]
+        )
         # Without the names, a sign-in page reads as a wall the user must pass: a run with a stored login gave up
         # saying no credentials were given.
         stored = self._secret_names(origin_of(observation.url))

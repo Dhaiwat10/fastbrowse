@@ -166,3 +166,43 @@ def test_an_answer_owed_with_nothing_read_is_unread() -> None:
     )
     assert _unread(action_only, Notes())
     assert not _unread(action_only.model_copy(update={"answer_expected": False}), Notes())
+
+
+async def test_an_option_click_that_changes_no_value_is_not_progress() -> None:
+    trigger = Control(
+        id="trip",
+        frame_id=None,
+        role="combobox",
+        label="Ticket type",
+        value="Round trip",
+        operations=frozenset({Operation.CLICK}),
+    )
+    option = Control(id="one", frame_id=None, role="option", label="One way", operations=frozenset({Operation.CLICK}))
+    before = observation((trigger, option))
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    # The menu closed, which changes the page, but the ticket type still reads Round trip.
+    page.observe = AsyncMock(return_value=observation((trigger,)))
+    jev = ScriptedJev({"operation": "click", "click_target": "one"})
+    decision = await decide(jev, before, context(), Config())
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    agent = Agent(page, jev, ScriptedLLM([]))
+    await agent._step(state, before, decision)  # pyright: ignore[reportPrivateUsage]
+    assert state.unchanged == 1
+    assert state.history[-1].effect == "removed 1 control: One way"
+    assert (state.steps[-1].note or "").startswith("no effect")
+
+
+async def test_the_next_observation_records_what_an_action_did() -> None:
+    field_before = field()
+    state = await run_state()
+    state.acted_from = observation((field_before,))
+    state.history.append(
+        HistoryEntry(
+            operation=Operation.FILL, target="Search elsewhere", outcome=StepOutcome.EXECUTED, page_changed=True
+        )
+    )
+    Agent._note_effect(state, observation((field_before.model_copy(update={"value": "York"}),)))  # pyright: ignore[reportPrivateUsage]
+    assert state.history[-1].effect == "changed Search elsewhere value: Bath -> York"
+    assert state.acted_from is None

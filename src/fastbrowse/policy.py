@@ -94,6 +94,8 @@ class HistoryEntry(Frozen):
     note: str | None = None
     text: str | None = None
     """Entered value, redacted before storage; secrets are represented only by a marker."""
+    effect: str | None = None
+    """What the action visibly did: the address, controls shown or removed, and values before and after."""
 
 
 class StepContext(Frozen):
