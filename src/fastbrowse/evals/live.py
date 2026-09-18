@@ -14,7 +14,7 @@ Tasks and their grading live in fastbrowse.evals.live_tasks. With --bitwarden, t
 task's credentials from its vault item (created by scripts/eval_vault.py) instead of the task. With --record,
 each run is saved as DIR/<arm>/<task>-<n>.mp4, n counting up from 1 past any video already there.
 
-Each task runs only on the arms it grades fairly (LiveTask.arms). Answer tasks compare fastbrowse with hosted
+Each task runs only on the arms it grades on equal terms (LiveTask.arms). Answer tasks compare fastbrowse with hosted
 Browser Use; jev-ultrafast returns no answer, only DONE or BLOCKED. Navigation tasks, graded on the page the
 run ended on, compare fastbrowse with jev-ultrafast; the hosted SDK does not say where its browser ended.
 fastbrowse must also end with the task's expected status, and jev-ultrafast with DONE.

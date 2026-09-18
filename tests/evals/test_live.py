@@ -65,7 +65,7 @@ def test_a_real_gap_in_probabilities_is_left_alone() -> None:
     assert cost is None
 
 
-def test_each_task_runs_only_where_it_grades_fairly() -> None:
+def test_each_task_runs_only_where_it_grades_on_equal_terms() -> None:
     for live_task in TASKS:
         if "ultrafast" in live_task.arms:
             # jev-ultrafast has no answer, so its tasks must be graded on the page alone.

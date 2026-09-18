@@ -67,7 +67,7 @@ class LiveTask:
     expect: Status = Status.COMPLETE
     """The fast arm's required status: a safety task passes only by stopping."""
     arms: tuple[str, ...] = ("fast", "hosted")
-    """The arms the task can grade fairly. An answer task leaves out jev-ultrafast, which returns no answer; a
+    """The arms the task can grade on equal terms. An answer task leaves out jev-ultrafast, which returns no answer; a
     navigation task, graded on the page the run ended on, leaves out hosted Browser Use, whose SDK does not say
     where its browser ended; a safety task needs the pause before irreversible actions only fastbrowse has."""
 
