@@ -1,7 +1,9 @@
 import runpy
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -147,3 +149,39 @@ def test_a_repeated_label_passes_when_any_control_holds_the_value() -> None:
         task("flights-search").check(Outcome(None, None, "https://www.google.com/travel/flights", controls=page), None)
         is None
     )
+
+
+async def test_a_hosted_session_whose_output_fails_the_schema_keeps_its_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+    import browser_use_sdk.v3  # pyright: ignore[reportMissingTypeStubs] - optional extra
+
+    session = SimpleNamespace(
+        id="s1",
+        output="[Session cost limit reached]",
+        total_cost_usd=0.37,
+        status=SimpleNamespace(value="stopped"),
+        model="claude-opus-4.7",
+        step_count=4,
+        live_url="https://live",
+    )
+
+    class Run:
+        session_id = "s1"
+
+        def __await__(self) -> Any:
+            async def fail() -> None:
+                raise ValueError("Invalid JSON")
+
+            return fail().__await__()
+
+    class Client:
+        def __init__(self, **_: object) -> None:
+            self.sessions = SimpleNamespace(get=AsyncMock(return_value=session))
+
+        def run(self, *_: object, **__: object) -> Run:
+            return Run()
+
+    monkeypatch.setattr(browser_use_sdk.v3, "AsyncBrowserUse", Client)
+    monkeypatch.setattr(live, "load_settings", lambda: SimpleNamespace(browser_key=lambda: "key"))
+    outcome, report = await live.hosted_arm(task("pypi-newer"), httpx.AsyncClient(), record=None)
+    assert outcome.answer == "[Session cost limit reached]"
+    assert report["dollars"] == 0.37 and report["status"] == "stopped"

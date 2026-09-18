@@ -312,13 +312,12 @@ async def hosted_arm(
     if run.session_id is not None:
         _watch("hosted", task, (await client.sessions.get(run.session_id)).live_url)
     remaining = MAX_SECONDS - (time.monotonic() - started)
-    timed_out = False
-    try:
-        await asyncio.wait_for(asyncio.shield(finishing), max(remaining, 1))
-    except TimeoutError:
-        timed_out = True
-        if run.session_id is not None:
-            await client.sessions.stop(run.session_id)
+    # wait, not wait_for: wait_for re-raised the SDK's schema error here, before the session's cost was read, and
+    # six capped structured sessions were recorded with no cost or status.
+    done, _ = await asyncio.wait({finishing}, timeout=max(remaining, 1))
+    timed_out = not done
+    if timed_out and run.session_id is not None:
+        await client.sessions.stop(run.session_id)
     await asyncio.gather(finishing, return_exceptions=True)
     seconds = time.monotonic() - started
     if (error := finishing.exception()) is None:
