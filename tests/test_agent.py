@@ -123,6 +123,7 @@ async def test_recovery_hint_is_consumed_only_when_action_progresses(outcome: St
     state.authorization = Authorization(irreversible_actions=True)
     page = Mock(spec=Page)
     page.act = AsyncMock(return_value=ActResult(outcome=outcome, page_changed=outcome is StepOutcome.EXECUTED))
+    page.observe = AsyncMock(return_value=obs)
     jev = ScriptedJev({"operation": "click", "click_target": target.id})
     decision = await decide(jev, obs, context(), Config())
     agent = Agent(page, jev, ScriptedLLM([]))
@@ -461,3 +462,23 @@ async def test_a_read_waits_for_an_empty_page_to_draw_and_never_reads_nothing(
     read_text = agent._read.await_args.args[1].text
     assert read_text == ("httpx 0.28.1" if draws else "")
     assert llm.calls == []
+
+
+@pytest.mark.parametrize("twins", [1, 2])
+async def test_a_click_on_a_redrawn_control_lands_on_its_one_twin_without_deciding_again(twins: int) -> None:
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    before = observation((_button("Done"),))
+    redrawn = tuple(_button("Done").model_copy(update={"id": f"done-{n}"}) for n in range(twins))
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=observation(redrawn))
+    page.act = AsyncMock(
+        side_effect=[
+            ActResult(outcome=StepOutcome.STALE, page_changed=False, detail="target disconnected"),
+            ActResult(outcome=StepOutcome.EXECUTED, page_changed=True),
+        ]
+    )
+    await _click(Agent(page, ScriptedJev({}), ScriptedLLM([])), state, before, "Done")
+    targets = [call.args[0].target_id for call in page.act.await_args_list]
+    assert targets == (["done", "done-0"] if twins == 1 else ["done"])
+    assert state.steps[-1].outcome is (StepOutcome.EXECUTED if twins == 1 else StepOutcome.STALE)
