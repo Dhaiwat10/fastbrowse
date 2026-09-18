@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from fastbrowse.adapters.bitwarden import bitwarden_login
 from fastbrowse.clients.environment import load_settings
 from fastbrowse.evals.live_tasks import TASKS, Category, LiveTask, Outcome
+from fastbrowse.evals.more_tasks import DEV, HELDOUT
 from fastbrowse.models import Authorization, BrowserEvent, CostBreakdown, Limits, RunResult, StepEvent
 from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
@@ -147,9 +148,14 @@ async def run_arm(
     }
 
 
+SUITES: dict[str, tuple[LiveTask, ...]] = {"core": TASKS, "dev": DEV, "heldout": HELDOUT}
+"""`core` is the published suite; `dev` and `heldout` are the split in `more_tasks`."""
+
+
 async def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", nargs="*", default=[])
+    parser.add_argument("--suite", nargs="*", default=["core"], choices=list(SUITES), help="task sets to run")
     parser.add_argument("--category", nargs="*", default=[], choices=[c.value for c in Category])
     parser.add_argument("--bitwarden", action="store_true", help="login credentials from the vault items")
     parser.add_argument("--arms", nargs="*", default=["fast", "hosted"], choices=["fast", "hosted"])
@@ -158,7 +164,8 @@ async def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     tasks = [
         t
-        for t in TASKS
+        for suite in args.suite
+        for t in SUITES[suite]
         if (not args.only or t.id in args.only) and (not args.category or t.category.value in args.category)
     ]
     args.out.parent.mkdir(parents=True, exist_ok=True)
