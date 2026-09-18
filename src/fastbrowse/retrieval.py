@@ -524,6 +524,26 @@ async def compose(
     )
 
 
+def draft_answer(plan: Plan, notes: Notes) -> ComposedAnswer | None:
+    """The facts the reader already wrote, in requirement order, offered as the answer without a composer.
+
+    Each fact is a claim with one verbatim citation, so this draft passes the same claim checks a composed
+    answer does. Whether it reads as an answer to the task is Jev's call, made in the done check.
+    """
+    claims: dict[str, Claim] = {}
+    for requirement in plan.requirements:
+        if requirement.kind is RequirementKind.INFORMATION:
+            for key, fact in notes.supporting(requirement.id):
+                claims.setdefault(key, Claim(text=fact.text, evidence_ids=(key,)))
+    if not claims:
+        return None
+    return ComposedAnswer(
+        answer="\n\n".join(claim.text for claim in claims.values()),
+        claims=tuple(claims.values()),
+        requirements=plan.requirements,
+    )
+
+
 def claim_check_questions(composed: ComposedAnswer, notes: Notes) -> Mapping[str, NoulQuestion]:
     questions: dict[str, NoulQuestion] = {}
     known = notes.evidence

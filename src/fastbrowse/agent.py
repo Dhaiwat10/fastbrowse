@@ -38,7 +38,7 @@ from fastbrowse.models import (
 from fastbrowse.page import Action, ActResult, Capture, Control, Observation, Page
 from fastbrowse.planner import Plan, RequirementKind, make_plan
 from fastbrowse.policy import Decision, HistoryEntry, ObservationTooLarge, StepContext, decide
-from fastbrowse.retrieval import ComposedAnswer, compose, read
+from fastbrowse.retrieval import ComposedAnswer, compose, draft_answer, read
 from fastbrowse.safety import (
     Redactor,
     irreversible_question,
@@ -65,6 +65,9 @@ GENERATE = "generate"
 # which never moves still ends as needs_login well inside a run's time budget.
 _INTERSTITIAL_SECONDS = 12.0
 _INTERSTITIAL_POLL_SECONDS = 0.5
+
+type _Prepared = ComposedAnswer | asyncio.Task[Generation[ComposedAnswer]] | None
+"""An answer ready before conclusion: the reader's facts Jev accepted as written, or a composer in flight."""
 
 
 class _FieldText(Frozen):
@@ -577,7 +580,8 @@ class Agent:
         """Return the final result when DONE holds up; None sends the loop back to work."""
         fresh = await self._observe()
         state.ledger.reserve(CostComponent.JEV)
-        check = await check_done(self._jev, state.task, state.plan, fresh, state.notes, self._config.thresholds)
+        draft = draft_answer(state.plan, state.notes) if state.plan.answer_expected else None
+        check = await check_done(self._jev, state.task, state.plan, fresh, state.notes, self._config.thresholds, draft)
         state.ledger.record(check.cost)
         accepted = check.verdict is DoneVerdict.ACCEPT
         drafting: asyncio.Task[Generation[ComposedAnswer]] | None = None
@@ -590,7 +594,7 @@ class Agent:
                 # Write the answer while the verifier is still deciding. Both read the same finished
                 # notes, and every accepted run wants an answer, so the whole cost of guessing wrong is
                 # one discarded call on the branch that was going back to work anyway.
-                if state.plan.answer_expected:
+                if state.plan.answer_expected and check.answer is None:
                     drafting = asyncio.create_task(
                         compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
                     )
@@ -613,22 +617,29 @@ class Agent:
                 await self._recover(state, observation, f"DONE rejected: {unmet}")
                 return None
             handed, drafting = drafting, None
-            return await self._conclude(state, output_schema, handed)
+            return await self._conclude(state, output_schema, check.answer or handed)
         finally:
             if drafting is not None:
                 await _discard(drafting)
 
-    async def _answer(
-        self, state: _RunState, drafting: asyncio.Task[Generation[ComposedAnswer]] | None
-    ) -> tuple[str, bool]:
-        """The composed answer and whether its claims held, taking the draft started during verification."""
+    async def _answer(self, state: _RunState, prepared: _Prepared) -> tuple[str, bool]:
+        """The answer and whether its claims held, composing only when nothing prepared survives the check."""
+        if isinstance(prepared, ComposedAnswer):
+            if await self._holds(state, prepared):
+                return self._redactor.redact(prepared.answer), True
+            # Jev took the reader's facts as the answer and then doubted a claim in them, which is what
+            # the composer exists for.
+            prepared = None
         composed = await (
-            drafting
-            if drafting is not None
+            prepared
+            if prepared is not None
             else compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
         )
-        ok, _ = await check_claims(self._jev, composed.data, state.notes, self._config.thresholds, ledger=state.ledger)
-        return self._redactor.redact(composed.data.answer), ok
+        return self._redactor.redact(composed.data.answer), await self._holds(state, composed.data)
+
+    async def _holds(self, state: _RunState, answer: ComposedAnswer) -> bool:
+        ok, _ = await check_claims(self._jev, answer, state.notes, self._config.thresholds, ledger=state.ledger)
+        return ok
 
     async def _extraction(self, state: _RunState, output_schema: type[BaseModel]) -> Extraction:
         """The caller's schema, filled from a capture taken inside this branch so it overlaps the answer."""
@@ -640,7 +651,7 @@ class Agent:
         self,
         state: _RunState,
         output_schema: type[BaseModel] | None,
-        drafting: asyncio.Task[Generation[ComposedAnswer]] | None = None,
+        prepared: _Prepared = None,
     ) -> RunResult:
         answer: str | None = None
         data: JsonValue | None = None
@@ -648,7 +659,7 @@ class Agent:
         verified = True
         # Writing the answer and filling the caller's schema read the same finished notes and neither
         # needs the other's output, so a task that wants both pays for the slower one rather than both.
-        answering = self._answer(state, drafting) if state.plan.answer_expected else None
+        answering = self._answer(state, prepared) if state.plan.answer_expected else None
         extracting = self._extraction(state, output_schema) if output_schema is not None else None
         if answering is not None and extracting is not None:
             first, second = asyncio.create_task(answering), asyncio.create_task(extracting)
