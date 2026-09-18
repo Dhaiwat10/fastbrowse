@@ -6,12 +6,13 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from fastbrowse.agent import Agent, _RunState, _Stop  # pyright: ignore[reportPrivateUsage]
+from fastbrowse.agent import Agent, _RunState, _Stop, _unread  # pyright: ignore[reportPrivateUsage]
 from fastbrowse.config import Config
 from fastbrowse.llm import Generation
+from fastbrowse.memory import Notes
 from fastbrowse.models import Authorization, Limits, LLMPurpose, Operation, Status, StepOutcome
 from fastbrowse.page import ActResult, Control, Page
-from fastbrowse.planner import Plan
+from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.policy import HistoryEntry, decide
 from fastbrowse.telemetry import Ledger
 from tests.test_policy import FREE, ScriptedJev, context, observation
@@ -138,3 +139,30 @@ async def test_step_log_names_which_twin_was_clicked() -> None:
     await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
     assert state.steps[0].target == "Add to cart (Sauce Labs Bike Light)"
     assert state.history[0].target == "Add to cart (Sauce Labs Bike Light)"
+
+
+async def test_going_round_between_pages_stops_counting_as_progress() -> None:
+    link = Control(id="about", frame_id=None, role="link", label="(about)", operations=frozenset({Operation.CLICK}))
+    obs = observation((link,))
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    jev = ScriptedJev({"operation": "click", "click_target": "about"})
+    decision = await decide(jev, obs, context(), Config())
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    agent = Agent(page, jev, ScriptedLLM([]))
+    for _ in range(2):
+        await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
+    assert state.unchanged == 0
+    # The page changes every time, but the same click from the same page a third time is a cycle.
+    await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
+    assert state.unchanged == 1
+
+
+def test_an_answer_owed_with_nothing_read_is_unread() -> None:
+    action_only = Plan(
+        requirements=(Requirement(id="r1", text="Search for the quote", kind=RequirementKind.ACTION),),
+        answer_expected=True,
+    )
+    assert _unread(action_only, Notes())
+    assert not _unread(action_only.model_copy(update={"answer_expected": False}), Notes())

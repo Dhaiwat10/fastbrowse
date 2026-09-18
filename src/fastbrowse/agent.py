@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import time
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -71,6 +72,9 @@ _INTERSTITIAL_SECONDS = 12.0
 _SHORTCUT_GRACE_SECONDS = 1.0
 _INTERSTITIAL_POLL_SECONDS = 0.5
 _NOT_ACTING = frozenset({Operation.READ, Operation.DONE})
+_REPEATS_BEFORE_CYCLE = 2
+"""Times one action may be taken from one page and still count as progress. Scrolling is exempt: a long page
+takes many scrolls, each of which shows something new."""
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +134,10 @@ class _RunState:
     unchanged: int = 0
     recoveries: int = 0
     edited: set[tuple[Operation, str | None]] = field(default_factory=set[tuple[Operation, str | None]])
+    taken: Counter[tuple[Operation, str | None, str]] = field(
+        default_factory=Counter[tuple[Operation, str | None, str]]
+    )
+    """How often each action was taken from each page, to tell a cycle from progress."""
     last_page: tuple[str, str] | None = None
     ready_plan: Plan | None = None
     read_here: bool = False
@@ -345,6 +353,13 @@ class Agent:
                 typed = "<secret>" if action.secret else self._redactor.mask(action.text)
             changed = act.page_changed
             progressed = act.outcome is StepOutcome.EXECUTED and (changed or self._first_edit(state, decision, label))
+            # Moving between two pages changes the page every time, and a run went round "open the author,
+            # back to the list" to its step limit with its stall budget reset at every hop. The same action
+            # from the same page a third time is going round, not forward.
+            signature = (decision.operation, label, observation.url)
+            state.taken[signature] += 1
+            if decision.operation is not Operation.SCROLL and state.taken[signature] > _REPEATS_BEFORE_CYCLE:
+                progressed = False
         if changed:
             state.edited.clear()
             state.read_here = False
@@ -982,7 +997,10 @@ class Agent:
 
 
 def _unread(plan: Plan, notes: Notes) -> bool:
-    return any(r.kind is RequirementKind.INFORMATION for r in notes.unresolved(plan))
+    # A plan can file a question under an action ("find the quote using the search form"), and a run that
+    # owes an answer with nothing read would hand the composer empty notes: one did, and ended complete on "".
+    unresolved = any(r.kind is RequirementKind.INFORMATION for r in notes.unresolved(plan))
+    return unresolved or (plan.answer_expected and not notes.facts)
 
 
 def _describe(control: Control) -> str:
