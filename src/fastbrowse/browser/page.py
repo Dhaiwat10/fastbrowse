@@ -779,6 +779,7 @@ def _control_from_raw(control_id: str, frame_id: str | None, c: dict[str, Any]) 
         frame_origin=c.get("frame_origin"),
         role=c["role"],
         label=c["label"],
+        context=c.get("context"),
         operations=frozenset(Operation(op) for op in c["operations"]),
         value=c.get("value"),
         href=c.get("href"),

@@ -321,7 +321,7 @@ class Agent:
 
     async def _step(self, state: _RunState, observation: Observation, decision: Decision) -> None:
         started = time.monotonic()
-        label = decision.target.label if decision.target else decision.tab_id
+        label = _describe(decision.target) if decision.target else decision.tab_id
         typed: str | None = None
         if decision.operation is Operation.READ:
             progressed, changed = await self._read(state), False
@@ -375,6 +375,7 @@ class Agent:
             control.model_copy(
                 update={
                     "label": mask(control.label),
+                    "context": None if control.context is None else mask(control.context),
                     "value": None if control.value is None else mask(control.value),
                     "href": None if control.href is None else mask(control.href),
                     "frame_origin": None if control.frame_origin is None else mask(control.frame_origin),
@@ -522,7 +523,11 @@ class Agent:
         if target is None or not may_be_irreversible(decision.operation, target):
             return
         await self._gate_question(
-            state, observation, decision, target.label, irreversible_question(state.task, decision.operation, target)
+            state,
+            observation,
+            decision,
+            _describe(target),
+            irreversible_question(state.task, decision.operation, target),
         )
 
     async def _gate_question(
@@ -607,7 +612,9 @@ class Agent:
             "subgoal": state.hint,
             "field": target.model_dump(mode="json", exclude_none=True),
             "other_fields": [
-                control.model_dump(mode="json", include={"label", "role", "value", "input_type"}, exclude_none=True)
+                control.model_dump(
+                    mode="json", include={"label", "context", "role", "value", "input_type"}, exclude_none=True
+                )
                 for control in observation.controls
                 if control.id != target.id and (Operation.FILL in control.operations or control.role == "combobox")
             ],
@@ -938,11 +945,19 @@ def _unread(plan: Plan, notes: Notes) -> bool:
     return any(r.kind is RequirementKind.INFORMATION for r in notes.unresolved(plan))
 
 
+def _describe(control: Control) -> str:
+    """Name which one was chosen, not just what it read: a label alone cannot identify one of six
+    identically labelled buttons, in the step log or in the history the next choice is made from."""
+    return f"{control.label} ({control.context})" if control.context else control.label
+
+
 def _controls_text(observation: Observation) -> str:
     return json.dumps(
         [
             control.model_dump(
-                mode="json", include={"label", "role", "value", "operations", "selected", "expanded"}, exclude_none=True
+                mode="json",
+                include={"label", "context", "role", "value", "operations", "selected", "expanded"},
+                exclude_none=True,
             )
             for control in observation.controls
         ]

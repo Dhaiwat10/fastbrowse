@@ -95,3 +95,28 @@ async def test_recovery_hint_is_consumed_only_when_action_progresses(outcome: St
     agent = Agent(page, jev, ScriptedLLM([]))
     await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
     assert state.hint == (None if outcome is StepOutcome.EXECUTED else "Open the origin picker")
+
+
+async def test_step_log_names_which_twin_was_clicked() -> None:
+    twins = tuple(
+        Control(
+            id=f"add{i}",
+            frame_id=None,
+            role="button",
+            label="Add to cart",
+            context=name,
+            operations=frozenset({Operation.CLICK}),
+        )
+        for i, name in enumerate(("Sauce Labs Backpack", "Sauce Labs Bike Light"))
+    )
+    obs = observation(twins)
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    jev = ScriptedJev({"operation": "click", "click_target": "add1"})
+    decision = await decide(jev, obs, context(), Config())
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    agent = Agent(page, jev, ScriptedLLM([]))
+    await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
+    assert state.steps[0].target == "Add to cart (Sauce Labs Bike Light)"
+    assert state.history[0].target == "Add to cart (Sauce Labs Bike Light)"

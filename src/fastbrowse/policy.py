@@ -47,7 +47,9 @@ ESCALATE when no offered operation can make progress."""
 
 TARGET = """Choose the best observed target if the next operation is the one this question names.
 Use the task, field values, nearby text and recent actions. Another question decides which operation runs.
-Do not choose a field that already contains the requested value. Choose only an offered element."""
+Do not choose a field that already contains the requested value. Choose only an offered element.
+Elements that read alike carry a `context`: the card, row or section each one belongs to. When the task
+or subgoal names one of those, choose the element whose context matches it."""
 
 GROUP = """Too many elements to list at once. Choose the group that contains the best target if the next
 operation is the one this question names. A later question picks the element inside the group."""
@@ -331,6 +333,7 @@ def _element(control: Control) -> dict[str, JsonValue]:
         "operations": [op.value for op in sorted(control.operations)],
     }
     optional: dict[str, JsonValue] = {
+        "context": control.context,
         "value": control.value,
         "href": control.href,
         "checked": control.checked,
