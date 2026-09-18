@@ -445,3 +445,12 @@ async def test_a_table_cell_drawn_with_an_icon_is_not_read_as_blank(page: CdpPag
     # A size or weight class shares the icon font's prefix without naming the glyph.
     assert "| Second |  | [xmark icon] |" in text
 
+
+async def test_a_menu_shown_on_the_next_animation_frame_opens(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/animated.html")
+    obs = await page.observe()
+    opener = find(obs, "Trip type")
+    assert (await page.act(Action(operation=Operation.CLICK, target_id=opener.id), obs)).outcome == (
+        StepOutcome.EXECUTED
+    )
+    assert any(c.label == "One way" for c in (await page.observe()).controls)

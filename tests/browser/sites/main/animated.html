@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><title>Animated menu</title></head>
+<body>
+  <button id="open" aria-haspopup="listbox" aria-expanded="false">Trip type</button>
+  <ul id="menu" role="listbox" style="opacity: 0"><li role="option" tabindex="-1">One way</li></ul>
+  <script>
+    // Menu libraries show a menu on the next animation frame, which a background tab never draws.
+    document.getElementById('open').addEventListener('click', () => {
+      document.getElementById('open').setAttribute('aria-expanded', 'true');
+      requestAnimationFrame(() => { document.getElementById('menu').style.opacity = '1'; });
+    });
+  </script>
+</body></html>
