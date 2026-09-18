@@ -34,6 +34,7 @@ from fastbrowse.retrieval import (
     field_question,
     locate_quote,
     propose_text_fields,
+    propose_text_fields_from_notes,
     read,
     read_candidates,
 )
@@ -501,6 +502,45 @@ async def test_text_fields_are_kept_only_when_quoted_verbatim_from_the_page() ->
     assert found.keys() == {"label"}
     value, evidence = found["label"]
     assert value == "0.28.1" and evidence.quote == "httpx 0.28.1"
+
+
+async def test_a_text_field_off_the_final_page_is_taken_from_a_note_that_quotes_it() -> None:
+    earlier = capture((BlockKind.PARAGRAPH, "requests 2.33.0 released May 14, 2026"))
+    quote = locate_quote(earlier, "s0", "requests 2.33.0 released May 14, 2026")
+    assert quote is not None
+    notes = Notes((Fact(text="requests was released on May 14, 2026", evidence=quote),))
+    key = next(iter(notes.evidence))
+    llm = ScriptedLLM(
+        [
+            {
+                "fields": [
+                    {"field": "label", "value": "requests", "source_id": key, "quote": quote.quote},
+                    {"field": "license", "value": "httpx", "source_id": key, "quote": quote.quote},
+                ]
+            }
+        ]
+    )
+    fields = {name: Fields.model_fields["label"] for name in ("label", "license")}
+    found = await propose_text_fields_from_notes(llm, "Which is newer?", notes, fields)
+    # A value the cited quote does not contain is not taken, whatever the model says.
+    assert found == {"label": ("requests", quote)}
+
+
+async def test_a_name_the_task_gives_can_be_chosen_on_a_note_that_quotes_only_a_date() -> None:
+    earlier = capture((BlockKind.PARAGRAPH, "May 14, 2026"))
+    quote = locate_quote(earlier, "s0", "May 14, 2026")
+    assert quote is not None
+    notes = Notes((Fact(text="requests: May 14, 2026", evidence=quote),))
+    key = next(iter(notes.evidence))
+    proposal: dict[str, JsonValue] = {"field": "label", "value": "requests", "source_id": key, "quote": quote.quote}
+    fields = {"label": Fields.model_fields["label"]}
+    task = "Which has the more recent release, httpx or requests?"
+    assert await propose_text_fields_from_notes(ScriptedLLM([{"fields": [proposal]}]), task, notes, fields) == {
+        "label": ("requests", quote)
+    }
+    # Part of a word the task uses is not a name it gives.
+    partial: dict[str, JsonValue] = {**proposal, "value": "request"}
+    assert not await propose_text_fields_from_notes(ScriptedLLM([{"fields": [partial]}]), task, notes, fields)
 
 
 @pytest.mark.parametrize("limit", ["calls", "dollars"])

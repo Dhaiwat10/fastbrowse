@@ -984,7 +984,13 @@ class Agent:
     async def _extraction(self, state: _RunState, output_schema: type[BaseModel]) -> Extraction:
         """The caller's schema, filled from a capture taken inside this branch so it overlaps the answer."""
         return await extract(
-            self._jev, self._llm, state.task, await self._capture(), output_schema, ledger=state.ledger
+            self._jev,
+            self._llm,
+            state.task,
+            await self._capture(),
+            output_schema,
+            notes=state.notes,
+            ledger=state.ledger,
         )
 
     async def _conclude(
