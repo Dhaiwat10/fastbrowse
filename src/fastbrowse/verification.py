@@ -27,7 +27,7 @@ from fastbrowse.retrieval import (
     propose_text_fields,
     propose_text_fields_from_notes,
 )
-from fastbrowse.telemetry import Ledger
+from fastbrowse.telemetry import Ledger, trace
 
 
 class DoneVerdict(StrEnum):
@@ -212,6 +212,13 @@ async def check_claims(
         return composed if not composed.answer and composed.dropped_claims == 0 else None
     answers = await _ask(jev, composed, questions, ledger)
     limit = thresholds.claim_problem_above
+    trace(
+        "claims",
+        limit=limit,
+        scores={key: round(_probability(answers, key), 3) for key in questions},
+        cited=[list(claim.evidence_ids) for claim in composed.claims],
+        dropped=composed.dropped_claims,
+    )
     if composed.dropped_claims or _probability(answers, _OMITTED) > limit:
         return None
     kept = tuple(

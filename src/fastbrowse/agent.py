@@ -52,7 +52,7 @@ from fastbrowse.safety import (
     secret_allowed,
 )
 from fastbrowse.shortcut import Shortcut, accept, propose_shortcut
-from fastbrowse.telemetry import BudgetExceeded, Ledger
+from fastbrowse.telemetry import BudgetExceeded, Ledger, trace
 from fastbrowse.verification import (
     DoneVerdict,
     Extraction,
@@ -428,6 +428,7 @@ class Agent:
             target=label,
             confidence=decision.confidence,
             note=self._redactor.redact(act.detail) if act.detail else None,
+            page_changed=None if decision.operation is Operation.READ else changed,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
         await self._record_step(state, step)
@@ -850,7 +851,16 @@ class Agent:
             jev=self._jev,
             requirements=wanted,
         )
-        return len(state.notes.facts) > before or any(state.notes.evidenced(r.id) for r in wanted)
+        progressed = len(state.notes.facts) > before or any(state.notes.evidenced(r.id) for r in wanted)
+        trace(
+            "read",
+            url=self._redactor.redact(capture.url),
+            chars=len(capture.text),
+            wanted=[r.id for r in wanted],
+            facts_added=len(state.notes.facts) - before,
+            evidenced=[r.id for r in wanted if state.notes.evidenced(r.id)],
+        )
+        return progressed
 
     async def _recover(self, state: _RunState, observation: Observation, reason: str) -> None:
         state.recoveries += 1
@@ -913,6 +923,13 @@ class Agent:
         if generation.data.give_up:
             raise _Stop(Status.STUCK, generation.data.diagnosis)
         state.hint = generation.data.next_subgoal
+        trace(
+            "recover",
+            reason=reason,
+            hint=self._redactor.redact(generation.data.next_subgoal),
+            operation=generation.data.operation,
+            control=generation.data.control,
+        )
         chosen, operation = generation.data.control, generation.data.operation
         if operation is not None and operation in _PAGE_OPERATIONS:
             state.directed = (operation, None)
@@ -946,6 +963,12 @@ class Agent:
         await state.await_plan()
         draft = draft_answer(state.plan, state.notes) if state.plan.answer_expected else None
         check = await check_done(self._jev, state.task, state.plan, fresh, state.notes, self._config.thresholds, draft)
+        trace(
+            "done_check",
+            verdict=check.verdict.value,
+            unmet=list(check.unmet),
+            requirements={r.id: r.text for r in state.plan.requirements},
+        )
         state.ledger.record(check.cost)
         accepted = check.verdict is DoneVerdict.ACCEPT
         drafting: asyncio.Task[Generation[ComposedAnswer]] | None = None
@@ -974,6 +997,7 @@ class Agent:
                 )
                 state.ledger.record(verdict.cost)
                 accepted = verdict.data.complete and not verdict.data.missing
+                trace("verify", complete=verdict.data.complete, missing=list(verdict.data.missing))
             if accepted and until is not None:
                 accepted = await until((self._raw_observation or fresh).url)
             if not accepted:
