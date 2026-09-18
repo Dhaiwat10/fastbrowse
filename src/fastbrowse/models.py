@@ -34,6 +34,7 @@ class Status(StrEnum):
 
 class Operation(StrEnum):
     CLICK = "click"
+    HOVER = "hover"
     FILL = "fill"
     SELECT = "select"
     ENTER = "enter"

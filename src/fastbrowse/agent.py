@@ -538,6 +538,8 @@ class Agent:
                 return Action(operation=Operation.DIALOG, accept_dialog=accept)
             case Operation.SWITCH_TAB:
                 return Action(operation=Operation.SWITCH_TAB, tab_id=decision.tab_id)
+            case Operation.HOVER:
+                return Action(operation=Operation.HOVER, target_id=_require(target).id)
             case Operation.ESCAPE | Operation.SCROLL | Operation.BACK:
                 return Action(operation=decision.operation)
             case Operation.READ | Operation.DONE | Operation.ESCALATE:

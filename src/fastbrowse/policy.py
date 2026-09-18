@@ -56,6 +56,7 @@ operation is the one this question names. A later question picks the element ins
 
 OPERATION_LABELS: Mapping[Operation, str] = {
     Operation.CLICK: "Click an element, button, link, menu option, autocomplete suggestion or calendar day.",
+    Operation.HOVER: "Hover over an element to reveal content the page shows only under the pointer.",
     Operation.FILL: "Enter or replace text in an editable field.",
     Operation.SELECT: "Select a value in an observed dropdown.",
     Operation.ENTER: "Press Enter in a text field to submit or search for what it already contains.",
@@ -70,7 +71,9 @@ OPERATION_LABELS: Mapping[Operation, str] = {
     Operation.ESCALATE: "No offered operation can make progress.",
 }
 
-TARGETED = frozenset({Operation.CLICK, Operation.FILL, Operation.SELECT, Operation.ENTER, Operation.UPLOAD})
+TARGETED = frozenset(
+    {Operation.CLICK, Operation.HOVER, Operation.FILL, Operation.SELECT, Operation.ENTER, Operation.UPLOAD}
+)
 
 
 class Reduction(StrEnum):
@@ -168,7 +171,7 @@ def _offered_operations(
     available: list[Operation] = []
     for operation in Operation:
         match operation:
-            case Operation.CLICK | Operation.FILL | Operation.SELECT | Operation.ENTER:
+            case Operation.CLICK | Operation.HOVER | Operation.FILL | Operation.SELECT | Operation.ENTER:
                 if operation in indexed:
                     available.append(operation)
             case Operation.UPLOAD:

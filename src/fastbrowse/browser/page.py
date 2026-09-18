@@ -297,7 +297,14 @@ class CdpPage(Page):
             before_fingerprint, live_guard, point = await self._before_action(
                 target,
                 hit_test=action.operation
-                in {Operation.CLICK, Operation.FILL, Operation.SELECT, Operation.ENTER, Operation.UPLOAD},
+                in {
+                    Operation.CLICK,
+                    Operation.HOVER,
+                    Operation.FILL,
+                    Operation.SELECT,
+                    Operation.ENTER,
+                    Operation.UPLOAD,
+                },
             )
             if target is not None and live_guard != target[3]:
                 return ActResult(
@@ -316,6 +323,8 @@ class CdpPage(Page):
         match action.operation:
             case Operation.CLICK:
                 return await self._click(target, point)
+            case Operation.HOVER:
+                return await self._hover(target, point)
             case Operation.FILL:
                 return await self._fill(
                     target, action.text or "", point, secret=action.secret, secret_origin=action.secret_origin
@@ -362,6 +371,21 @@ class CdpPage(Page):
         await self._click_point(session_id, point)
         if announced:
             await self._await_popup(session_id, _local_id)
+        return StepOutcome.EXECUTED, None
+
+    async def _hover(
+        self, target: tuple[str, str, int, list[object] | None] | None, point: _Point
+    ) -> tuple[StepOutcome, str | None]:
+        if target is None:
+            return StepOutcome.FAILED, "hover requires a target"
+        if point is None:
+            return StepOutcome.STALE, "target disconnected"
+        if point == "covered":
+            return StepOutcome.COVERED, None
+        x, y = point
+        # The pointer stays where it lands, so what the hover reveals is still shown when the page is next read.
+        params: DispatchMouseEventParameters = {"type": "mouseMoved", "x": x, "y": y}
+        await self._input(self._session.client.send.Input.dispatchMouseEvent(params=params, session_id=target[0]))
         return StepOutcome.EXECUTED, None
 
     async def _announces_popup(self, session_id: str, local_id: int) -> bool:

@@ -454,3 +454,21 @@ async def test_a_menu_shown_on_the_next_animation_frame_opens(page: CdpPage, mai
         StepOutcome.EXECUTED
     )
     assert any(c.label == "One way" for c in (await page.observe()).controls)
+
+
+async def test_content_shown_only_under_the_pointer_is_reached_by_hovering(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/hovers.html")
+    obs = await page.observe()
+    hovers = [c for c in obs.controls if Operation.HOVER in c.operations]
+    # The two avatars and the menu reveal hidden content; the link's hover rule only recolours it.
+    assert sorted(c.label for c in hovers) == ["Products", "User Avatar", "User Avatar"]
+    assert [c.context for c in hovers if c.label == "User Avatar"] == ["1 of 2", "2 of 2"]
+    assert "grace" not in obs.viewport_text
+    second = next(c for c in hovers if c.context == "2 of 2")
+    result = await page.act(Action(operation=Operation.HOVER, target_id=second.id), obs)
+    assert result.outcome == StepOutcome.EXECUTED
+    assert result.page_changed
+    after = await page.observe()
+    assert "name: grace" in after.viewport_text
+    assert "name: ada" not in after.viewport_text
+    assert any(c.label == "View profile" for c in after.controls)
