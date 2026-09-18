@@ -741,23 +741,29 @@ class CdpPage(Page):
         becoming interactive; observation settles the rest.
         """
         session_id = self._session.active_session_id
+        # A cloud browser's proxy drops a first connection now and then, or leaves a document loading, and a run
+        # that never started was scored as a failed task. Chrome's error names (net::ERR_...) carry no page
+        # content, so they are shown.
+        failure = "NavigationError"
         for attempt in range(_NAVIGATE_ATTEMPTS):
+            if attempt:
+                await asyncio.sleep(_NAVIGATE_RETRY_SECONDS)
             result = await self._session.client.send.Page.navigate(params={"url": url}, session_id=session_id)
-            if not (error := result.get("errorText")):
-                break
-            # A cloud browser's proxy drops a first connection now and then, and a run that never started was
-            # scored as a failed task. Chrome's error names (net::ERR_...) carry no page content, so they are shown.
-            if attempt + 1 == _NAVIGATE_ATTEMPTS:
-                name = error if _NET_ERROR.fullmatch(error) else "NavigationError"
-                raise BrowserError(f"Page.navigate failed ({name})")
-            await asyncio.sleep(_NAVIGATE_RETRY_SECONDS)
-        deadline = asyncio.get_event_loop().time() + load_timeout_seconds
-        while asyncio.get_event_loop().time() < deadline:
-            state = await self._evaluate(session_id, "document.readyState")
-            if state in {"interactive", "complete"}:
+            if error := result.get("errorText"):
+                failure = error if _NET_ERROR.fullmatch(error) else "NavigationError"
+                continue
+            if await self._ready(session_id, load_timeout_seconds):
                 return
+            failure = "TimeoutError"
+        raise BrowserError(f"Page.navigate failed ({failure})")
+
+    async def _ready(self, session_id: str, timeout_seconds: float) -> bool:
+        deadline = asyncio.get_event_loop().time() + timeout_seconds
+        while asyncio.get_event_loop().time() < deadline:
+            if await self._evaluate(session_id, "document.readyState") in {"interactive", "complete"}:
+                return True
             await asyncio.sleep(0.05)
-        raise BrowserError("Page.navigate failed (TimeoutError)")
+        return False
 
     # -- shared helpers -------------------------------------------------------------------------------
 

@@ -129,6 +129,17 @@ async def test_a_failed_navigation_is_tried_again_once(
     assert transport.calls.count("Page.navigate") == min(len(errors) + 1, 2)
 
 
+async def test_a_page_that_never_loads_is_tried_again_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = CdpTransport(monkeypatch)
+    monkeypatch.setattr(page_module, "_NAVIGATE_RETRY_SECONDS", 0)
+    async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
+        with pytest.raises(BrowserError, match=re.escape("Page.navigate failed (TimeoutError)")):
+            await CdpPage(session, Config()).navigate("https://example.test", load_timeout_seconds=0.1)
+        transport.results["Runtime.evaluate"] = [{"result": {"value": "complete"}}]
+        await CdpPage(session, Config()).navigate("https://example.test", load_timeout_seconds=0.1)
+    assert transport.calls.count("Page.navigate") == 3
+
+
 async def test_background_finalizers_finish_before_socket_stops(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = CdpTransport(monkeypatch)
     started = transport.blocked["Fetch.getResponseBody"] = asyncio.Event()
