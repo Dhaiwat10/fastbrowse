@@ -80,6 +80,8 @@ _PAGE_OPERATIONS = frozenset({Operation.READ, Operation.SCROLL, Operation.BACK, 
 """Operations on the page rather than a control, which recovery can direct without naming one. A long table's
 answer was off screen, recovery said to read the page twice, and with no control to name the advice was dropped
 and Jev scrolled on until the run stopped stuck."""
+_CYCLE_SHOWN = 4
+"""Actions named when a run arrives back at a page state, the most recent last."""
 _LEAVING = frozenset({Operation.CLICK, Operation.ENTER, Operation.BACK})
 """Operations that can take the run off the page it is on."""
 
@@ -152,10 +154,13 @@ class _RunState:
     taken: Counter[tuple[Operation, str | None, str]] = field(
         default_factory=Counter[tuple[Operation, str | None, str]]
     )
-    """How often each action was taken from each page, to tell a cycle from progress."""
+    """How often each action was taken from each page state, to tell a cycle from progress."""
     last_page: tuple[str, str] | None = None
-    seen: set[str] = field(default_factory=set[str])
-    """Page states the run has been in. Only reaching a new one restores the recovery budget."""
+    reached: dict[str, int] = field(default_factory=dict[str, int])
+    """Each page state the run has been in, with how many actions had been taken when it was first reached. Only
+    reaching a new one restores the recovery budget or counts an action that changed the page as progress."""
+    left: str | None = None
+    """The state the last action that changed the page was taken from, until the next observation judges it."""
     acted_from: Observation | None = None
     """The page the last action was taken on, until the next observation says what it did."""
     ready_plan: Plan | None = None
@@ -264,13 +269,9 @@ class Agent:
             state.ledger.check()
             observation = await self._observe()
             self._note_effect(state, observation)
-            # Recoveries are spent on being stuck, not on the whole run, so a page state never seen before restores
-            # the budget. Any change did before, and a run going round four pages, each step a change, recovered
-            # without end until its step limit.
-            key = state_key(observation)
-            if key not in state.seen:
-                state.seen.add(key)
-                state.recoveries = 0
+            if (stalled := self._settle(state, observation)) is not None:
+                await self._recover(state, observation, stalled)
+                continue
             raw = self._raw_observation or observation
             origin = origin_of(raw.url)
             page = (raw.url, raw.document_key)
@@ -391,7 +392,7 @@ class Agent:
             # Moving between two pages changes the page every time, and a run went round "open the author,
             # back to the list" to its step limit with its stall budget reset at every hop. The same action
             # from the same page a third time is going round, not forward.
-            signature = (decision.operation, label, observation.url)
+            signature = (decision.operation, label, state_key(observation))
             state.taken[signature] += 1
             if decision.operation is not Operation.SCROLL and state.taken[signature] > _REPEATS_BEFORE_CYCLE:
                 progressed = False
@@ -432,13 +433,51 @@ class Agent:
             duration_ms=int((time.monotonic() - started) * 1000),
         )
         await self._record_step(state, step)
-        if progressed:
+        if progressed and changed:
+            # Whether a change moved the run forward depends on where it led, which the next observation shows.
+            state.left = state_key(observation)
+        elif progressed:
             state.unchanged = 0
             state.hint = None
         else:
             state.unchanged += 1
         if state.unchanged >= self._config.stall.unchanged_actions:
             await self._recover(state, observation, f"{state.unchanged} actions without visible progress")
+
+    def _settle(self, state: _RunState, observation: Observation) -> str | None:
+        """Judge the last page-changing action by the state it led to; the reason to recover, if the run is stuck.
+
+        Recoveries are spent on being stuck, not on the whole run, so a page state never seen before restores the
+        budget; any change did before, and a run going round four pages recovered without end. A change is not
+        progress either when it leads back to a state the run was already in: on a form Google would not submit,
+        Done closed a date picker, Search opened it again, and Done and Search went round for a minute, each click
+        a change, until recovery happened to fix the form.
+        """
+        key = state_key(observation)
+        first = state.reached.get(key)
+        if first is None:
+            state.reached[key] = len(state.history)
+            state.recoveries = 0
+        left, state.left = state.left, None
+        if left is None:
+            return None
+        cycle = state.history[first:] if first is not None else []
+        # Going back to a list after reading one of its pages is how a comparison is done, not a wasted round.
+        if first is None or key == left or any(entry.operation is Operation.READ for entry in cycle):
+            state.unchanged = 0
+            state.hint = None
+            return None
+        undone = ", ".join(_described(entry) for entry in cycle[-_CYCLE_SHOWN:])
+        note = (
+            f"back to a page state first reached {len(cycle)} actions ago; "
+            f"the actions since ({undone}) undid each other"
+        )
+        last = state.history[-1]
+        state.history[-1] = last.model_copy(update={"effect": f"{last.effect}; {note}" if last.effect else note})
+        state.unchanged += 1
+        if state.unchanged >= self._config.stall.unchanged_actions:
+            return f"{state.unchanged} actions without visible progress"
+        return None
 
     @staticmethod
     def _note_effect(state: _RunState, observation: Observation) -> None:
@@ -1140,6 +1179,10 @@ def _describe(control: Control) -> str:
     """Name which one was chosen, not just what it read: a label alone cannot identify one of six
     identically labelled buttons, in the step log or in the history the next choice is made from."""
     return f"{control.label} ({control.context})" if control.context else control.label
+
+
+def _described(entry: HistoryEntry) -> str:
+    return f"{entry.operation.value if entry.operation else 'open'} {entry.target or ''}".strip()
 
 
 def _history(history: Sequence[HistoryEntry], limits: ObservationLimits) -> tuple[HistoryEntry, ...]:
