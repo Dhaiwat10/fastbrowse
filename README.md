@@ -97,7 +97,9 @@ answer, and cost by component.
 | Flag | Effect |
 |:--|:--|
 | `--start URL` | required: the page to open first |
-| `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`); far less likely to be bot-challenged |
+| `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`); far less likely to be bot-challenged. Prints a URL to watch it live |
+| `--headed` | show the local Chrome window |
+| `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in |
 | `--authorize` | allow submit, pay, delete and send; without it the run stops at `needs_confirmation` first |
 | `--secret NAME=ENV_VAR` | let the agent type `$ENV_VAR` on the start origin; models only see `NAME` |
 | `--max-steps N`, `--max-dollars N` | bound the run |
@@ -108,6 +110,17 @@ answer, and cost by component.
 export SAUCE_PASSWORD=secret_sauce
 uv run fastbrowse "Log in as standard_user with the saved password and add the backpack to the cart." \
   --start https://www.saucedemo.com/ --secret password=SAUCE_PASSWORD --authorize
+```
+
+### Signed-in sites
+
+Sign in once by hand in a profile of its own, then point runs at it. The agent reuses the session
+and never sees a password.
+
+```sh
+google-chrome --user-data-dir="$HOME/.fastbrowse/amazon" https://www.amazon.com/   # sign in, then close Chrome
+uv run fastbrowse "Add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
+  --start https://www.amazon.com/ --profile ~/.fastbrowse/amazon --headed
 ```
 
 ### Models

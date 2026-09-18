@@ -79,7 +79,7 @@ async def main(argv: list[str]) -> int:
     rows: list[dict[str, object]] = []
     with (
         fixture_server() as (base_url, recorder),
-        local_chrome(settings.chrome) as connection,
+        local_chrome(settings.local_chrome()) as connection,
         tempfile.TemporaryDirectory() as downloads,
         args.out.open("a") as out,
     ):

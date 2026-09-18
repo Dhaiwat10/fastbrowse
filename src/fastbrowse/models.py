@@ -3,6 +3,7 @@
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -186,6 +187,16 @@ class BrowserConnection(Frozen):
     """True when the browser runs on another host: tabs must be foregrounded and files move as bytes."""
 
 
+class LocalChrome(Frozen):
+    binary: str | None = None
+    """A name or path that replaces discovery of the Chrome binary."""
+    headed: bool = False
+    """Show the window, to watch a run."""
+    profile: Path | None = None
+    """A profile directory kept between runs, so a site signed into there stays signed in. Without one,
+    every run starts from a fresh profile that is deleted afterwards."""
+
+
 class Attachment(Frozen):
     name: str
     mime_type: str
@@ -228,6 +239,14 @@ class StepEvent(Frozen):
     step: StepResult
 
 
-type EventHandler = Callable[[StepEvent], Awaitable[None]]
+class BrowserEvent(Frozen):
+    """Sent once, when the browser is open and before the first step."""
+
+    type: Literal["browser"] = "browser"
+    live_url: str | None
+    """Where a cloud browser can be watched live; None for local Chrome."""
+
+
+type EventHandler = Callable[[StepEvent | BrowserEvent], Awaitable[None]]
 type UntilCheck = Callable[[str], Awaitable[bool]]
 """Caller assertion over the final page URL; COMPLETE requires it to return True when supplied."""

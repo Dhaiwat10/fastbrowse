@@ -1,4 +1,4 @@
-"""A throwaway headless Chrome on this machine."""
+"""Chrome on this machine: headless with a throwaway profile by default."""
 
 import asyncio
 import json
@@ -9,9 +9,9 @@ import tempfile
 import time
 import urllib.request
 from collections.abc import AsyncGenerator, Generator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 
-from fastbrowse.models import BrowserConnection
+from fastbrowse.models import BrowserConnection, LocalChrome
 
 
 def free_port() -> int:
@@ -38,8 +38,8 @@ def find_chrome(override: str | None) -> str | None:
 
 
 @asynccontextmanager
-async def async_local_chrome(chrome: str | None) -> AsyncGenerator[BrowserConnection]:
-    manager = local_chrome(chrome)
+async def async_local_chrome(options: LocalChrome) -> AsyncGenerator[BrowserConnection]:
+    manager = local_chrome(options)
     opening = asyncio.create_task(asyncio.to_thread(manager.__enter__))
     try:
         try:
@@ -57,17 +57,22 @@ async def async_local_chrome(chrome: str | None) -> AsyncGenerator[BrowserConnec
 
 
 @contextmanager
-def local_chrome(chrome: str | None) -> Generator[BrowserConnection]:
-    """Yield a connection to a headless Chrome with a fresh profile, killed on exit."""
-    binary = find_chrome(chrome)
+def local_chrome(options: LocalChrome) -> Generator[BrowserConnection]:
+    """Yield a connection to a Chrome launched with `options`, killed on exit."""
+    binary = find_chrome(options.binary)
     if binary is None:
         raise RuntimeError("Chrome is not installed")
     port = free_port()
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as profile:
+    kept = options.profile
+    with (
+        nullcontext(str(kept.expanduser()))
+        if kept
+        else tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as profile
+    ):
         proc = subprocess.Popen(
             [
                 binary,
-                "--headless=new",
+                *(() if options.headed else ("--headless=new",)),
                 # Headless defaults to 800x600, where responsive sites collapse their header into a
                 # toggle and the control the agent needs is not in the page at all.
                 "--window-size=1280,900",

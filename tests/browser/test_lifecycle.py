@@ -17,9 +17,8 @@ from pydantic import ValidationError
 from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser, BrowserUseCloudError
 from fastbrowse.adapters.local_chrome import async_local_chrome, find_chrome, local_chrome
 from fastbrowse.browser import BrowserSession, CdpPage
-from fastbrowse.clients.environment import Settings
 from fastbrowse.config import Config
-from fastbrowse.models import BrowserConnection, CostLine, Status
+from fastbrowse.models import BrowserConnection, CostLine, LocalChrome, Status
 from fastbrowse.page import BrowserError
 from fastbrowse.run import _browser, run_task  # pyright: ignore[reportPrivateUsage]
 from tests.browser.conftest import RecordingArtifactSink
@@ -247,7 +246,7 @@ async def test_cloud_teardown_preserves_original_error_and_cost(stop_fails: bool
     original = RuntimeError("original")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         with pytest.raises(RuntimeError) as raised:
-            async with _browser("key", Settings.model_construct(), http, cost):
+            async with _browser("key", LocalChrome(), http, cost):
                 raise original
         assert raised.value is original
         assert cost[0].dollars == (0.25 if stop_fails else 0.50)
@@ -278,7 +277,7 @@ async def test_local_chrome_threads_startup_and_shutdown(monkeypatch: pytest.Mon
     monkeypatch.setattr(chrome_adapter, "local_chrome", chrome)
 
     async def use() -> None:
-        async with async_local_chrome(None):
+        async with async_local_chrome(LocalChrome()):
             pass
 
     task = asyncio.create_task(use())
@@ -305,7 +304,7 @@ def test_chrome_is_killed_and_reaped_on_shutdown_timeout(monkeypatch: pytest.Mon
     monkeypatch.setattr(chrome_adapter, "find_chrome", Mock(return_value="/chrome"))
     monkeypatch.setattr(chrome_adapter.subprocess, "Popen", Mock(return_value=process))
     monkeypatch.setattr(chrome_adapter, "_wait_for_ws", Mock(return_value=CONNECTION.cdp_url))
-    with local_chrome(None):
+    with local_chrome(LocalChrome()):
         pass
     process.terminate.assert_called_once()
     process.kill.assert_called_once()

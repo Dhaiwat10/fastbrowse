@@ -7,10 +7,12 @@ LLM: OPENROUTER_API_KEY.
 Cloud browser: BROWSER_USE_API_KEY. FASTBROWSE_LLM_MODEL overrides every purpose at once, and
 FASTBROWSE_LLM_MODEL_<PURPOSE> (PLAN, READ, FIELD_TEXT, RECOVER, COMPOSE, VERIFY, SHORTCUT) overrides one.
 FASTBROWSE_LLM_REASONING sets the reasoning effort: low (default), medium or high. FASTBROWSE_CHROME
-names the Chrome binary. `.env.example` lists them all. A real environment variable beats `.env`.
+names the Chrome binary; FASTBROWSE_HEADED=1 shows its window and FASTBROWSE_PROFILE keeps its profile
+between runs. `.env.example` lists them all. A real environment variable beats `.env`.
 """
 
 from enum import StrEnum
+from pathlib import Path
 from typing import assert_never
 
 import httpx
@@ -22,7 +24,7 @@ from fastbrowse.clients.typesafe import TYPESAFE_URL, TypeSafeJevClient
 from fastbrowse.clients.vercel import GATEWAY_URL, VercelGatewayJevClient
 from fastbrowse.jev import JEV_MODEL, JevClient
 from fastbrowse.llm import LLMClient
-from fastbrowse.models import LLMPurpose
+from fastbrowse.models import LLMPurpose, LocalChrome
 
 # The default is the model the live suite passes on, not the fastest one. `evals.latency` timed the
 # candidates on the two request shapes that dominate a run and gemini-3.5-flash-lite won both by a
@@ -95,6 +97,8 @@ class Settings(BaseSettings):
     llm_model_shortcut: str | None = None
     llm_reasoning: ReasoningEffort = DEFAULT_REASONING
     chrome: str | None = None
+    headed: bool = False
+    profile: Path | None = None
 
     def models(self) -> dict[LLMPurpose, str]:
         """Per-purpose models, most specific setting winning."""
@@ -120,6 +124,9 @@ class Settings(BaseSettings):
                 return self.llm_model_shortcut
             case _:
                 assert_never(purpose)
+
+    def local_chrome(self) -> LocalChrome:
+        return LocalChrome(binary=self.chrome, headed=self.headed, profile=self.profile)
 
     def jev(self, http: httpx.AsyncClient) -> JevClient:
         source = self.jev_source or (JevSource.TYPESAFE if self.typesafe_api_key else JevSource.GATEWAY)

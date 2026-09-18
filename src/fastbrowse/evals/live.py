@@ -4,6 +4,7 @@
         [--repeat N] [--out artifacts/evals/live.jsonl]
 
 Needs BROWSER_USE_API_KEY (both arms), and the Jev and LLM keys in fastbrowse.clients.environment (fast arm).
+Each run prints a WATCH line with the URL where its browser can be watched live.
 
 Truth is fetched from each site's own API at run time, so the grade tracks the live page rather than a stale
 fixture. Both arms are graded on their answer. The fast arm is also graded on the page it actually ended on;
@@ -26,7 +27,7 @@ import httpx
 from pydantic import BaseModel
 
 from fastbrowse.clients.environment import load_settings
-from fastbrowse.models import CostBreakdown, Limits, RunResult, Status
+from fastbrowse.models import BrowserEvent, CostBreakdown, Limits, RunResult, Status, StepEvent
 from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
 
@@ -182,6 +183,11 @@ TASKS: tuple[LiveTask, ...] = (
 )
 
 
+def _watch(arm: str, task: LiveTask, live_url: str | None) -> None:
+    if live_url:
+        print(f"WATCH {arm:6} {task.id:18} {live_url}", flush=True)
+
+
 async def fast_arm(
     task: LiveTask, http: httpx.AsyncClient, downloads: Path
 ) -> tuple[Outcome, RunResult, CostBreakdown]:
@@ -194,21 +200,34 @@ async def fast_arm(
         limits=Limits(max_steps=30, max_dollars=0.25, max_seconds=300),
         downloads=downloads,
         http=http,
+        on_event=lambda event: _on_fast_event(task, event),
     )
     return Outcome(result.answer, result.data, result.final_url or task.start), result, result.cost
+
+
+async def _on_fast_event(task: LiveTask, event: StepEvent | BrowserEvent) -> None:
+    if isinstance(event, BrowserEvent):
+        _watch("fast", task, event.live_url)
 
 
 async def hosted_arm(task: LiveTask) -> tuple[Outcome, str, float | None]:
     from browser_use_sdk.v3 import AsyncBrowserUse  # pyright: ignore[reportMissingTypeStubs] - optional extra
 
     client = AsyncBrowserUse(api_key=load_settings().browser_key())
-    result = await client.run(
+    run = client.run(
         f"Start at {task.start}. {task.task}",
         output_schema=task.output_schema,
         max_cost_usd=HOSTED_MAX_DOLLARS,
         proxy_country_code="us",
         sensitive_data=dict(task.secrets) or None,
     )
+    finishing = asyncio.ensure_future(run)
+    # The session id appears once the SDK has created the session, which is when its live URL exists.
+    while run.session_id is None and not finishing.done():
+        await asyncio.wait({finishing}, timeout=0.2)
+    if run.session_id is not None:
+        _watch("hosted", task, (await client.sessions.get(run.session_id)).live_url)
+    result = await finishing
     session = result.session
     output = result.output
     if isinstance(output, BaseModel):
