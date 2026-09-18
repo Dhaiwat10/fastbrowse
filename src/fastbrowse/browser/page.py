@@ -99,7 +99,11 @@ _HANDED_FOCUS_JS = (
     "const poll = () => { if (performance.now() - (r.lastMutation ?? 0) >= "
     f"{_HANDOFF_QUIET_SECONDS * 1000} || performance.now() >= deadline) resolve(decide()); "
     "else setTimeout(poll, 20); }; "
-    "if (e.ownerDocument.hidden) poll(); else requestAnimationFrame(() => setTimeout(poll, 0)); }))"
+    # Chrome can hold a cross-origin frame's animation frames indefinitely, and CI hung in pytest for an hour
+    # awaiting one; the timer starts the poll anyway once the deadline has passed.
+    "let started = false; const start = () => { if (!started) { started = true; poll(); } }; "
+    f"setTimeout(start, {_HANDOFF_SECONDS * 1000}); "
+    "if (e.ownerDocument.hidden) start(); else requestAnimationFrame(() => setTimeout(start, 0)); }))"
 )
 type _Point = tuple[float, float] | Literal["covered"] | None
 
