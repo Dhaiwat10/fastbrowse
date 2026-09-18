@@ -69,13 +69,13 @@ Needs Python 3.14, [uv](https://docs.astral.sh/uv/), and Chrome (not needed with
 ```sh
 git clone https://github.com/agent-labs-dev/fastbrowse.git && cd fastbrowse
 uv sync
-cp .env.example .env            # then add a Jev key (AI_GATEWAY_API_KEY) and OPENROUTER_API_KEY
+cp .env.example .env            # add AI_GATEWAY_API_KEY or TYPESAFE_API_KEY, and OPENROUTER_API_KEY
 uv run fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
 
 ```
    0 read  -> executed
-complete ($0.0238, 1 steps)
+complete ($0.0071, 1 steps)
 The top story on Hacker News is titled "...".
 ```
 
@@ -101,10 +101,11 @@ uv run fastbrowse "Log in as standard_user with the saved password and add the b
 ### Models
 
 The LLM defaults to `google/gemini-3.8-flash` at low reasoning effort, with
-`google/gemini-3.5-flash-lite` for planning, proposing a direct address and typing field text. Override with `FASTBROWSE_LLM_MODEL` (every
-purpose), `FASTBROWSE_LLM_MODEL_<PURPOSE>` (`PLAN`, `READ`, `FIELD_TEXT`, `SHORTCUT`, `RECOVER`, `COMPOSE`,
-`VERIFY`) and `FASTBROWSE_LLM_REASONING` (`low`, `medium`, `high`). Flash-lite everywhere is faster
-but scored 8/12 live, so it is not the default.
+`google/gemini-3.5-flash-lite` for planning, proposing a direct address and typing field text.
+Override with `FASTBROWSE_LLM_MODEL` (every purpose), `FASTBROWSE_LLM_MODEL_<PURPOSE>` (`PLAN`,
+`READ`, `FIELD_TEXT`, `SHORTCUT`, `RECOVER`, `COMPOSE`, `VERIFY`) and `FASTBROWSE_LLM_REASONING`
+(`low`, `medium`, `high`). Flash-lite for every purpose is faster but scored 8/12 live, so it is
+used only where its output is checked downstream.
 
 ### Results
 
@@ -154,7 +155,7 @@ The result has `status`, `answer`, `data`, `evidence`, `final_url` and an itemiz
 ## Evals and development
 
 ```sh
-uv run python -m fastbrowse.evals.runner                     # local fixtures, about $0.005 a task
+uv run python -m fastbrowse.evals.runner                     # local fixtures, under half a cent a task
 uv run --extra browser-use python -m fastbrowse.evals.live   # live head-to-head; --arms fast skips hosted
 uv run ruff format . && uv run ruff check . && uv run pyright && uv run pytest && uv run python scripts/no_slop.py
 ```
