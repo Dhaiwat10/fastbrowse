@@ -7,15 +7,17 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 # pyright: reportPrivateUsage=false
-from fastbrowse.agent import Agent, _follow_recovery, _history, _RunState, _Stop, _unread
+from fastbrowse.agent import Agent, _follow_recovery, _history, _RunState, _Stop, _unread, _verified
 from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.llm import Generation
-from fastbrowse.memory import Notes
+from fastbrowse.memory import Fact, Notes
 from fastbrowse.models import Authorization, Decider, Limits, LLMPurpose, Operation, Status, StepOutcome, StepResult
 from fastbrowse.page import ActResult, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.policy import HistoryEntry, decide
 from fastbrowse.telemetry import Ledger
+from fastbrowse.verification import LLMVerdict
+from tests.test_memory import evidence
 from tests.test_policy import FREE, ScriptedJev, context, observation
 from tests.test_retrieval import ScriptedLLM
 
@@ -372,3 +374,32 @@ async def test_going_back_after_reading_a_page_is_progress() -> None:
     assert agent._settle(state, results) is None
     assert state.unchanged == 0
     assert state.history[-1].effect is None
+
+
+@pytest.mark.parametrize(
+    ("complete", "missing", "accepted"),
+    [
+        (True, (), True),
+        (False, ("compare",), True),
+        (False, ("signed-in",), False),
+        (False, ("requests",), False),
+        (False, (), False),
+    ],
+)
+def test_the_verifier_cannot_hold_open_a_requirement_the_notes_cite(
+    complete: bool, missing: tuple[str, ...], accepted: bool
+) -> None:
+    info = RequirementKind.INFORMATION
+    plan = Plan(
+        requirements=(
+            Requirement(id="httpx", text="Find httpx's latest release date", kind=info),
+            Requirement(id="requests", text="Find requests' latest release date", kind=info),
+            Requirement(id="compare", text="Compare the two dates", kind=info),
+            Requirement(id="signed-in", text="Be signed in", kind=RequirementKind.ACTION),
+        ),
+        answer_expected=True,
+    )
+    notes = Notes(
+        Fact(requirement_id=r, text=r, evidence=evidence(start=i)) for i, r in enumerate(("httpx", "compare"))
+    )
+    assert _verified(LLMVerdict(complete=complete, missing=missing), plan, notes) is accepted

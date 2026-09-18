@@ -56,6 +56,7 @@ from fastbrowse.telemetry import BudgetExceeded, Ledger, trace
 from fastbrowse.verification import (
     DoneVerdict,
     Extraction,
+    LLMVerdict,
     check_claims,
     check_done,
     extract,
@@ -1034,7 +1035,7 @@ class Agent:
                     ledger=state.ledger,
                 )
                 state.ledger.record(verdict.cost)
-                accepted = verdict.data.complete and not verdict.data.missing
+                accepted = _verified(verdict.data, state.plan, state.notes)
                 trace("verify", complete=verdict.data.complete, missing=list(verdict.data.missing))
             if accepted and until is not None:
                 accepted = await until((self._raw_observation or fresh).url)
@@ -1178,6 +1179,18 @@ def _describe(control: Control) -> str:
     """Name which one was chosen, not just what it read: a label alone cannot identify one of six
     identically labelled buttons, in the step log or in the history the next choice is made from."""
     return f"{control.label} ({control.context})" if control.context else control.label
+
+
+def _verified(verdict: LLMVerdict, plan: Plan, notes: Notes) -> bool:
+    """Whether the verifier's doubts leave the run finished.
+
+    An information requirement the notes cite facts for is not left open by the verifier: the answer's claims are
+    checked against those quotes before it is given. On flash-lite the verifier named "compare the two release
+    dates" missing with both dates in the notes, one run in three, until the run stopped stuck.
+    """
+    cited = {r.id for r in plan.requirements if r.kind is RequirementKind.INFORMATION and notes.evidenced(r.id)}
+    doubted = set(verdict.missing) - cited
+    return not doubted and (verdict.complete or bool(verdict.missing))
 
 
 def _described(entry: HistoryEntry) -> str:
