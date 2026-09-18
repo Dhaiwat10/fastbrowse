@@ -474,10 +474,9 @@ class Agent:
         )
         last = state.history[-1]
         state.history[-1] = last.model_copy(update={"effect": f"{last.effect}; {note}" if last.effect else note})
-        state.unchanged += 1
-        if state.unchanged >= self._config.stall.unchanged_actions:
-            return f"{state.unchanged} actions without visible progress"
-        return None
+        # One return is already a loop: waiting for the stall count let Search and Done go round three times, with
+        # an unsure step's recovery in between sending the run off to re-fill the origin.
+        return note
 
     @staticmethod
     def _note_effect(state: _RunState, observation: Observation) -> None:

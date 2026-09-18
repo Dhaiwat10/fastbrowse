@@ -329,29 +329,12 @@ async def test_a_change_that_leads_back_to_an_earlier_state_is_not_progress() ->
     assert agent._settle(state, reopened) is None
     assert state.unchanged == 0
     await _click(agent, state, reopened, "Done")
-    assert agent._settle(state, form) is None
-    assert state.unchanged == 1
-    assert state.history[-1].effect == (
+    note = (
         "back to a page state first reached 2 actions ago; "
         "the actions since (click Search, click Done) undid each other"
     )
-
-
-async def test_going_round_states_ends_in_recovery() -> None:
-    form, picker = observation((_button("Search"),)), observation((_button("Done"),))
-    page = Mock(spec=Page)
-    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
-    state = await run_state()
-    state.authorization = Authorization(irreversible_actions=True)
-    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
-    agent._settle(state, form)
-    reasons: list[str | None] = []
-    for _ in range(2):
-        await _click(agent, state, form, "Search")
-        reasons.append(agent._settle(state, picker))
-        await _click(agent, state, picker, "Done")
-        reasons.append(agent._settle(state, form))
-    assert reasons == [None, None, None, "3 actions without visible progress"]
+    assert agent._settle(state, form) == note
+    assert state.history[-1].effect == note
 
 
 async def test_a_change_to_text_alone_still_counts_as_progress() -> None:
