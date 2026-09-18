@@ -102,6 +102,7 @@ answer, and cost by component.
 | `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in |
 | `--authorize` | allow submit, pay, delete and send; without it the run stops at `needs_confirmation` first |
 | `--secret NAME=ENV_VAR` | let the agent type `$ENV_VAR` on the start origin; models only see `NAME` |
+| `--bitwarden ITEM` | let the agent type that vault login's `username` and `password`, only if the item is saved for the start site |
 | `--max-steps N`, `--max-dollars N` | bound the run |
 | `--downloads DIR` | keep downloaded files |
 | `--json` | full result instead of the answer |
@@ -121,6 +122,15 @@ and never sees a password.
 google-chrome --user-data-dir="$HOME/.fastbrowse/amazon" https://www.amazon.com/   # sign in, then close Chrome
 uv run fastbrowse "Add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
   --start https://www.amazon.com/ --profile ~/.fastbrowse/amazon --headed
+```
+
+Or sign in from your vault: with the [Bitwarden CLI](https://bitwarden.com/help/cli/) signed in, name
+the item. Its values stay in this process and are typed only on a site the item's saved URIs cover.
+
+```sh
+export BW_SESSION="$(bw unlock --raw)"
+uv run fastbrowse "Sign in with the saved login, then add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
+  --start https://www.amazon.com/ --bitwarden Amazon --headed
 ```
 
 ### Models
