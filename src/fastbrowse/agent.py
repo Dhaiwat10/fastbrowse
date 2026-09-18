@@ -61,6 +61,11 @@ from fastbrowse.verification import (
 
 GENERATE = "generate"
 
+# Long enough for a browser-verification page to run its check and hand over, short enough that a page
+# which never moves still ends as needs_login well inside a run's time budget.
+_INTERSTITIAL_SECONDS = 12.0
+_INTERSTITIAL_POLL_SECONDS = 0.5
+
 
 class _FieldText(Frozen):
     text: str = Field(description="Exactly the text to type into the field, with no commentary.")
@@ -164,6 +169,11 @@ class Agent:
             state.last_page = page
             decision = await decide(self._jev, observation, context, self._config, ledger=state.ledger)
             if (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
+                # A wall offering nothing to act on cannot be signed into. It is a bot check such as PyPI's
+                # "Client Challenge", which clears itself once its script runs, and stopping on it failed
+                # five runs in six of a task hosted agents finish by waiting.
+                if not raw.controls and await self._outwait(raw):
+                    continue
                 raise _Stop(Status.NEEDS_LOGIN, f"sign-in required at {origin}")
             uncertain = decision.confidence < self._config.thresholds.recover_below
             # The confidence gate exists to stop the agent acting on a page it does not understand, and a
@@ -181,6 +191,15 @@ class Agent:
                     return result
                 continue
             await self._step(state, observation, decision)
+
+    async def _outwait(self, stuck: Observation) -> bool:
+        """Re-observe until the page is no longer `stuck`, returning whether it moved in time."""
+        deadline = time.monotonic() + _INTERSTITIAL_SECONDS
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_INTERSTITIAL_POLL_SECONDS)
+            if (await self._observe()).page_key != stuck.page_key:
+                return True
+        return False
 
     async def _step(self, state: _RunState, observation: Observation, decision: Decision) -> None:
         started = time.monotonic()
