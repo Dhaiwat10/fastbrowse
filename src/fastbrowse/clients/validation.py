@@ -108,6 +108,10 @@ JEV_ATTEMPT_SECONDS = 15.0
 """Jev answers in about a second, so an attempt this old is stuck upstream, and a retry beats waiting on it."""
 LLM_ATTEMPT_SECONDS = 30.0
 """Six times the mean plan call, the slowest request a run makes; a live run stalled 60s on one attempt."""
+JEV_HEDGE_SECONDS = 3.0
+"""Three times a typical Jev call. A live run spent 34s of one task in Jev; a second request sent here wins those."""
+LLM_HEDGE_SECONDS = 8.0
+"""Twice the slowest typical purpose (RECOVER, about 3.9s). One PLAN call took 26.1s live while the rest took 3s."""
 
 
 async def post_with_retry(
@@ -117,28 +121,78 @@ async def post_with_retry(
     headers: Mapping[str, str],
     *,
     attempt_seconds: float,
+    hedge_seconds: float,
     before_retry: Callable[[], None] | None = None,
 ) -> httpx.Response | None:
     """Retry an overloaded or dropped request, which produced nothing and is always safe to repeat.
 
-    `before_retry` runs ahead of every repeat, so a budget counts each request actually sent: a request
-    that timed out may still have been billed. Returns None when the transport never completed, leaving
-    each client to name its own failure.
+    Each attempt is hedged: a request still unanswered after `hedge_seconds` is raced by an identical one,
+    because a provider's slowest calls are stalls, not work, and a fresh request usually lands on a healthy
+    replica. `before_retry` runs ahead of every repeat and every hedge, so a budget counts each request
+    actually sent: a request that was cancelled or timed out may still have been billed. Returns None when
+    the transport never completed, leaving each client to name its own failure.
     """
     response: httpx.Response | None = None
     for attempt, delay in enumerate((*RETRY_DELAYS_SECONDS, None)):
         if attempt and before_retry is not None:
             before_retry()
-        try:
-            response = await http.post(url, json=body, headers=headers, timeout=attempt_seconds)
-        except httpx.HTTPError:
-            response = None
-        else:
-            if response.status_code not in RETRYABLE_STATUS:
-                return response
+        response = await _hedged(
+            http,
+            url,
+            body,
+            headers,
+            attempt_seconds=attempt_seconds,
+            hedge_seconds=hedge_seconds,
+            before_hedge=before_retry,
+        )
+        if response is not None and response.status_code not in RETRYABLE_STATUS:
+            return response
         if delay is not None:
             await asyncio.sleep(delay)
     return response
+
+
+async def _hedged(
+    http: httpx.AsyncClient,
+    url: str,
+    body: dict[str, JsonValue],
+    headers: Mapping[str, str],
+    *,
+    attempt_seconds: float,
+    hedge_seconds: float,
+    before_hedge: Callable[[], None] | None,
+) -> httpx.Response | None:
+    """The first usable response from one request, raced by a second if the first outlasts `hedge_seconds`."""
+    requests = {asyncio.create_task(_send(http, url, body, headers, attempt_seconds))}
+    try:
+        done, _ = await asyncio.wait(requests, timeout=hedge_seconds)
+        if not done:
+            if before_hedge is not None:
+                before_hedge()
+            requests.add(asyncio.create_task(_send(http, url, body, headers, attempt_seconds)))
+        response: httpx.Response | None = None
+        pending = set(requests)
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for request in done:
+                response = request.result()
+                if response is not None and response.status_code not in RETRYABLE_STATUS:
+                    return response
+        return response
+    finally:
+        # The losing request is still open on the provider; cancel it and wait, so nothing outlives the call.
+        for request in requests:
+            request.cancel()
+        await asyncio.gather(*requests, return_exceptions=True)
+
+
+async def _send(
+    http: httpx.AsyncClient, url: str, body: dict[str, JsonValue], headers: Mapping[str, str], attempt_seconds: float
+) -> httpx.Response | None:
+    try:
+        return await http.post(url, json=body, headers=headers, timeout=attempt_seconds)
+    except httpx.HTTPError:
+        return None
 
 
 async def post(
@@ -149,7 +203,9 @@ async def post(
     headers: Mapping[str, str] | None = None,
 ) -> httpx.Response:
     auth = {"Authorization": f"Bearer {api_key}", **(headers or {})}
-    response = await post_with_retry(http, url, body, auth, attempt_seconds=JEV_ATTEMPT_SECONDS)
+    response = await post_with_retry(
+        http, url, body, auth, attempt_seconds=JEV_ATTEMPT_SECONDS, hedge_seconds=JEV_HEDGE_SECONDS
+    )
     if response is None:
         raise JevError("Jev transport failed")
     if response.status_code == 400 and "max_tokens_exceeded" in response.text:

@@ -11,6 +11,7 @@ from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from fastbrowse.clients.validation import (
     LLM_ATTEMPT_SECONDS,
+    LLM_HEDGE_SECONDS,
     body_excerpt,
     dollars,
     json_object,
@@ -120,6 +121,7 @@ class OpenAICompatibleLLM:
             body,
             {"Authorization": f"Bearer {self._api_key}"},
             attempt_seconds=LLM_ATTEMPT_SECONDS,
+            hedge_seconds=LLM_HEDGE_SECONDS,
             before_retry=None if ledger is None else lambda: ledger.reserve(CostComponent.LLM),
         )
         if response is None:
