@@ -23,11 +23,14 @@ fastbrowse must also end with the task's expected status, and jev-ultrafast with
 import argparse
 import asyncio
 import json
+import logging
 import os
 import statistics
 import sys
 import tempfile
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 from unittest import mock
@@ -48,6 +51,7 @@ from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, St
 from fastbrowse.page import Observation
 from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
+from fastbrowse.telemetry import TRACE
 
 ARMS = ("fast", "ultrafast", "hosted")
 MAX_STEPS, MAX_DOLLARS, MAX_SECONDS = 30, 0.25, 300
@@ -141,6 +145,29 @@ class _ObservedAgent(Agent):
         controls = (*observation.controls, *(hidden.controls if hidden is not None else ()))
         _ObservedAgent.controls = tuple((c.label, c.value) for c in controls)
         return result
+
+
+class _Collect(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.events: list[object] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.events.append(getattr(record, "trace", record.getMessage()))
+
+
+@contextmanager
+def _traced() -> Generator[list[object]]:
+    """The agent's trace events for one run; tasks run one at a time, so one handler at a time sees them."""
+    handler = _Collect()
+    previous = TRACE.level
+    TRACE.addHandler(handler)
+    TRACE.setLevel(logging.DEBUG)
+    try:
+        yield handler.events
+    finally:
+        TRACE.removeHandler(handler)
+        TRACE.setLevel(previous)
 
 
 async def fast_arm(
@@ -345,12 +372,17 @@ async def run_arm(
     row: dict[str, object] = {"arm": arm, "task": task.id, "category": task.category.value, "at": time.time()}
     try:
         if arm == "fast":
-            outcome, result, ended = await fast_arm(task, http, downloads, bitwarden=bitwarden, record=record)
+            with _traced() as events:
+                outcome, result, ended = await fast_arm(task, http, downloads, bitwarden=bitwarden, record=record)
             status = result.status.value
             cost = result.cost
             row |= {
                 "error": result.error,
                 "trace": [f"{s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in result.steps],
+                # Enough to say why a run failed without running it again: every step as the agent judged it, and
+                # each read, done check, verification, claim check and recovery in order.
+                "step_log": [s.model_dump(mode="json") for s in result.steps],
+                "events": events,
                 "steps": len(result.steps),
                 "unknown_cost": cost.has_unknown,
                 "seconds_by_call": cost.seconds_by_call(),
