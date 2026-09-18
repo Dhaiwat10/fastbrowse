@@ -49,6 +49,10 @@
     </div>
   </div>
 
+  <h2>Lazy menu</h2>
+  <button id="open-lazy" aria-haspopup="menu" aria-expanded="false" aria-controls="lazy-menu">Search or jump to</button>
+  <div id="lazy-menu" hidden></div>
+
   <h2>Swap</h2>
   <button id="swap-target">Swap target</button>
   <button id="swap-trigger">Trigger swap</button>
@@ -84,6 +88,16 @@
     document.getElementById('login').addEventListener('submit', e => {
       e.preventDefault();
       document.getElementById('login-result').textContent = 'signed in as ' + document.getElementById('username').value;
+    });
+    document.getElementById('open-lazy').addEventListener('click', () => {
+      // The header reacts at once; the menu's own markup arrives later, as a lazily loaded bundle's would.
+      document.getElementById('open-lazy').dataset.pressed = 'true';
+      setTimeout(() => {
+        const menu = document.getElementById('lazy-menu');
+        menu.innerHTML = '<button id="lazy-item">Jump to a repository</button>';
+        menu.hidden = false;
+        document.getElementById('open-lazy').setAttribute('aria-expanded', 'true');
+      }, 400);
     });
     document.getElementById('open-modal').addEventListener('click', () => {
       document.getElementById('modal').style.display = 'block';

@@ -261,6 +261,16 @@ async def test_identical_labels_carry_their_card_as_context(loaded_page: CdpPage
     assert find(obs, "Sign in").context is None
 
 
+async def test_lazily_built_menu_is_observed_after_the_click_that_opens_it(loaded_page: CdpPage) -> None:
+    obs = await loaded_page.observe()
+    opener = find(obs, "Search or jump to")
+    assert (await loaded_page.act(Action(operation=Operation.CLICK, target_id=opener.id), obs)).outcome == (
+        StepOutcome.EXECUTED
+    )
+    # No re-observation loop here: the menu must be there on the very next observation the agent takes.
+    assert any(c.label == "Jump to a repository" for c in (await loaded_page.observe()).controls)
+
+
 async def test_shadow_dom_button_is_clickable(loaded_page: CdpPage, browser_session: BrowserSession) -> None:
     obs = await loaded_page.observe()
     shadow_button = find(obs, "Shadow button")

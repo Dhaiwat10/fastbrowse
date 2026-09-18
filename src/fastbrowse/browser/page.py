@@ -90,6 +90,9 @@ _FOCUS_SETTLE_SECONDS = 1.0
 # Long enough for a suggestion request to come back over a slow connection, and paid only by a field
 # that advertises a popup at all.
 _SUGGESTION_SECONDS = 1.2
+# A lazily built menu or dialog arrived 0.15-0.7s after the click on the pages this was measured on.
+# Paid only by a control that advertised a popup and had not opened one yet.
+_POPUP_SECONDS = 1.2
 
 _MAIN = "main"
 """Frame key used for the top frame; OOPIF frames key on their CDP target id, per the browser session."""
@@ -355,8 +358,51 @@ class CdpPage(Page):
             return StepOutcome.STALE, "target disconnected"
         if point == "covered":
             return StepOutcome.COVERED, None
+        announced = await self._announces_popup(session_id, _local_id)
         await self._click_point(session_id, point)
+        if announced:
+            await self._await_popup(session_id, _local_id)
         return StepOutcome.EXECUTED, None
+
+    async def _announces_popup(self, session_id: str, local_id: int) -> bool:
+        """Whether this control says, before it is clicked, that clicking opens something it does not yet show."""
+        with suppress(Exception):
+            return bool(
+                await self._evaluate(
+                    session_id,
+                    f"(e => !!e && e.getAttribute('aria-expanded') !== 'true' && "
+                    "(!!e.getAttribute('aria-haspopup') || e.getAttribute('aria-expanded') === 'false' "
+                    "|| !!e.getAttribute('aria-controls') || !!e.getAttribute('aria-owns')))"
+                    f"(window.__fastbrowse?.nodes.get({local_id}))",
+                )
+            )
+        return False
+
+    async def _await_popup(self, session_id: str, local_id: int) -> None:
+        """Give a menu, picker or dialog the click opens time to arrive before the page is observed.
+
+        A header that mutates the moment it is clicked settles the fingerprint and quiets the DOM before the
+        dialog's own bundle has loaded, so the next observation still shows the page as it was and the agent
+        acts on whatever else is on screen. The wait is bounded, resolves the instant the control reports
+        itself expanded or the element it controls becomes visible, and is paid only by a control that said
+        a popup was coming. Best effort by construction: a click that navigates discards the promise.
+        """
+        with suppress(Exception):
+            await self._evaluate(
+                session_id,
+                "new Promise(resolve => { const e = window.__fastbrowse?.nodes.get("
+                f"{local_id}); "
+                "const owned = () => { const id = e.getAttribute('aria-controls') || e.getAttribute('aria-owns'); "
+                "return id ? e.ownerDocument.getElementById(id) : null; }; "
+                "const open = () => e.getAttribute('aria-expanded') === 'true' "
+                "|| !!owned()?.checkVisibility({checkOpacity: true, checkVisibilityCSS: true}); "
+                "if (!e || open()) { resolve(true); return; } "
+                "const stop = ok => { observer.disconnect(); clearTimeout(timer); resolve(ok); }; "
+                "const observer = new MutationObserver(() => { if (open()) stop(true); }); "
+                "observer.observe(e.ownerDocument.documentElement, {childList: true, subtree: true, "
+                "attributes: true}); "
+                f"const timer = setTimeout(() => stop(false), {_POPUP_SECONDS * 1000}); }})",
+            )
 
     async def _fill(
         self,
