@@ -8,7 +8,17 @@ import pytest
 
 # pyright: reportPrivateUsage=false
 from fastbrowse import agent as agent_module
-from fastbrowse.agent import Agent, _follow_recovery, _history, _RunState, _Stop, _unread, _verified
+from fastbrowse.agent import (
+    Agent,
+    _follow_recovery,
+    _history,
+    _RunState,
+    _Stop,
+    _try_unsure,
+    _unread,
+    _Unsure,
+    _verified,
+)
 from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.llm import Generation
 from fastbrowse.memory import Fact, Notes
@@ -231,6 +241,26 @@ async def test_jev_still_unsure_after_recovery_takes_the_action_recovery_named()
     assert followed is not None and followed.target == buttons[1]
     # Used once: the next unsure step is Jev's to recover from again.
     assert _follow_recovery(state, obs, unsure, uncertain=True) is None
+
+
+async def test_an_unsure_pick_is_acted_on_once_per_page_state() -> None:
+    state = await run_state()
+    first, second = observation((_button("Done"),)), observation((_button("Close dialog"),))
+    assert _try_unsure(state, first)
+    assert not _try_unsure(state, first)
+    assert _try_unsure(state, second)
+
+
+@pytest.mark.parametrize(("confidence", "raised"), [(0.3, _Unsure), (0.9, _Stop)])
+async def test_an_unsure_pick_that_may_commit_something_recovers_rather_than_asking_the_user(
+    confidence: float, raised: type[Exception]
+) -> None:
+    button = _button("Place order")
+    jev = ScriptedJev({"operation": "click", "click_target": button.id}, noul=0.9)
+    obs = observation((button,))
+    decision = (await decide(jev, obs, context(), Config())).model_copy(update={"operation_confidence": confidence})
+    with pytest.raises(raised):
+        await Agent(Mock(spec=Page), jev, ScriptedLLM([]))._gate_irreversible(await run_state(), obs, decision)
 
 
 async def test_a_named_action_is_not_taken_over_a_confident_choice_or_on_a_control_that_went() -> None:
