@@ -472,3 +472,16 @@ async def test_content_shown_only_under_the_pointer_is_reached_by_hovering(page:
     assert "name: grace" in after.viewport_text
     assert "name: ada" not in after.viewport_text
     assert any(c.label == "View profile" for c in after.controls)
+
+
+async def test_a_visible_option_is_clicked_without_scrolling_its_menu_shut(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/menu.html")
+    obs = await page.observe()
+    trip = next(c for c in obs.controls if c.label == "Round trip" and c.role == "button")
+    await page.act(Action(operation=Operation.CLICK, target_id=trip.id), obs)
+    obs = await page.observe()
+    option = next(c for c in obs.controls if c.label == "One way")
+    result = await page.act(Action(operation=Operation.CLICK, target_id=option.id), obs)
+    assert result.outcome == StepOutcome.EXECUTED
+    after = await page.observe()
+    assert any(c.role == "button" and c.label == "One way" for c in after.controls)

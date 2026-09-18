@@ -51,6 +51,10 @@ _HIT_TEST_JS = (
     "(id => { const e = window.__fastbrowse?.nodes.get(id); "
     "if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled=\"true\"],[inert]') || "
     "!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return null; "
+    # Scrolling only when the control is not already in full view: a page scroll closes open menus and
+    # popups, so centring an option that was already visible dismissed its menu before the click landed.
+    "const w = e.ownerDocument.defaultView, v = e.getBoundingClientRect(); "
+    "if (v.top < 0 || v.left < 0 || v.bottom > w.innerHeight || v.right > w.innerWidth) "
     "e.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'}); "
     "const r = e.getBoundingClientRect(); let x = r.x + r.width / 2, y = r.y + r.height / 2; "
     "if (!r.width || !r.height) return null; "
