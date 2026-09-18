@@ -1,3 +1,4 @@
+import asyncio
 import base64
 
 import httpx
@@ -170,3 +171,75 @@ async def test_a_retry_reserves_its_own_call_and_keeps_an_unreadable_attempts_co
     assert result.data.count == 1
     assert result.cost.basis is CostBasis.UNKNOWN
     assert result.cost.dollars is None
+
+
+async def test_a_hedge_loser_marks_the_llm_cost_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("fastbrowse.clients.openai_compatible.LLM_HEDGE_SECONDS", 0.01)
+    calls = 0
+    ledger = Ledger(Limits(max_llm_calls=2))
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.Event().wait()
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"count":1}'}}],
+                "usage": {"cost": 0.01, "prompt_tokens": 20, "completion_tokens": 5},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await OpenAICompatibleLLM(
+            "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
+        ).generate(LLMPurpose.READ, [], Result, ledger=ledger)
+    ledger.record(result.cost)
+    assert calls == ledger.llm_calls == 2
+    assert result.data.count == 1
+    assert result.cost.basis is CostBasis.UNKNOWN and result.cost.dollars is None
+    assert (result.cost.input_tokens, result.cost.output_tokens) == (20, 5)
+    assert ledger.breakdown().has_unknown
+
+
+async def test_a_hedge_loser_is_recorded_even_when_the_winner_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("fastbrowse.clients.openai_compatible.LLM_HEDGE_SECONDS", 0.01)
+    calls = 0
+    ledger = Ledger(Limits())
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.Event().wait()
+        return httpx.Response(401)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(LLMError, match="401"):
+            await OpenAICompatibleLLM(
+                "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
+            ).generate(LLMPurpose.READ, [], Result, ledger=ledger)
+    assert calls == 2 and len(ledger.lines) == 1
+    assert ledger.breakdown().has_unknown
+
+
+async def test_an_error_status_retry_does_not_add_llm_cost() -> None:
+    responses = iter(
+        [
+            httpx.Response(503),
+            httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": '{"count":1}'}}], "usage": {"cost": 0.01}},
+            ),
+        ]
+    )
+    ledger = Ledger(Limits(max_llm_calls=2))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: next(responses))) as http:
+        result = await OpenAICompatibleLLM(
+            "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
+        ).generate(LLMPurpose.READ, [], Result, ledger=ledger)
+    ledger.record(result.cost)
+    assert ledger.llm_calls == 2
+    assert result.cost.basis is CostBasis.METERED and result.cost.dollars == 0.01
+    assert not ledger.breakdown().has_unknown

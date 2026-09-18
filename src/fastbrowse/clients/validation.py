@@ -3,6 +3,7 @@
 import asyncio
 import math
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import assert_never
 
 import httpx
@@ -108,13 +109,34 @@ _MAX_BACKOFF_SECONDS = 10.0
 JEV_ATTEMPT_SECONDS = 15.0
 """Jev answers in about a second, so an attempt this old is stuck upstream, and a retry beats waiting on it."""
 LLM_ATTEMPT_SECONDS = 30.0
-"""Six times the mean plan call, the slowest request a run makes; a live run stalled 60s on one attempt."""
+"""Leaves room for long reads and verification while bounding upstream stalls; flash-lite plans take about 0.8s."""
 JEV_HEDGE_SECONDS = 1.5
 """Over twice the slowest of 25 measured gateway calls (0.28s median, 0.62s worst); a live run once spent 34s of
 one task in Jev, and a second request sent here wins those for a fraction of a cent."""
 LLM_HEDGE_SECONDS = 4.0
 """About twice a typical read or verify (2 to 2.7s). Live runs saw single PLAN and READ calls take 7 to 9s while
 the rest took 2s; hedging here duplicates only that tail, and these calls cost a fraction of a cent."""
+
+
+@dataclass(slots=True)
+class RequestUsage:
+    unaccounted_requests: int = 0
+    """Requests that may have been billed but whose usage was not returned to the caller."""
+
+
+def with_discarded(cost: CostLine, usage: RequestUsage) -> CostLine:
+    """A Jev call's cost including requests raced and discarded: each carried the same input, so each is
+    charged as the one that answered, as an estimate."""
+    if not usage.unaccounted_requests:
+        return cost
+    sent = 1 + usage.unaccounted_requests
+    return cost.model_copy(
+        update={
+            "basis": CostBasis.ESTIMATED if cost.dollars is not None else CostBasis.UNKNOWN,
+            "dollars": None if cost.dollars is None else cost.dollars * sent,
+            "input_tokens": cost.input_tokens * sent,
+        }
+    )
 
 
 async def post_with_retry(
@@ -126,14 +148,15 @@ async def post_with_retry(
     attempt_seconds: float,
     hedge_seconds: float,
     before_retry: Callable[[], None] | None = None,
+    usage: RequestUsage | None = None,
 ) -> httpx.Response | None:
     """Retry an overloaded or dropped request, which produced nothing and is always safe to repeat.
 
     Each attempt is hedged: a request still unanswered after `hedge_seconds` is raced by an identical one,
-    because a provider's slowest calls are stalls, not work, and a fresh request usually lands on a healthy
+    because a provider's slowest calls are stalls, not work, and a fresh request tends to land on a healthy
     replica. `before_retry` runs ahead of every repeat and every hedge, so a budget counts each request
-    actually sent: a request that was cancelled or timed out may still have been billed. Returns None when
-    the transport never completed, leaving each client to name its own failure.
+    actually sent. `usage` counts discarded or timed-out requests that may still have been billed.
+    Returns None when the transport never completed, leaving each client to name its own failure.
     """
     response: httpx.Response | None = None
     for attempt, delay in enumerate((*RETRY_DELAYS_SECONDS, None)):
@@ -147,6 +170,7 @@ async def post_with_retry(
             attempt_seconds=attempt_seconds,
             hedge_seconds=hedge_seconds,
             before_hedge=before_retry,
+            usage=usage,
         )
         if response is not None and response.status_code not in RETRYABLE_STATUS:
             return response
@@ -180,9 +204,11 @@ async def _hedged(
     attempt_seconds: float,
     hedge_seconds: float,
     before_hedge: Callable[[], None] | None,
+    usage: RequestUsage | None,
 ) -> httpx.Response | None:
     """The first usable response from one request, raced by a second if the first outlasts `hedge_seconds`."""
     requests = {asyncio.create_task(_send(http, url, body, headers, attempt_seconds))}
+    winner: asyncio.Task[httpx.Response | None] | None = None
     try:
         done, _ = await asyncio.wait(requests, timeout=hedge_seconds)
         if not done:
@@ -196,6 +222,7 @@ async def _hedged(
             for request in done:
                 response = request.result()
                 if response is not None and response.status_code not in RETRYABLE_STATUS:
+                    winner = request
                     return response
         return response
     finally:
@@ -203,6 +230,14 @@ async def _hedged(
         for request in requests:
             request.cancel()
         await asyncio.gather(*requests, return_exceptions=True)
+        if usage is not None:
+            for request in requests:
+                if request is winner:
+                    continue
+                result = None if request.cancelled() or request.exception() else request.result()
+                # Providers do not bill error statuses, so retries after those add no cost.
+                if result is None or result.is_success:
+                    usage.unaccounted_requests += 1
 
 
 async def _send(
@@ -220,10 +255,12 @@ async def post(
     api_key: str,
     body: dict[str, JsonValue],
     headers: Mapping[str, str] | None = None,
+    *,
+    usage: RequestUsage | None = None,
 ) -> httpx.Response:
     auth = {"Authorization": f"Bearer {api_key}", **(headers or {})}
     response = await post_with_retry(
-        http, url, body, auth, attempt_seconds=JEV_ATTEMPT_SECONDS, hedge_seconds=JEV_HEDGE_SECONDS
+        http, url, body, auth, attempt_seconds=JEV_ATTEMPT_SECONDS, hedge_seconds=JEV_HEDGE_SECONDS, usage=usage
     )
     if response is None:
         raise JevError("Jev transport failed")

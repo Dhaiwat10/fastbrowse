@@ -7,6 +7,7 @@ import httpx
 from pydantic import JsonValue
 
 from fastbrowse.clients.validation import (
+    RequestUsage,
     estimated_cost,
     json_object,
     object_value,
@@ -15,6 +16,7 @@ from fastbrowse.clients.validation import (
     response_error,
     token_count,
     wire_questions,
+    with_discarded,
 )
 from fastbrowse.jev import JEV_MODEL, Evaluation, Question
 
@@ -37,11 +39,13 @@ class TypeSafeJevClient:
 
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
         started = monotonic()
+        sent = RequestUsage()
         response = await post(
             self._http,
             f"{self._base_url}/v1/systemone",
             self._api_key,
             {"model": self._model, "state": state, "questions": wire_questions(questions)},
+            usage=sent,
         )
         try:
             payload = json_object(response)
@@ -54,9 +58,9 @@ class TypeSafeJevClient:
                 model=model,
                 answers=parse_answers(payload.get("answers"), questions),
                 input_tokens=tokens,
-                cost=estimated_cost(tokens, token_count(usage.get("output_tokens", 0))).model_copy(
-                    update={"seconds": monotonic() - started}
-                ),
+                cost=with_discarded(
+                    estimated_cost(tokens, token_count(usage.get("output_tokens", 0))), sent
+                ).model_copy(update={"seconds": monotonic() - started}),
             )
         except (ValueError, TypeError, OverflowError) as error:
             raise response_error(response, f"Invalid Jev response ({error})") from None

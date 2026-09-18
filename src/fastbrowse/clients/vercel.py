@@ -20,6 +20,7 @@ import httpx
 from pydantic import JsonValue
 
 from fastbrowse.clients.validation import (
+    RequestUsage,
     dollars,
     estimated_cost,
     json_object,
@@ -29,6 +30,7 @@ from fastbrowse.clients.validation import (
     response_error,
     token_count,
     wire_questions,
+    with_discarded,
 )
 from fastbrowse.jev import Evaluation, Question
 from fastbrowse.models import CostBasis, CostComponent, CostLine
@@ -44,6 +46,7 @@ class VercelGatewayJevClient:
 
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
         started = monotonic()
+        sent = RequestUsage()
         response = await post(
             self._http,
             f"{self._base_url}/v4/ai/evaluation-model",
@@ -55,6 +58,7 @@ class VercelGatewayJevClient:
                 "ai-model-id": "typesafe-ai/jev",
                 "ai-evaluation-model-specification-version": "4",
             },
+            usage=sent,
         )
         try:
             payload = json_object(response)
@@ -79,7 +83,7 @@ class VercelGatewayJevClient:
                 model="typesafe-ai/jev",
                 answers=parse_answers(payload.get("answers"), questions, gateway=True, confidence=confidence),
                 input_tokens=tokens,
-                cost=cost.model_copy(update={"seconds": monotonic() - started}),
+                cost=with_discarded(cost, sent).model_copy(update={"seconds": monotonic() - started}),
             )
         except (ValueError, TypeError, OverflowError) as error:
             raise response_error(response, f"Invalid gateway response ({error})") from None
