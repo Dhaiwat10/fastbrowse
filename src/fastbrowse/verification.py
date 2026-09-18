@@ -125,11 +125,20 @@ async def check_done(
         if _probability(evaluation.answers, f"unmet_{requirement.id}") > thresholds.claim_problem_above:
             unmet.append(requirement.id)
     complete = _probability(evaluation.answers, "complete")
+    # Every action requirement confirmed one by one is stronger evidence than the strict holistic question alone,
+    # which asks about the whole task at once and doubts a right page as often as it confirms it.
+    # An answer Jev did not give confirms nothing, and a task with nothing to do keeps the verifier.
+    doubts = [evaluation.answers.get(f"unmet_{r.id}") for r in plan.requirements if r.kind is RequirementKind.ACTION]
+    confirmed = bool(doubts) and all(
+        isinstance(doubt, NoulAnswer) and doubt.probability < thresholds.requirement_confirmed_below for doubt in doubts
+    )
     # Jev reliably confirms a visible result but is too strict to reject one on its own, so apart from
     # information nobody has read, doubt goes to the verifier rather than straight back to work.
     if any(requirement_id in unevidenced for requirement_id in unmet):
         verdict = DoneVerdict.REJECT
-    elif complete >= thresholds.done_accept_from and not unmet:
+    elif not unmet and (
+        complete >= thresholds.done_accept_from or (confirmed and complete >= thresholds.done_confirmed_from)
+    ):
         verdict = DoneVerdict.ACCEPT
     else:
         verdict = DoneVerdict.VERIFY
