@@ -104,6 +104,10 @@ def response_error(response: httpx.Response, detail: str) -> JevError:
 
 RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0)
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
+JEV_ATTEMPT_SECONDS = 15.0
+"""Jev answers in about a second, so an attempt this old is stuck upstream, and a retry beats waiting on it."""
+LLM_ATTEMPT_SECONDS = 30.0
+"""Six times the mean plan call, the slowest request a run makes; a live run stalled 60s on one attempt."""
 
 
 async def post_with_retry(
@@ -112,6 +116,7 @@ async def post_with_retry(
     body: dict[str, JsonValue],
     headers: Mapping[str, str],
     *,
+    attempt_seconds: float,
     before_retry: Callable[[], None] | None = None,
 ) -> httpx.Response | None:
     """Retry an overloaded or dropped request, which produced nothing and is always safe to repeat.
@@ -125,7 +130,7 @@ async def post_with_retry(
         if attempt and before_retry is not None:
             before_retry()
         try:
-            response = await http.post(url, json=body, headers=headers)
+            response = await http.post(url, json=body, headers=headers, timeout=attempt_seconds)
         except httpx.HTTPError:
             response = None
         else:
@@ -143,7 +148,8 @@ async def post(
     body: dict[str, JsonValue],
     headers: Mapping[str, str] | None = None,
 ) -> httpx.Response:
-    response = await post_with_retry(http, url, body, {"Authorization": f"Bearer {api_key}", **(headers or {})})
+    auth = {"Authorization": f"Bearer {api_key}", **(headers or {})}
+    response = await post_with_retry(http, url, body, auth, attempt_seconds=JEV_ATTEMPT_SECONDS)
     if response is None:
         raise JevError("Jev transport failed")
     if response.status_code == 400 and "max_tokens_exceeded" in response.text:

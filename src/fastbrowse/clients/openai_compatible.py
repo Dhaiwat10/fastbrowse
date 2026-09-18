@@ -9,6 +9,7 @@ import httpx
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from fastbrowse.clients.validation import (
+    LLM_ATTEMPT_SECONDS,
     body_excerpt,
     dollars,
     json_object,
@@ -117,6 +118,7 @@ class OpenAICompatibleLLM:
             f"{self._base_url}/chat/completions",
             body,
             {"Authorization": f"Bearer {self._api_key}"},
+            attempt_seconds=LLM_ATTEMPT_SECONDS,
             before_retry=None if ledger is None else lambda: ledger.reserve(CostComponent.LLM),
         )
         if response is None:
