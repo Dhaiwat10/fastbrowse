@@ -3,7 +3,7 @@
 This is the entry point for embedding fastbrowse in something else. The terminal (`fastbrowse.cli`) and
 the live eval are both callers of it, so the assembly has one definition rather than one per caller, and
 an embedder gets the parts that are easy to forget: the cloud browser's own cost folded into the result,
-downloads landing somewhere that outlives the run, and the browser closed on every path out.
+downloads kept when a directory is given, and the browser closed on every path out.
 """
 
 from collections.abc import AsyncGenerator, Mapping, Sequence

@@ -101,7 +101,7 @@ class _Stop(Exception):
 
 
 class _Unsure(Exception):
-    """The next action is authorized but not clearly the right one: a case for recovery, not for the caller."""
+    """The next action is authorized but not confidently the right one: a case for recovery, not for the caller."""
 
 
 @dataclass(slots=True)

@@ -54,7 +54,7 @@ class Notes:
         return tuple(requirement for requirement in plan.requirements if not self.evidenced(requirement.id))
 
     def render(self, max_chars: int) -> str:
-        """Only include whole cited facts. Tiny budgets unable to report omissions are invalid."""
+        """Only include whole cited facts. A budget too small to report its omissions is invalid."""
         if max_chars < 0:
             raise ValueError("max_chars must be nonnegative")
         lines = [

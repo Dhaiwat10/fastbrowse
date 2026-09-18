@@ -26,41 +26,23 @@ from fastbrowse.jev import JEV_MODEL, JevClient
 from fastbrowse.llm import LLMClient
 from fastbrowse.models import LLMPurpose, LocalChrome
 
-# The default is the model the live suite passes on, not the fastest one. `evals.latency` timed the
-# candidates on the two request shapes that dominate a run and gemini-3.5-flash-lite won both by a
-# wide margin (plan 1.6s against 5.9s, read 0.6s against 1.7s), which on the local fixtures was free:
-# 12/12 at 2.9x the speed. Live sites disagreed. Flash-lite scored 8/12, and a run that answers None
-# is not a fast run. Three configurations were measured at 12 runs each and none of them held:
-# fast everywhere 8/12, a stronger planner 7/12, a stronger reader 9/12. Twelve runs cannot say which
-# purpose is responsible, so the default does not guess. Anyone who wants that trade can take it with
-# FASTBROWSE_LLM_MODEL=google/gemini-3.5-flash-lite, which the README documents alongside its cost.
+# The default is the model the live suite passes on. gemini-3.5-flash-lite is two to three times faster
+# a call but scored 8/12 live against 12/12, so it serves only the purposes whose output is checked
+# downstream. FASTBROWSE_LLM_MODEL overrides every purpose (docs/evals.md has the measurements).
 DEFAULT_LLM = "google/gemini-3.8-flash"
-
-# FIELD_TEXT is the exception, because it is the one purpose that mints nothing a conclusion rests on:
-# it turns "the password" or "Zurich" into the string to type, and a wrong string fails visibly as an
-# action rather than quietly as evidence. Browser Use's jev-ultrafast leans on that same asymmetry,
-# using a small model for its only LLM call, which is this one.
 FIELD_TEXT_LLM = "google/gemini-3.5-flash-lite"
 
-# SHORTCUT shares that asymmetry: its only output is an address code confines to the start origin, and a
-# wrong one costs a page load and a BACK, not a conclusion. It runs while the start page loads, so its
-# latency is hidden only while it stays under a page load.
-#
-# PLAN joined them once it was written from the task alone and asked for outcomes only. Flash-lite then
-# wrote the same requirements as the default on the six live tasks and on compound probes ("find the price
-# and email it to Alice" keeps the email), in 0.7s against 1.5 to 8.5s, and went 12/12 live. A lookup waits
-# on the plan before its first read, so that spread was wall time. A dropped requirement is still caught
-# downstream: the done check and VERIFY judge the task text itself, not the plan.
+# Each of these fails visibly rather than into the answer: field text is typed and seen to work or not, a
+# shortcut is an address confined to the start origin, and the done check and VERIFY judge the task text
+# itself, so a requirement the plan drops is still caught.
 DEFAULT_MODELS = dict.fromkeys(LLMPurpose, DEFAULT_LLM) | {
     LLMPurpose.FIELD_TEXT: FIELD_TEXT_LLM,
     LLMPurpose.SHORTCUT: FIELD_TEXT_LLM,
     LLMPurpose.PLAN: FIELD_TEXT_LLM,
 }
 
-# gemini-3.8-flash reasons before every answer unless told otherwise, and cannot be told not to: it
-# rejects reasoning disabled outright. It can be told to reason less. Measured on the plan and read
-# request shapes, the default spent 150 to 275 hidden tokens planning, and `low` took plan from 4.6s to
-# 3.2s and read from 2.4s to 2.1s on the same model. FASTBROWSE_LLM_REASONING overrides it.
+# gemini-3.8-flash rejects disabled reasoning but accepts less of it: `low` took plan 4.6s to 3.2s and
+# read 2.4s to 2.1s. FASTBROWSE_LLM_REASONING overrides it.
 DEFAULT_REASONING = ReasoningEffort.LOW
 
 

@@ -21,8 +21,8 @@ Jev chooses each action, an LLM plans and reads, and code owns verification, saf
 
 Most browser agents generate each action from a screenshot. fastbrowse indexes the page into
 candidates and has [Jev](https://typesafe.ai), a choice model, **pick one**, so it cannot click
-something that was never on the page. An answer only counts if every fact in it is quoted verbatim
-from a stored capture of the page.
+something that was never on the page. Every claim in an answer cites a quote stored verbatim from
+the page, and Jev checks each claim against its quote.
 
 Same six live tasks, two passes each, against hosted Browser Use measured the same day
 ([method](docs/evals.md)):
@@ -34,15 +34,15 @@ Same six live tasks, two passes each, against hosted Browser Use measured the sa
 | hosted Browser Use | 11/12 | 11/12 | 14.7s | 25.8s | $0.3767 |
 
 **Speed.** This build more than halved the median, 27.5s to 12.9s, and now beats hosted Browser Use
-on median and mean at about a fiftieth of the cost. Best of two per task, fastbrowse against hosted:
+on median and mean at about a fiftieth of the cost. Best successful run per task, fastbrowse against hosted:
 pypi-version 9.5s against 18.1s, pypi-structured 11.8s against 15.7s, saucedemo-cart 20.0s against
 90.7s; hosted is still ahead by 1 to 2.6s on hn-top, github-license and wiki-godel. What did it: a
 direct address for the task proposed while the start page loads, a plan written from the task
 alone on a small model, settling on DOM quiet instead of every image and tracker, short facts picked
-by Jev, hedged requests against provider tails, and no recovery for steps that do not act
+by Jev, hedged requests against provider tails, and no low-confidence recovery for steps that do not act
 ([details](docs/evals.md#results)).
 
-Twelve runs is a smoke test, not a benchmark: single runs swing by several seconds, and one
+Twelve runs is a smoke test, not a benchmark: single runs swing by 4 to 5 seconds, and one
 wiki-godel run took 34s on a slow read. `passed` counts only `complete`; the hosted miss ended with
 "Task ended unexpectedly".
 
@@ -55,8 +55,8 @@ wiki-godel run took 34s on a slow read. `passed` counts only `complete`; the hos
 
 Jev never writes an action, it picks one of the candidates on the page, so it cannot click something
 that is not there. The LLM plans, reads and writes. Code owns the gates: irreversible actions stop
-without `--authorize`, secrets reach models by name only, and an answer counts only when every
-claim quotes the page. More in [docs/design.md](docs/design.md).
+without `--authorize`, secrets reach models by name only, and every claim in an answer cites a
+quote from the page. More in [docs/design.md](docs/design.md).
 
 ## How it compares
 
@@ -102,7 +102,7 @@ answer, and cost by component.
 | `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in |
 | `--authorize` | allow submit, pay, delete and send; without it the run stops at `needs_confirmation` first |
 | `--secret NAME=ENV_VAR` | let the agent type `$ENV_VAR` on the start origin; models only see `NAME` |
-| `--bitwarden ITEM` | let the agent type that vault login's `username` and `password`, only if the item is saved for the start site |
+| `--bitwarden ITEM` | let the agent type that vault login's `username` and `password`, only where the item's saved URIs and their match detection allow |
 | `--max-steps N`, `--max-dollars N` | bound the run |
 | `--downloads DIR` | keep downloaded files |
 | `--json` | full result instead of the answer |
@@ -218,9 +218,11 @@ else, such as a cache or a recorded fixture, can be passed as `run_task(jev=...)
 ## Evals and development
 
 ```sh
+uv sync --all-extras                                         # the hosted-arm SDK too, which pyright checks
 uv run python -m fastbrowse.evals.runner                     # local fixtures, under half a cent a task
 uv run --extra browser-use python -m fastbrowse.evals.live   # live head-to-head; --arms fast skips hosted
-uv run ruff format . && uv run ruff check . && uv run pyright && uv run pytest && uv run python scripts/no_slop.py
+uv run ruff format . && uv run ruff check . && uv run pyright && uv run pytest
+uv run python scripts/no_slop.py && uv run vale sync && uv run vale README.md docs src scripts tests
 ```
 
 Grades come only from things the agent cannot write: requests the fixture server recorded, truth

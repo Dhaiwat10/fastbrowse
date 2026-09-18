@@ -7,7 +7,7 @@ from fastbrowse.models import Frozen
 
 class Thresholds(Frozen):
     recover_below: float = 0.55
-    """Operation/target confidence under this goes to a corrective re-ask, then LLM recovery."""
+    """Operation/target confidence under this waits for the plan, then goes to LLM recovery if the step acts."""
     sensitive_act_from: float = 0.90
     """Minimum confidence for an action code has classified as irreversible (authorization also required)."""
     login_required_above: float = 0.70
