@@ -12,7 +12,7 @@ from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.llm import Generation
 from fastbrowse.memory import Notes
 from fastbrowse.models import Authorization, Decider, Limits, LLMPurpose, Operation, Status, StepOutcome, StepResult
-from fastbrowse.page import ActResult, Control, Page
+from fastbrowse.page import ActResult, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.policy import HistoryEntry, decide
 from fastbrowse.telemetry import Ledger
@@ -114,6 +114,7 @@ async def test_recovery_hint_is_consumed_only_when_action_progresses(outcome: St
     decision = await decide(jev, obs, context(), Config())
     agent = Agent(page, jev, ScriptedLLM([]))
     await agent._step(state, obs, decision)
+    agent._settle(state, observation((target.model_copy(update={"value": "Bristol"}),)))
     assert state.hint == (None if outcome is StepOutcome.EXECUTED else "Open the origin picker")
 
 
@@ -299,3 +300,75 @@ async def test_recovery_can_direct_a_read_with_no_control_to_name() -> None:
     unsure = await decide(jev, obs, context(), Config())
     followed = _follow_recovery(state, obs, unsure, uncertain=True)
     assert followed is not None and followed.operation is Operation.READ and followed.target is None
+
+
+def _button(label: str) -> Control:
+    return Control(id=label.lower(), frame_id=None, role="button", label=label, operations=frozenset({Operation.CLICK}))
+
+
+async def _click(agent: Agent, state: _RunState, on: Observation, label: str) -> None:
+    decision = await decide(ScriptedJev({"operation": "click", "click_target": label.lower()}), on, context(), Config())
+    await agent._step(state, on, decision)
+
+
+async def test_a_change_that_leads_back_to_an_earlier_state_is_not_progress() -> None:
+    # A date picker (open), the form it closes to, and the picker opened again because the form will not submit.
+    picker = observation((_button("Done"), _button("Friday")))
+    form = observation((_button("Search"),))
+    reopened = observation((_button("Done"), _button("Friday"), _button("Return")))
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
+
+    assert agent._settle(state, picker) is None
+    await _click(agent, state, picker, "Done")
+    assert agent._settle(state, form) is None
+    await _click(agent, state, form, "Search")
+    assert agent._settle(state, reopened) is None
+    assert state.unchanged == 0
+    await _click(agent, state, reopened, "Done")
+    note = (
+        "back to a page state first reached 2 actions ago; "
+        "the actions since (click Search, click Done) undid each other"
+    )
+    assert agent._settle(state, form) == note
+    assert state.history[-1].effect == note
+
+
+async def test_a_change_to_text_alone_still_counts_as_progress() -> None:
+    before = observation((_button("Show more"),))
+    after = before.model_copy(update={"viewport_text": "The rest of the article"})
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    state.unchanged = 2
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
+    agent._settle(state, before)
+    await _click(agent, state, before, "Show more")
+    assert agent._settle(state, after) is None
+    assert state.unchanged == 0
+
+
+async def test_going_back_after_reading_a_page_is_progress() -> None:
+    results, package = observation((_button("httpx"),)), observation((_button("Homepage"),))
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
+    agent._settle(state, results)
+    await _click(agent, state, results, "httpx")
+    agent._settle(state, package)
+    state.history.append(
+        HistoryEntry(operation=Operation.READ, target=None, outcome=StepOutcome.EXECUTED, page_changed=False)
+    )
+    state.history.append(
+        HistoryEntry(operation=Operation.BACK, target=None, outcome=StepOutcome.EXECUTED, page_changed=True)
+    )
+    state.left = "package"
+    assert agent._settle(state, results) is None
+    assert state.unchanged == 0
+    assert state.history[-1].effect is None
