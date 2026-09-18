@@ -263,10 +263,12 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         error = error or f"{type(exc).__name__}: {exc}"
         seconds = time.monotonic() - started
-    final_url = None
+    final_url, controls = None, None
     if agent is not None:
         state = agent.state
         final_url = state["page"]["url"]
+        # The controls it last observed, as the fast arm's harness observes them: for graders that read the form.
+        controls = [[a["label"], a.get("value")] for a in state["page"].get("actions", [])]
         agent.close()
     history = state["history"] if state else []
     return {
@@ -274,6 +276,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         "error": error,
         "seconds": round(seconds, 2),
         "final_url": final_url,
+        "controls": controls,
         "steps": len(state["decisions"]) if state else 0,
         "actions": len(history),
         "trace": [f"{h['kind']} {h['action']} -> {'changed' if h['page_changed'] else 'unchanged'}" for h in history],
