@@ -74,6 +74,33 @@ _HIT_TEST_JS = (
     "return [x, y]; })"
 )
 
+# A deadline, not a wait: a field with no editor to open settles on the first frame.
+_HANDOFF_SECONDS = 0.6
+_HANDOFF_QUIET_SECONDS = 0.1
+
+# A field that opens an editor over itself when clicked (a search overlay, an airport picker) moves focus to
+# that editor; typing into the original, now hidden behind it, reaches no suggestion list. A person types
+# where focus went, so the fill follows focus to an editable field in the same document that covers the
+# spot ours occupied, and otherwise keeps the id it was given. The editor can take focus a frame or a timer
+# after the click, so the check waits for the click's DOM changes to go quiet, briefly, first.
+_HANDED_FOCUS_JS = (
+    "(id => new Promise(resolve => { const r = window.__fastbrowse, e = r?.nodes.get(id); "
+    "if (!e?.isConnected) { resolve(id); return; } "
+    "const decide = () => { const a = e.getRootNode().activeElement; "
+    "if (!e.isConnected || !a || a === e || e.contains(a)) return id; "
+    "const text = a.isContentEditable || a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && "
+    "!['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']"
+    ".includes(a.type)); if (!text || a.disabled || a.readOnly) return id; "
+    "const was = e.getBoundingClientRect(), now = a.getBoundingClientRect(); "
+    "const x = was.x + was.width / 2, y = was.y + was.height / 2; "
+    "if (x < now.left || x > now.right || y < now.top || y > now.bottom) return id; "
+    "if (!r.ids.has(a)) r.ids.set(a, r.next++); const n = r.ids.get(a); r.nodes.set(n, a); return n; }; "
+    f"const deadline = performance.now() + {_HANDOFF_SECONDS * 1000}; "
+    "const poll = () => { if (performance.now() - (r.lastMutation ?? 0) >= "
+    f"{_HANDOFF_QUIET_SECONDS * 1000} || performance.now() >= deadline) resolve(decide()); "
+    "else setTimeout(poll, 20); }; "
+    "if (e.ownerDocument.hidden) poll(); else requestAnimationFrame(() => setTimeout(poll, 0)); }))"
+)
 type _Point = tuple[float, float] | Literal["covered"] | None
 
 _BLOCK_KIND = {
@@ -443,6 +470,8 @@ class CdpPage(Page):
         # Ported from browser-use/jev-ultrafast (MIT), browser.py: fill clicks before typing.
         # Focus alone bypasses pointer handlers that open autocomplete and calendar pickers.
         await self._click_point(session_id, point)
+        if not secret:
+            local_id = int(await self._evaluate(session_id, f"({_HANDED_FOCUS_JS})({local_id})"))
         if not await self._focus(session_id, local_id, prepare_fill=True, secret=secret):
             return StepOutcome.FAILED, "target did not receive keyboard focus"
         # A secret must be checked and inserted in one renderer task: CDP insertText would leave a

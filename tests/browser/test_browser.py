@@ -485,3 +485,13 @@ async def test_a_visible_option_is_clicked_without_scrolling_its_menu_shut(page:
     assert result.outcome == StepOutcome.EXECUTED
     after = await page.observe()
     assert any(c.role == "button" and c.label == "One way" for c in after.controls)
+
+
+async def test_a_fill_follows_focus_to_the_editor_its_click_opened(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/overlay.html")
+    obs = await page.observe()
+    field = next(c for c in obs.controls if c.label == "Where from?")
+    result = await page.act(Action(operation=Operation.FILL, target_id=field.id, text="Lond"), obs)
+    assert result.outcome == StepOutcome.EXECUTED
+    after = await page.observe()
+    assert [c.label for c in after.controls if c.role == "option"] == ["London", "Londonderry"]
