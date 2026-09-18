@@ -2,7 +2,6 @@
 
 from pydantic import Field
 
-from fastbrowse.jev import JEV_MODEL
 from fastbrowse.models import Frozen
 
 
@@ -44,7 +43,6 @@ class StallRules(Frozen):
 
 
 class Config(Frozen):
-    jev_model: str = JEV_MODEL
     thresholds: Thresholds = Thresholds()
     observation: ObservationLimits = ObservationLimits()
     tokens: TokenBudget = TokenBudget()

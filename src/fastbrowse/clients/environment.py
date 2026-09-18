@@ -1,12 +1,16 @@
 """Settings from the environment and `.env`, and the default Jev and LLM clients built from them.
 
-Jev: TYPESAFE_API_KEY (direct) or AI_GATEWAY_API_KEY (Vercel AI Gateway). LLM: OPENROUTER_API_KEY.
+Jev: TYPESAFE_API_KEY (direct) or AI_GATEWAY_API_KEY (Vercel AI Gateway); with both set, direct wins
+unless FASTBROWSE_JEV_SOURCE picks one (typesafe or gateway). FASTBROWSE_JEV_BASE_URL points either at a
+proxy or another host serving the same API, and FASTBROWSE_JEV_MODEL pins a direct-API model version.
+LLM: OPENROUTER_API_KEY.
 Cloud browser: BROWSER_USE_API_KEY. FASTBROWSE_LLM_MODEL overrides every purpose at once, and
 FASTBROWSE_LLM_MODEL_<PURPOSE> (PLAN, READ, FIELD_TEXT, RECOVER, COMPOSE, VERIFY, SHORTCUT) overrides one.
 FASTBROWSE_LLM_REASONING sets the reasoning effort: low (default), medium or high. FASTBROWSE_CHROME
 names the Chrome binary. `.env.example` lists them all. A real environment variable beats `.env`.
 """
 
+from enum import StrEnum
 from typing import assert_never
 
 import httpx
@@ -14,9 +18,9 @@ from pydantic import AliasChoices, Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM, ReasoningEffort
-from fastbrowse.clients.typesafe import TypeSafeJevClient
-from fastbrowse.clients.vercel import VercelGatewayJevClient
-from fastbrowse.jev import JevClient
+from fastbrowse.clients.typesafe import TYPESAFE_URL, TypeSafeJevClient
+from fastbrowse.clients.vercel import GATEWAY_URL, VercelGatewayJevClient
+from fastbrowse.jev import JEV_MODEL, JevClient
 from fastbrowse.llm import LLMClient
 from fastbrowse.models import LLMPurpose
 
@@ -58,6 +62,11 @@ DEFAULT_MODELS = dict.fromkeys(LLMPurpose, DEFAULT_LLM) | {
 DEFAULT_REASONING = ReasoningEffort.LOW
 
 
+class JevSource(StrEnum):
+    TYPESAFE = "typesafe"
+    GATEWAY = "gateway"
+
+
 class ConfigurationError(RuntimeError):
     """A missing key or an invalid setting in the environment, reported without a traceback."""
 
@@ -73,6 +82,9 @@ class Settings(BaseSettings):
     ai_gateway_api_key: SecretStr | None = _key("AI_GATEWAY_API_KEY")
     openrouter_api_key: SecretStr | None = _key("OPENROUTER_API_KEY")
     browser_use_api_key: SecretStr | None = _key("BROWSER_USE_API_KEY")
+    jev_source: JevSource | None = None
+    jev_base_url: str | None = None
+    jev_model: str = JEV_MODEL
     llm_model: str | None = None
     llm_model_plan: str | None = None
     llm_model_read: str | None = None
@@ -110,11 +122,25 @@ class Settings(BaseSettings):
                 assert_never(purpose)
 
     def jev(self, http: httpx.AsyncClient) -> JevClient:
-        if self.typesafe_api_key:
-            return TypeSafeJevClient(self.typesafe_api_key.get_secret_value(), http=http)
-        if self.ai_gateway_api_key:
-            return VercelGatewayJevClient(self.ai_gateway_api_key.get_secret_value(), http=http)
-        raise ConfigurationError("set TYPESAFE_API_KEY or AI_GATEWAY_API_KEY for Jev")
+        source = self.jev_source or (JevSource.TYPESAFE if self.typesafe_api_key else JevSource.GATEWAY)
+        match source:
+            case JevSource.TYPESAFE:
+                if not self.typesafe_api_key:
+                    raise ConfigurationError("set TYPESAFE_API_KEY for Jev, or AI_GATEWAY_API_KEY for the gateway")
+                return TypeSafeJevClient(
+                    self.typesafe_api_key.get_secret_value(),
+                    http=http,
+                    base_url=self.jev_base_url or TYPESAFE_URL,
+                    model=self.jev_model,
+                )
+            case JevSource.GATEWAY:
+                if not self.ai_gateway_api_key:
+                    raise ConfigurationError("set AI_GATEWAY_API_KEY for Jev, or TYPESAFE_API_KEY for the direct API")
+                return VercelGatewayJevClient(
+                    self.ai_gateway_api_key.get_secret_value(), http=http, base_url=self.jev_base_url or GATEWAY_URL
+                )
+            case _:
+                assert_never(source)
 
     def llm(self, http: httpx.AsyncClient) -> LLMClient:
         return OpenAICompatibleLLM(

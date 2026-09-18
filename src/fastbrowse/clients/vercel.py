@@ -33,17 +33,20 @@ from fastbrowse.clients.validation import (
 from fastbrowse.jev import Evaluation, Question
 from fastbrowse.models import CostBasis, CostComponent, CostLine
 
+GATEWAY_URL = "https://ai-gateway.vercel.sh"
+
 
 class VercelGatewayJevClient:
-    def __init__(self, api_key: str, *, http: httpx.AsyncClient) -> None:
+    def __init__(self, api_key: str, *, http: httpx.AsyncClient, base_url: str = GATEWAY_URL) -> None:
         self._api_key = api_key
         self._http = http
+        self._base_url = base_url.rstrip("/")
 
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
         started = monotonic()
         response = await post(
             self._http,
-            "https://ai-gateway.vercel.sh/v4/ai/evaluation-model",
+            f"{self._base_url}/v4/ai/evaluation-model",
             self._api_key,
             {"state": state, "questions": wire_questions(questions, gateway=True)},
             {

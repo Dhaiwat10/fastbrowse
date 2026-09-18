@@ -18,6 +18,8 @@ from fastbrowse.clients.validation import (
 )
 from fastbrowse.jev import JEV_MODEL, Evaluation, Question
 
+TYPESAFE_URL = "https://api.typesafe.ai"
+
 
 class TypeSafeJevClient:
     def __init__(
@@ -25,7 +27,7 @@ class TypeSafeJevClient:
         api_key: str,
         *,
         http: httpx.AsyncClient,
-        base_url: str = "https://api.typesafe.ai",
+        base_url: str = TYPESAFE_URL,
         model: str = JEV_MODEL,
     ) -> None:
         self._api_key = api_key

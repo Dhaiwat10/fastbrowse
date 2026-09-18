@@ -175,6 +175,11 @@ complete {'package': 'httpx', 'version': '0.28.1'} $0.0114
 `run_task` builds the browser and clients, runs the agent, and closes the browser on every path.
 The result has `status`, `answer`, `data`, `evidence`, `final_url` and an itemized `cost`.
 
+Jev comes from Typesafe directly or through the Vercel AI Gateway, whichever key is set; with both,
+`FASTBROWSE_JEV_SOURCE` picks one, and `FASTBROWSE_JEV_BASE_URL` sends it through a proxy. Anything
+else, such as a cache or a recorded fixture, can be passed as `run_task(jev=...)`: an object with one
+`evaluate(state, questions)` method (the `JevClient` protocol in `jev.py`). The LLM works the same way.
+
 ## Safety model
 
 - **Irreversible actions.** Before any button or submit, Jev is asked whether it commits something
