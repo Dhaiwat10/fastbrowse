@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from fastbrowse.agent import Agent, _RunState, _Stop, _unread  # pyright: ignore[reportPrivateUsage]
+# pyright: reportPrivateUsage=false
+from fastbrowse.agent import Agent, _follow_recovery, _RunState, _Stop, _unread
 from fastbrowse.config import Config
 from fastbrowse.llm import Generation
 from fastbrowse.memory import Notes
@@ -61,7 +62,7 @@ async def test_field_writer_receives_popup_context_and_other_field_values() -> N
     llm = ScriptedLLM([{"missing": False, "text": "Bristol"}])
     agent = Agent(Mock(spec=Page), ScriptedJev({}), llm)
 
-    assert await agent._generate_text(state, obs, target) == "Bristol"  # pyright: ignore[reportPrivateUsage]
+    assert await agent._generate_text(state, obs, target) == "Bristol"
     purpose, messages = llm.calls[0]
     prompt = json.loads(messages[1].content)
     assert purpose is LLMPurpose.FIELD_TEXT
@@ -77,7 +78,7 @@ async def test_missing_personal_information_still_stops_without_filling() -> Non
     page = Mock(spec=Page)
     agent = Agent(page, ScriptedJev({}, noul=0.1), ScriptedLLM([{"missing": True, "text": ""}]))
     with pytest.raises(_Stop) as stopped:
-        await agent._generate_text(await run_state(), observation((target,)), target)  # pyright: ignore[reportPrivateUsage]
+        await agent._generate_text(await run_state(), observation((target,)), target)
     assert stopped.value.status is Status.NEEDS_INPUT
     page.act.assert_not_called()
 
@@ -87,7 +88,7 @@ async def test_a_value_the_task_states_is_asked_for_again_rather_than_ending_the
     llm = ScriptedLLM([{"missing": True, "text": ""}, {"missing": False, "text": "Lovelace"}])
     agent = Agent(Mock(spec=Page), ScriptedJev({}, noul=0.9), llm)
 
-    assert await agent._generate_text(await run_state(), observation((target,)), target) == "Lovelace"  # pyright: ignore[reportPrivateUsage]
+    assert await agent._generate_text(await run_state(), observation((target,)), target) == "Lovelace"
     assert "never invent one" in llm.calls[1][1][-1].content
 
 
@@ -96,7 +97,7 @@ async def test_a_second_missing_verdict_ends_the_run() -> None:
     llm = ScriptedLLM([{"missing": True, "text": ""}, {"missing": True, "text": ""}])
     agent = Agent(Mock(spec=Page), ScriptedJev({}, noul=0.9), llm)
     with pytest.raises(_Stop) as stopped:
-        await agent._generate_text(await run_state(), observation((target,)), target)  # pyright: ignore[reportPrivateUsage]
+        await agent._generate_text(await run_state(), observation((target,)), target)
     assert stopped.value.status is Status.NEEDS_INPUT
 
 
@@ -112,7 +113,7 @@ async def test_recovery_hint_is_consumed_only_when_action_progresses(outcome: St
     jev = ScriptedJev({"operation": "click", "click_target": target.id})
     decision = await decide(jev, obs, context(), Config())
     agent = Agent(page, jev, ScriptedLLM([]))
-    await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
+    await agent._step(state, obs, decision)
     assert state.hint == (None if outcome is StepOutcome.EXECUTED else "Open the origin picker")
 
 
@@ -136,7 +137,7 @@ async def test_step_log_names_which_twin_was_clicked() -> None:
     state = await run_state()
     state.authorization = Authorization(irreversible_actions=True)
     agent = Agent(page, jev, ScriptedLLM([]))
-    await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
+    await agent._step(state, obs, decision)
     assert state.steps[0].target == "Add to cart (Sauce Labs Bike Light)"
     assert state.history[0].target == "Add to cart (Sauce Labs Bike Light)"
 
@@ -152,10 +153,10 @@ async def test_going_round_between_pages_stops_counting_as_progress() -> None:
     state.authorization = Authorization(irreversible_actions=True)
     agent = Agent(page, jev, ScriptedLLM([]))
     for _ in range(2):
-        await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
+        await agent._step(state, obs, decision)
     assert state.unchanged == 0
     # The page changes every time, but the same click from the same page a third time is a cycle.
-    await agent._step(state, obs, decision)  # pyright: ignore[reportPrivateUsage]
+    await agent._step(state, obs, decision)
     assert state.unchanged == 1
 
 
@@ -188,7 +189,7 @@ async def test_an_option_click_that_changes_no_value_is_not_progress() -> None:
     state = await run_state()
     state.authorization = Authorization(irreversible_actions=True)
     agent = Agent(page, jev, ScriptedLLM([]))
-    await agent._step(state, before, decision)  # pyright: ignore[reportPrivateUsage]
+    await agent._step(state, before, decision)
     assert state.unchanged == 1
     assert state.history[-1].effect == "removed 1 control: One way"
     assert (state.steps[-1].note or "").startswith("no effect")
@@ -203,6 +204,37 @@ async def test_the_next_observation_records_what_an_action_did() -> None:
             operation=Operation.FILL, target="Search elsewhere", outcome=StepOutcome.EXECUTED, page_changed=True
         )
     )
-    Agent._note_effect(state, observation((field_before.model_copy(update={"value": "York"}),)))  # pyright: ignore[reportPrivateUsage]
+    Agent._note_effect(state, observation((field_before.model_copy(update={"value": "York"}),)))
     assert state.history[-1].effect == "changed Search elsewhere value: Bath -> York"
     assert state.acted_from is None
+
+
+async def test_jev_still_unsure_after_recovery_takes_the_action_recovery_named() -> None:
+    buttons = tuple(
+        Control(id=key, frame_id=None, role="button", label=label, operations=frozenset({Operation.CLICK}))
+        for key, label in (("done", "Done"), ("search", "Search"))
+    )
+    obs = observation(buttons)
+    page = Mock(spec=Page)
+    page.screenshot = AsyncMock(return_value=b"png")
+    recovery = {"diagnosis": "not submitted", "next_subgoal": "Click Search", "give_up": False}
+    llm = ScriptedLLM([{**recovery, "control": 1, "operation": "click"}])
+    jev = ScriptedJev({"operation": "click", "click_target": "done"})
+    state = await run_state()
+    await Agent(page, jev, llm)._recover(state, obs, "uncertain next step (0.49)")
+    unsure = await decide(jev, obs, context(), Config())
+    followed = _follow_recovery(state, obs, unsure, uncertain=True)
+    assert followed is not None and followed.target == buttons[1]
+    # Used once: the next unsure step is Jev's to recover from again.
+    assert _follow_recovery(state, obs, unsure, uncertain=True) is None
+
+
+async def test_a_named_action_is_not_taken_over_a_confident_choice_or_on_a_control_that_went() -> None:
+    button = Control(id="search", frame_id=None, role="button", label="Search", operations=frozenset({Operation.CLICK}))
+    jev = ScriptedJev({"operation": "click", "click_target": "search"})
+    decision = await decide(jev, observation((button,)), context(), Config())
+    state = await run_state()
+    state.directed = (Operation.CLICK, "search")
+    assert _follow_recovery(state, observation((button,)), decision, uncertain=False) is None
+    state.directed = (Operation.CLICK, "search")
+    assert _follow_recovery(state, observation(()), decision, uncertain=True) is None
