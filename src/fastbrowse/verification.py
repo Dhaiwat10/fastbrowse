@@ -116,9 +116,13 @@ async def check_done(
     complete = _probability(evaluation.answers, "complete")
     # Jev reliably confirms a visible result but is too strict to reject one on its own, so apart from
     # information nobody has read, doubt goes to the verifier rather than straight back to work.
+    # A lookup is done once every fact it needs is recorded with a quote from the page: nothing on screen
+    # can add to that, and the answer built from the facts is checked claim by claim anyway. Sending it to
+    # the verifier because Jev's strict "visibly done" doubted a lookup cost a multimodal call for nothing.
+    looked_up = bool(plan.requirements) and all(r.kind is RequirementKind.INFORMATION for r in plan.requirements)
     if any(requirement_id in unevidenced for requirement_id in unmet):
         verdict = DoneVerdict.REJECT
-    elif complete >= thresholds.done_accept_from and not unmet:
+    elif not unmet and (looked_up or complete >= thresholds.done_accept_from):
         verdict = DoneVerdict.ACCEPT
     else:
         verdict = DoneVerdict.VERIFY
