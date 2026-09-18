@@ -395,6 +395,8 @@ class Agent:
             action = await self._action(state, observation, decision)
             await self._read_before_leaving(state, observation, decision)
             act = await self._page.act(action, self._raw_observation or observation)
+            if act.outcome is StepOutcome.STALE and decision.target is not None:
+                act = await self._act_on_twin(action, observation, decision.target) or act
             if act.outcome is StepOutcome.EXECUTED and action.text is not None:
                 typed = "<secret>" if action.secret else self._redactor.mask(action.text)
             changed = act.page_changed
@@ -453,6 +455,25 @@ class Agent:
             state.unchanged += 1
         if state.unchanged >= self._config.stall.unchanged_actions:
             await self._recover(state, observation, f"{state.unchanged} actions without visible progress")
+
+    async def _act_on_twin(self, action: Action, observation: Observation, target: Control) -> ActResult | None:
+        """Act on the one control now standing where `target` stood, if the page redrew it since it was observed.
+
+        A date picker redraws its days and its Done button as it animates, so a click chosen a moment earlier finds
+        its element gone, and deciding again costs a full model call to pick the same control. A control that is
+        the only one matching the target in frame, role, label, context and link, on the same address, is taken to
+        be that control.
+        """
+        fresh = await self._observe()
+        if fresh.url != observation.url:
+            return None
+        twins = [control for control in fresh.controls if _identity(control) == _identity(target)]
+        if len(twins) != 1:
+            return None
+        trace("retarget", target=self._redactor.redact(target.label))
+        return await self._page.act(
+            action.model_copy(update={"target_id": twins[0].id}), self._raw_observation or fresh
+        )
 
     def _settle(self, state: _RunState, observation: Observation) -> str | None:
         """Judge the last page-changing action by the state it led to; the reason to recover, if the run is stuck.
@@ -1275,6 +1296,10 @@ async def _discard[T](task: asyncio.Task[T]) -> None:
     """
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+
+
+def _identity(control: Control) -> tuple[str | None, str, str, str | None, str | None]:
+    return control.frame_id, control.role, control.label, control.context, control.href
 
 
 def _require(target: Control | None) -> Control:
