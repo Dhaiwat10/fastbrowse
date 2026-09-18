@@ -103,7 +103,9 @@ def response_error(response: httpx.Response, detail: str) -> JevError:
     return JevError(f"{detail[:300]}; HTTP {response.status_code}: {body_excerpt(response)}")
 
 
-RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0)
+RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0, 8.0, 8.0)
+"""About 22s in all. With 6s, a Jev 503 ended 5 of 311 eval runs, and each time the next run, started 0 to 15s
+later, got through: the outages are brief, and a run lost to one costs far more than the wait."""
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
 _MAX_BACKOFF_SECONDS = 10.0
 JEV_ATTEMPT_SECONDS = 15.0
