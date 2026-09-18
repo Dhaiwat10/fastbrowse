@@ -24,7 +24,18 @@ from cdp_use.cdp.page.commands import CaptureScreenshotParameters
 from fastbrowse.browser.session import BrowserSession
 from fastbrowse.config import Config
 from fastbrowse.models import Artifact, Attachment, Operation, StepOutcome
-from fastbrowse.page import Action, ActResult, Block, BlockKind, Capture, Control, Dialog, Observation, Page
+from fastbrowse.page import (
+    Action,
+    ActResult,
+    Block,
+    BlockKind,
+    BrowserError,
+    Capture,
+    Control,
+    Dialog,
+    Observation,
+    Page,
+)
 
 _SNAPSHOT_JS = (Path(__file__).with_name("snapshot.js")).read_text()
 _CAPTURE_JS = (Path(__file__).with_name("capture.js")).read_text()
@@ -84,7 +95,6 @@ class CdpPage(Page):
         self._session = session
         self._config = config
         self._last: _ObservedState | None = None
-        self._blocked_inputs: set[asyncio.Future[object]] = set()
 
     @property
     def artifacts(self) -> tuple[Artifact, ...]:
@@ -101,10 +111,8 @@ class CdpPage(Page):
         main = frames.get(_MAIN)
         controls: list[Control] = []
         control_state: dict[str, tuple[str, str, int, list[object] | None]] = {}
-        omitted = 0
         for frame_key, frame in frames.items():
             raw = frame.raw
-            omitted += int(raw.get("omitted_controls", 0))
             for c in raw["controls"]:
                 local_id = int(c["id"])
                 control_id = f"{frame_key}:{local_id}"
@@ -116,7 +124,7 @@ class CdpPage(Page):
         limits = self._config.observation
         onscreen = [c for c in controls if not c.offscreen]
         offscreen = [c for c in controls if c.offscreen][: limits.max_offscreen_controls]
-        omitted += len(controls) - len(onscreen) - len(offscreen)
+        omitted = len(controls) - len(onscreen) - len(offscreen)
         kept = (onscreen + offscreen)[: limits.max_controls]
         omitted += max(0, len(onscreen) + len(offscreen) - limits.max_controls)
         control_state = {c.id: control_state[c.id] for c in kept}
@@ -170,14 +178,22 @@ class CdpPage(Page):
         async def read(frame_key: str, session_id: str) -> _FrameObservation | None:
             try:
                 raw = await self._evaluate(session_id, expression)
-            except RuntimeError:
+            except BrowserError:
+                if frame_key == _MAIN:
+                    raise
                 return None
             if raw is None:
                 return None
             return _FrameObservation(None if frame_key == _MAIN else frame_key, session_id, frame_key, raw)
 
         # Preserve source order regardless of completion order so capture offsets and hashes stay stable.
-        frames = await asyncio.gather(*(read(key, sid) for key, sid in sources))
+        tasks = [asyncio.create_task(read(key, sid)) for key, sid in sources]
+        try:
+            frames = await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         for (key, _sid), frame in zip(sources, frames, strict=True):
             if frame is not None:
                 result[key] = frame
@@ -278,7 +294,7 @@ class CdpPage(Page):
             case Operation.ESCAPE:
                 return await self._key(None, "Escape")
             case Operation.SCROLL:
-                await self._scroll(action.scroll_down)
+                await self._scroll()
                 return StepOutcome.EXECUTED, None
             case Operation.BACK:
                 return await self._back()
@@ -335,7 +351,7 @@ class CdpPage(Page):
         # navigation/focus race between checking the origin and dispatching the secret to the page.
         script = (
             "((id, text, origin) => { const e = window.__fastbrowse?.nodes.get(id); "
-            "if (!e?.isConnected || (origin !== null && e.ownerDocument.defaultView.origin !== origin)) return false; "
+            "if (!e?.isConnected || (origin !== null && e.ownerDocument.location.origin !== origin)) return false; "
             "const doc = e.ownerDocument; if (e.getRootNode().activeElement !== e) return false; "
             "if (typeof e.select === 'function') e.select(); else { const range = doc.createRange(); "
             "range.selectNodeContents(e); const selection = doc.getSelection(); selection.removeAllRanges(); "
@@ -459,10 +475,10 @@ class CdpPage(Page):
         )
         return StepOutcome.EXECUTED, None
 
-    async def _scroll(self, down: bool) -> None:
+    async def _scroll(self) -> None:
         session_id = self._session.active_session_id
         await self._session.client.send.Input.dispatchMouseEvent(
-            params={"type": "mouseWheel", "x": 550, "y": 650, "deltaX": 0, "deltaY": 560 if down else -560},
+            params={"type": "mouseWheel", "x": 550, "y": 650, "deltaX": 0, "deltaY": 560},
             session_id=session_id,
         )
 
@@ -528,19 +544,13 @@ class CdpPage(Page):
         dialog = asyncio.create_task(self._session.wait_for_dialog())
         try:
             await asyncio.wait({task, dialog}, return_when=asyncio.FIRST_COMPLETED)
-            if not task.done():
-                self._blocked_inputs.add(task)
-                task.add_done_callback(self._input_finished)
-                return
-            task.result()
+            if task.done():
+                task.result()
         finally:
+            # Cancelling the response wait does not undo an event already delivered to a dialog handler.
+            task.cancel()
             dialog.cancel()
-            await asyncio.gather(dialog, return_exceptions=True)
-
-    def _input_finished(self, task: asyncio.Future[object]) -> None:
-        self._blocked_inputs.discard(task)
-        if not task.cancelled():
-            task.exception()
+            await asyncio.gather(task, dialog, return_exceptions=True)
 
     async def screenshot(self) -> bytes:
         """Capture the active tab, activating it only if a background tab produces no frame to capture.
@@ -552,10 +562,14 @@ class CdpPage(Page):
         client, session_id = self._session.client, self._session.active_session_id
         params: CaptureScreenshotParameters = {"format": "jpeg", "quality": 70}
         capture = asyncio.ensure_future(client.send.Page.captureScreenshot(params=params, session_id=session_id))
-        done, _ = await asyncio.wait({capture}, timeout=_SCREENSHOT_WAIT_SECONDS)
-        if not done:
-            await client.send.Target.activateTarget(params={"targetId": self._session.active_target_id})
-        return base64.b64decode((await capture)["data"])
+        try:
+            done, _ = await asyncio.wait({capture}, timeout=_SCREENSHOT_WAIT_SECONDS)
+            if not done:
+                await client.send.Target.activateTarget(params={"targetId": self._session.active_target_id})
+            return base64.b64decode((await capture)["data"])
+        finally:
+            capture.cancel()
+            await asyncio.gather(capture, return_exceptions=True)
 
     async def origin(self) -> str:
         raw = await self._evaluate(self._session.active_session_id, "location.origin")
@@ -569,15 +583,15 @@ class CdpPage(Page):
         """
         session_id = self._session.active_session_id
         result = await self._session.client.send.Page.navigate(params={"url": url}, session_id=session_id)
-        if error := result.get("errorText"):
-            raise RuntimeError(f"navigation to {url} failed: {error}")
+        if result.get("errorText"):
+            raise BrowserError("Page.navigate failed (NavigationError)")
         deadline = asyncio.get_event_loop().time() + load_timeout_seconds
         while asyncio.get_event_loop().time() < deadline:
             state = await self._evaluate(session_id, "document.readyState")
             if state in {"interactive", "complete"}:
                 return
             await asyncio.sleep(0.05)
-        raise TimeoutError(f"navigation to {url} did not complete within {load_timeout_seconds}s")
+        raise BrowserError("Page.navigate failed (TimeoutError)")
 
     # -- shared helpers -------------------------------------------------------------------------------
 
@@ -666,7 +680,14 @@ class CdpPage(Page):
             return await self._fingerprint(), None
         session_id, _frame, local_id, _guard = target
         if session_id != self._session.active_session_id:
-            fingerprint, guard = await asyncio.gather(self._fingerprint(), self._live_guard(session_id, local_id))
+            fingerprint_task = asyncio.create_task(self._fingerprint())
+            guard_task = asyncio.create_task(self._live_guard(session_id, local_id))
+            try:
+                fingerprint, guard = await asyncio.gather(fingerprint_task, guard_task)
+            finally:
+                fingerprint_task.cancel()
+                guard_task.cancel()
+                await asyncio.gather(fingerprint_task, guard_task, return_exceptions=True)
             return fingerprint, guard
         result = await self._evaluate(
             session_id,
@@ -701,7 +722,7 @@ class CdpPage(Page):
                     if stable or (current is not None and current == previous):
                         return current != before
                     previous = current
-                except RuntimeError:
+                except BrowserError:
                     # Navigation destroys the promise with its execution context. Only this read is retried.
                     previous = None
                 finally:
@@ -735,7 +756,7 @@ class CdpPage(Page):
             params={"expression": expression, "returnByValue": True, "awaitPromise": True}, session_id=session_id
         )
         if "exceptionDetails" in out:
-            raise RuntimeError(json.dumps(out["exceptionDetails"])[:300])
+            raise BrowserError("Runtime.evaluate failed (JavaScriptError)")
         return out["result"].get("value")
 
 

@@ -90,8 +90,6 @@ class StepContext(Frozen):
     requirements: tuple[str, ...]
     notes: str
     history: tuple[HistoryEntry, ...]
-    previous_intent: str | None
-    """What the previous action was meant to achieve; asks `prev_ok` only when set."""
     check_login: bool
     has_attachments: bool
 
@@ -102,10 +100,7 @@ class Decision(Frozen):
     tab_id: str | None
     operation_confidence: float
     target_confidence: float | None
-    prev_ok: float | None
     login_required: float | None
-    operation_probabilities: Mapping[str, float]
-    target_probabilities: Mapping[str, float]
     offered_controls: int
     reduction: Reduction
     cost: tuple[CostLine, ...]
@@ -145,12 +140,6 @@ async def decide(
             raise ObservationTooLarge(f"{len(controls)} controls on {observation.url} exceed Jev's input limits")
         controls = tuple(c for c in controls if not c.offscreen)
         reduction = Reduction.ONSCREEN_ONLY
-
-
-def offered_operations(
-    observation: Observation, controls: Sequence[Control], context: StepContext
-) -> tuple[Operation, ...]:
-    return _offered_operations(observation, _index_controls(controls), context)
 
 
 def _index_controls(controls: Sequence[Control]) -> dict[Operation, tuple[Control, ...]]:
@@ -228,12 +217,6 @@ def build_request(
             instructions=json.dumps({"task": context.task, "rules": TARGET}),
             criteria={t.id: {"title": t.title, "url": t.url, "active": t.active} for t in observation.tabs},
         )
-    if context.previous_intent is not None and context.history:
-        questions["prev_ok"] = _noul(
-            f"Did the previous action achieve what it was meant to: {context.previous_intent}?",
-            "The current page shows the intended effect.",
-            "The intended effect is not visible.",
-        )
     if context.check_login:
         questions["login_required"] = _noul(
             "Does a sign-in or verification wall block the task, with no credentials given in the task to pass it?",
@@ -274,12 +257,14 @@ async def _evaluate(
     operation = Operation(operation_answer.choice)
     target: Control | None = None
     tab_id: str | None = None
-    target_answer: ChoiceAnswer | None = None
+    target_confidence: float | None = None
     if operation in request.targets:
         target_answer = _choice(evaluation, f"{operation.value}_target")
         target = _control(request.targets[operation], target_answer.choice)
+        target_confidence = target_answer.confidence
     elif operation in request.groups:
-        group = request.groups[operation][int(_choice(evaluation, f"{operation.value}_group").choice)]
+        group_answer = _choice(evaluation, f"{operation.value}_group")
+        group = request.groups[operation][int(group_answer.choice)]
         if ledger is not None:
             ledger.reserve(CostComponent.JEV)
         inner = await jev.evaluate(
@@ -292,19 +277,19 @@ async def _evaluate(
         tokens += inner.input_tokens
         target_answer = _choice(inner, f"{operation.value}_target")
         target = _control(group, target_answer.choice)
+        # The element was only ever chosen from inside the group, so a doubtful group is a doubtful target.
+        target_confidence = group_answer.confidence * target_answer.confidence
     elif operation is Operation.SWITCH_TAB:
         target_answer = _choice(evaluation, "switch_tab_target")
         tab_id = target_answer.choice
+        target_confidence = target_answer.confidence
     return Decision(
         operation=operation,
         target=target,
         tab_id=tab_id,
         operation_confidence=operation_answer.confidence,
-        target_confidence=target_answer.confidence if target_answer else None,
-        prev_ok=_noul_probability(evaluation, "prev_ok"),
+        target_confidence=target_confidence,
         login_required=_noul_probability(evaluation, "login_required"),
-        operation_probabilities=operation_answer.probabilities,
-        target_probabilities=target_answer.probabilities if target_answer else {},
         offered_controls=len(controls),
         reduction=reduction,
         cost=tuple(cost),

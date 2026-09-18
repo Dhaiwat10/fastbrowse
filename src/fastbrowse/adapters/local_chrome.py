@@ -1,14 +1,16 @@
 """A throwaway headless Chrome on this machine."""
 
+import asyncio
 import json
+import os
 import shutil
 import socket
 import subprocess
 import tempfile
 import time
 import urllib.request
-from collections.abc import Generator
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Generator
+from contextlib import asynccontextmanager, contextmanager
 
 from fastbrowse.models import BrowserConnection
 
@@ -19,10 +21,45 @@ def free_port() -> int:
         return int(s.getsockname()[1])
 
 
+def find_chrome() -> str | None:
+    if override := os.environ.get("FASTBROWSE_CHROME"):
+        return shutil.which(override)
+    for name in (
+        "google-chrome-stable",
+        "google-chrome",
+        "chromium",
+        "chromium-browser",
+        "chrome",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ):
+        if binary := shutil.which(name):
+            return binary
+    return None
+
+
+@asynccontextmanager
+async def async_local_chrome() -> AsyncGenerator[BrowserConnection]:
+    manager = local_chrome()
+    opening = asyncio.create_task(asyncio.to_thread(manager.__enter__))
+    try:
+        try:
+            connection = await asyncio.shield(opening)
+        finally:
+            # Threads cannot be cancelled; wait for startup before attempting to release its process.
+            await asyncio.gather(opening, return_exceptions=True)
+        yield connection
+    finally:
+        closing = asyncio.create_task(asyncio.to_thread(manager.__exit__, None, None, None))
+        try:
+            await asyncio.shield(closing)
+        finally:
+            await asyncio.gather(closing, return_exceptions=True)
+
+
 @contextmanager
 def local_chrome() -> Generator[BrowserConnection]:
     """Yield a connection to a headless Chrome with a fresh profile, killed on exit."""
-    binary = shutil.which("google-chrome-stable") or shutil.which("google-chrome") or shutil.which("chromium")
+    binary = find_chrome()
     if binary is None:
         raise RuntimeError("Chrome is not installed")
     port = free_port()
@@ -47,7 +84,11 @@ def local_chrome() -> Generator[BrowserConnection]:
             yield BrowserConnection(cdp_url=_wait_for_ws(port), live_url=None, remote=False)
         finally:
             proc.terminate()
-            proc.wait(timeout=10)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
 
 def _wait_for_ws(port: int, timeout: float = 15.0) -> str:

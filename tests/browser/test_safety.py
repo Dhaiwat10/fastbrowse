@@ -29,6 +29,48 @@ class Secrets:
         return "top-secret-value"
 
 
+@pytest.mark.parametrize("label", ["Username", "Frame field"])
+async def test_window_origin_cannot_spoof_secret_scope(
+    page: CdpPage, browser_session: BrowserSession, main_site: str, iframe_site: str, label: str
+) -> None:
+    await page.navigate(main_site)
+    target = find(await observe_until(page, label), label)
+    session_id = (
+        browser_session.frame_sessions()[target.frame_id] if target.frame_id else browser_session.active_session_id
+    )
+    assert (
+        await eval_value(browser_session, session_id, "window.origin = 'https://bank.example'")
+        == "https://bank.example"
+    )
+    obs = await page.observe()
+    target = find(obs, label)
+    assert target.frame_origin == (iframe_site if target.frame_id else main_site)
+
+    secrets = Secrets("https://bank.example")
+    result = await Agent(
+        page,
+        ScriptedJev({"operation": "fill", "fill_target": target.id, "pick": "secret:token"}),
+        ScriptedLLM([PLAN]),
+        config=CONFIG,
+        secrets=secrets,
+    ).run("Fill the token")
+    assert result.status is Status.NEEDS_INPUT and secrets.resolved == []
+
+    obs = await page.observe()
+    result = await page.act(
+        Action(
+            operation=Operation.FILL,
+            target_id=target.id,
+            text="do-not-leak",
+            secret=True,
+            secret_origin="https://bank.example",
+        ),
+        obs,
+    )
+    assert result.outcome is StepOutcome.FAILED
+    assert find(await page.observe(), label).value == ""
+
+
 async def test_secret_resolution_uses_receiving_origin(
     page: CdpPage, browser_session: BrowserSession, main_site: str
 ) -> None:
@@ -75,7 +117,7 @@ async def test_enter_uses_form_semantics_and_focuses_verified_target(
     result = await Agent(page, jev, ScriptedLLM([PLAN]), config=CONFIG).run(
         "Delete the account", authorization=Authorization(irreversible_actions=authorize), limits=Limits(max_steps=1)
     )
-    assert any("irreversible" in request for request in jev.requests)
+    assert any("irreversible" in request for request in jev.requests) == (not authorize)
     submitted = await eval_value(browser_session, browser_session.active_session_id, "document.body.dataset.submitted")
     if authorize:
         assert submitted == "delete" and result.steps[0].outcome is StepOutcome.EXECUTED
@@ -104,7 +146,7 @@ async def test_dialog_acceptance_has_its_own_gate(
             await eval_value(browser_session, browser_session.active_session_id, "document.body.dataset.accepted")
             == str(choice == "accept").lower()
         )
-    assert any("irreversible" in request for request in jev.requests) == (choice == "accept")
+    assert any("irreversible" in request for request in jev.requests) == (choice == "accept" and not authorize)
 
 
 @pytest.mark.parametrize("operation", [Operation.SELECT, Operation.UPLOAD])

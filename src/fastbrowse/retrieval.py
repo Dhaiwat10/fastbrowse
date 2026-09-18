@@ -308,8 +308,6 @@ def _cells(table: str) -> tuple[tuple[int, int, str], ...]:
 
 
 def _scalar(raw: str, annotation: object) -> ScalarValue:
-    if annotation is str:
-        return raw
     if annotation is bool:
         return raw.lower() in {"true", "yes"}
     if annotation is date:
@@ -521,6 +519,26 @@ async def compose(
             requirements=plan.requirements,
         ),
         cost=result.cost,
+    )
+
+
+def draft_answer(plan: Plan, notes: Notes) -> ComposedAnswer | None:
+    """The facts the reader already wrote, in requirement order, offered as the answer without a composer.
+
+    Each fact is a claim with one verbatim citation, so this draft passes the same claim checks a composed
+    answer does. Whether it reads as an answer to the task is Jev's call, made in the done check.
+    """
+    claims: dict[str, Claim] = {}
+    for requirement in plan.requirements:
+        if requirement.kind is RequirementKind.INFORMATION:
+            for key, fact in notes.supporting(requirement.id):
+                claims.setdefault(key, Claim(text=fact.text, evidence_ids=(key,)))
+    if not claims:
+        return None
+    return ComposedAnswer(
+        answer="\n\n".join(claim.text for claim in claims.values()),
+        claims=tuple(claims.values()),
+        requirements=plan.requirements,
     )
 
 

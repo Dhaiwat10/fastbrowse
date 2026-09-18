@@ -2,12 +2,21 @@
 
 import base64
 from collections.abc import Mapping, Sequence
+from enum import StrEnum
 from typing import assert_never
 
 import httpx
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
-from fastbrowse.clients.validation import dollars, json_object, object_value, post_with_retry, token_count
+from fastbrowse.clients.validation import (
+    LLM_ATTEMPT_SECONDS,
+    body_excerpt,
+    dollars,
+    json_object,
+    object_value,
+    post_with_retry,
+    token_count,
+)
 from fastbrowse.llm import Generation, LLMError, Message
 from fastbrowse.models import CostBasis, CostComponent, CostLine, LLMPurpose
 from fastbrowse.telemetry import Ledger
@@ -79,6 +88,14 @@ def _total_cost(costs: Sequence[CostLine], purpose: LLMPurpose) -> CostLine:
     )
 
 
+class ReasoningEffort(StrEnum):
+    """How much hidden reasoning a model may spend before it answers, in OpenRouter's normalized terms."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class OpenAICompatibleLLM:
     def __init__(
         self,
@@ -87,27 +104,31 @@ class OpenAICompatibleLLM:
         http: httpx.AsyncClient,
         base_url: str,
         models: Mapping[LLMPurpose, str],
+        reasoning_effort: ReasoningEffort | None = None,
     ) -> None:
         self._api_key = api_key
         self._http = http
         self._base_url = base_url.rstrip("/")
         self._models = dict(models)
+        self._reasoning_effort = reasoning_effort
 
-    async def _request(self, body: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    async def _request(self, body: dict[str, JsonValue], ledger: Ledger | None) -> dict[str, JsonValue]:
         response = await post_with_retry(
             self._http,
             f"{self._base_url}/chat/completions",
             body,
             {"Authorization": f"Bearer {self._api_key}"},
+            attempt_seconds=LLM_ATTEMPT_SECONDS,
+            before_retry=None if ledger is None else lambda: ledger.reserve(CostComponent.LLM),
         )
         if response is None:
             raise LLMError("LLM transport failed")
         if not response.is_success:
-            raise LLMError(f"LLM HTTP {response.status_code}: {response.text[:400]}")
+            raise LLMError(f"LLM HTTP {response.status_code}: {body_excerpt(response)}")
         try:
             return json_object(response)
         except ValueError:
-            raise LLMError(f"Invalid LLM response; HTTP {response.status_code}: {response.text[:400]}") from None
+            raise LLMError(f"Invalid LLM response; HTTP {response.status_code}: {body_excerpt(response)}") from None
 
     async def generate[T: BaseModel](
         self,
@@ -135,11 +156,13 @@ class OpenAICompatibleLLM:
                 },
             },
         }
+        if self._reasoning_effort is not None:
+            body["reasoning"] = {"effort": self._reasoning_effort.value}
         costs: list[CostLine] = []
         for attempt in range(2):
             if ledger is not None:
                 ledger.reserve(CostComponent.LLM)
-            payload = await self._request(body)
+            payload = await self._request(body, ledger)
             # Recorded before the envelope is read: a generation we cannot parse was still billed, and
             # dropping it would let an unaccounted request pass a dollar cap.
             costs.append(_cost(payload, purpose))
@@ -149,6 +172,7 @@ class OpenAICompatibleLLM:
                 # An empty completion comes back intermittently (a dropped or refused generation); ask once more.
                 if attempt == 0:
                     continue
+                _charge(ledger, costs)
                 raise LLMError(f"Invalid completion envelope: {str(error)[:400]}") from None
             try:
                 data = schema.model_validate_json(content)
@@ -156,6 +180,7 @@ class OpenAICompatibleLLM:
                 # Avoid echoing rejected values: validation paths and reasons are enough to repair the schema.
                 detail = error.json(include_input=False, include_url=False)
                 if attempt == 1:
+                    _charge(ledger, costs)
                     raise LLMError(f"LLM schema validation failed after one retry: {detail[:1000]}") from None
                 wire_messages.extend(
                     [
@@ -169,3 +194,10 @@ class OpenAICompatibleLLM:
             else:
                 return Generation(data=data, cost=_total_cost(costs, purpose))
         raise AssertionError("unreachable")
+
+
+def _charge(ledger: Ledger | None, costs: Sequence[CostLine]) -> None:
+    """Record what a failed generation was billed. A success hands its cost to the caller to record instead."""
+    if ledger is not None:
+        for cost in costs:
+            ledger.record(cost)

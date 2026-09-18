@@ -110,7 +110,10 @@ class Action(Frozen):
     """Origin authorized by the resolver; the receiving document must still match at insertion."""
     files: tuple[Attachment, ...] = ()
     accept_dialog: bool | None = None
-    scroll_down: bool = True
+
+
+class BrowserError(RuntimeError):
+    """A browser failure a `Page` raises, with a message safe to put in a run result: never page text."""
 
 
 class ActResult(Frozen):

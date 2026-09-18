@@ -13,23 +13,27 @@ import os
 import sys
 from pathlib import Path
 
-from fastbrowse.clients.environment import MissingKeyError
-from fastbrowse.models import Authorization, Limits, RunEvent, SecretRef, StepEvent
+from fastbrowse.clients.environment import ConfigurationError
+from fastbrowse.models import Authorization, Limits, StepEvent
 from fastbrowse.run import run_task
-from fastbrowse.safety import origin_of
+from fastbrowse.safety import ScopedSecrets, origin_of
 
 
-class EnvironmentSecrets:
-    def __init__(self, names: dict[str, str], origin: str) -> None:
-        self._names = names
-        self._origin = origin
+def _secrets(pairs: list[tuple[str, str]], start: str) -> ScopedSecrets | None:
+    """Values read from the named variables now, so a missing one fails before a browser is opened."""
+    if not pairs:
+        return None
+    missing = [variable for _, variable in pairs if variable not in os.environ]
+    if missing:
+        raise ConfigurationError(f"--secret names unset variables: {', '.join(missing)}")
+    return ScopedSecrets({name: os.environ[variable] for name, variable in pairs}, origin_of(start))
 
-    def available(self) -> tuple[SecretRef, ...]:
-        return tuple(SecretRef(name=name, origins=(self._origin,)) for name in self._names)
 
-    async def resolve(self, name: str, origin: str) -> str | None:
-        variable = self._names.get(name)
-        return os.environ.get(variable) if variable and origin == self._origin else None
+def _secret(pair: str) -> tuple[str, str]:
+    name, sep, variable = pair.partition("=")
+    if not (sep and name and variable):
+        raise argparse.ArgumentTypeError(f"expected NAME=ENV_VAR, got {pair!r}")
+    return name, variable
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -38,7 +42,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--start", required=True, help="URL to open before the task starts")
     parser.add_argument("--cloud", action="store_true", help="use a Browser Use Cloud browser")
     parser.add_argument("--authorize", action="store_true", help="allow submit/pay/delete/send without pausing")
-    parser.add_argument("--secret", action="append", default=[], metavar="NAME=ENV_VAR")
+    parser.add_argument("--secret", action="append", default=[], type=_secret, metavar="NAME=ENV_VAR")
     parser.add_argument("--max-steps", type=int, default=60)
     parser.add_argument("--max-dollars", type=float, default=None)
     parser.add_argument("--downloads", type=Path, default=None, help="directory for downloaded files")
@@ -51,23 +55,21 @@ def _browser_key(cloud: bool) -> str | None:
         return None
     key = os.environ.get("BROWSER_USE_API_KEY")
     if not key:
-        raise MissingKeyError("set BROWSER_USE_API_KEY for --cloud")
+        raise ConfigurationError("set BROWSER_USE_API_KEY for --cloud")
     return key
 
 
-async def _print_step(event: RunEvent) -> None:
-    if isinstance(event, StepEvent):
-        step = event.step
-        print(f"  {step.index:>2} {step.operation.value} {step.target or ''} -> {step.outcome.value}", file=sys.stderr)
+async def _print_step(event: StepEvent) -> None:
+    step = event.step
+    print(f"  {step.index:>2} {step.operation.value} {step.target or ''} -> {step.outcome.value}", file=sys.stderr)
 
 
 async def run(args: argparse.Namespace) -> int:
-    names = dict(pair.split("=", 1) for pair in args.secret)
     result = await run_task(
         args.task,
         start=args.start,
         browser_api_key=_browser_key(args.cloud),
-        secrets=EnvironmentSecrets(names, origin_of(args.start)) if names else None,
+        secrets=_secrets(args.secret, args.start),
         limits=Limits(max_steps=args.max_steps, max_dollars=args.max_dollars),
         authorization=Authorization(irreversible_actions=args.authorize),
         downloads=args.downloads,
@@ -85,5 +87,5 @@ def main() -> None:
     args = _parse(sys.argv[1:])
     try:
         sys.exit(asyncio.run(run(args)))
-    except MissingKeyError as exc:
+    except ConfigurationError as exc:
         sys.exit(f"fastbrowse: {exc}")

@@ -9,10 +9,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import logging
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Self
+from typing import Any, Self, cast
 
 from cdp_use.cdp.fetch.events import RequestPausedEvent
 from cdp_use.cdp.fetch.types import RequestPattern
@@ -28,7 +29,7 @@ from cdp_use.client import CDPClient
 
 from fastbrowse.models import Artifact, ArtifactKind, ArtifactSink
 from fastbrowse.models import BrowserConnection as BrowserConnectionModel
-from fastbrowse.page import Dialog, Tab
+from fastbrowse.page import BrowserError, Dialog, Tab
 
 # Response-stage interception is enough: fastbrowse only needs the bytes of a save-as download, never to
 # rewrite a request. Document covers navigations to a downloadable URL; Other covers a fetch/anchor-click
@@ -38,6 +39,48 @@ DOWNLOAD_PATTERNS: tuple[RequestPattern, ...] = (
     {"urlPattern": "*", "resourceType": "Other", "requestStage": "Response"},
 )
 _ENABLE_DOMAINS = ("Page", "Runtime", "DOM")
+
+
+class _HideEndpoint(logging.Filter):
+    """cdp-use logs the full CDP URL at INFO, and a cloud browser's URL is the credential to drive it."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str) and record.msg.startswith("Connecting to "):
+            record.msg, record.args = "Connecting to the browser's CDP endpoint", None
+        return True
+
+
+logging.getLogger("cdp_use.client").addFilter(_HideEndpoint())
+
+
+def _browser_error(method: str, cause: Exception) -> BrowserError:
+    detail = type(cause).__name__
+    if cause.args and isinstance(cause.args[0], dict):
+        code = cast("dict[str, object]", cause.args[0]).get("code")
+        if type(code) is int:
+            detail = f"CDP {code}"
+    return BrowserError(f"{method} failed ({detail})")
+
+
+class _BrowserClient(CDPClient):
+    async def start(self) -> None:
+        try:
+            await super().start()
+        except Exception as exc:
+            raise _browser_error("CDP.start", exc) from exc
+
+    async def stop(self) -> None:
+        try:
+            await super().stop()
+        except Exception as exc:
+            raise _browser_error("CDP.stop", exc) from exc
+
+    async def send_raw(self, method: str, params: Any = None, session_id: str | None = None) -> dict[str, Any]:
+        try:
+            return await super().send_raw(method, params, session_id)
+        except Exception as exc:
+            # CDP error messages can contain evaluated source or page text, including secrets.
+            raise _browser_error(method, exc) from exc
 
 
 @dataclass
@@ -77,11 +120,12 @@ class BrowserSession:
         """Pending JS dialog per tab session id; cleared once handled."""
         self._dialog_opened = asyncio.Event()
         self._background: set[asyncio.Task[None]] = set()
+        self._closing = False
 
     @property
     def client(self) -> CDPClient:
         if self._client is None:
-            raise RuntimeError("BrowserSession is not open")
+            raise BrowserError("CDP.client failed (SessionClosed)")
         return self._client
 
     @property
@@ -146,24 +190,45 @@ class BrowserSession:
             await self._dialog_opened.wait()
 
     async def __aenter__(self) -> Self:
-        self._client = CDPClient(self._connection.cdp_url)
-        await self._client.start()
-        self._register_events()
-        await self.client.send.Target.setDiscoverTargets(params={"discover": True})
-        await self._open_owned_tab("about:blank")
+        self._closing = False
+        self._client = _BrowserClient(self._connection.cdp_url)
+        try:
+            await self._client.start()
+            self._register_events()
+            await self.client.send.Target.setDiscoverTargets(params={"discover": True})
+            await self._open_owned_tab("about:blank")
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await self._close()
+            raise
         return self
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
-        for task in list(self._background):
+        try:
+            await self._close()
+        except Exception:
+            if exc is None:
+                raise
+
+    async def _close(self) -> None:
+        self._closing = True
+        background = list(self._background)
+        for task in background:
             task.cancel()
+        # Download finalizers still need the socket to release intercepted requests.
+        await asyncio.gather(*background, return_exceptions=True)
         for target_id in list(self._owned):
             with contextlib.suppress(Exception):  # best-effort teardown; the browser may already be gone
                 await self.client.send.Target.closeTarget(params={"targetId": target_id})
         if self._client is not None:
-            await self._client.stop()
-            self._client = None
+            try:
+                await self._client.stop()
+            finally:
+                self._client = None
+                self._owned.clear()
+                self._tabs.clear()
 
     async def switch_tab(self, target_id: str) -> None:
         if target_id not in self._tabs:
@@ -177,31 +242,34 @@ class BrowserSession:
         # never open, screenshots hang, every click reads as covered), so foreground it.
         created = await self.client.send.Target.createTarget(params={"url": url, "background": not remote})
         target_id = created["targetId"]
+        self._owned.add(target_id)
         attach = await self.client.send.Target.attachToTarget(params={"targetId": target_id, "flatten": True})
         session_id = attach["sessionId"]
         if remote:
             await self.client.send.Target.activateTarget(params={"targetId": target_id})
         await self._prepare_session(session_id)
         self._tabs[target_id] = _TabState(target_id=target_id, session_id=session_id, url=url)
-        self._owned.add(target_id)
         self._active_target_id = target_id
         return target_id
 
     async def _prepare_session(self, session_id: str) -> None:
         # These domains are independent, but all must be ready before the session can be used.
-        async with asyncio.TaskGroup() as tasks:
-            for domain in _ENABLE_DOMAINS:
-                tasks.create_task(self.client.send_raw(f"{domain}.enable", session_id=session_id))
-            tasks.create_task(
-                self.client.send_raw(
-                    "Target.setAutoAttach",
-                    {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
-                    session_id=session_id,
+        try:
+            async with asyncio.TaskGroup() as tasks:
+                for domain in _ENABLE_DOMAINS:
+                    tasks.create_task(self.client.send_raw(f"{domain}.enable", session_id=session_id))
+                tasks.create_task(
+                    self.client.send_raw(
+                        "Target.setAutoAttach",
+                        {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
+                        session_id=session_id,
+                    )
                 )
-            )
-            tasks.create_task(
-                self.client.send.Fetch.enable(params={"patterns": list(DOWNLOAD_PATTERNS)}, session_id=session_id)
-            )
+                tasks.create_task(
+                    self.client.send.Fetch.enable(params={"patterns": list(DOWNLOAD_PATTERNS)}, session_id=session_id)
+                )
+        except* BrowserError as errors:
+            raise errors.exceptions[0] from errors
 
     def _register_events(self) -> None:
         client = self.client
@@ -214,9 +282,17 @@ class BrowserSession:
         client.register.Fetch.requestPaused(self._on_request_paused)
 
     def _spawn(self, coro: Coroutine[None, None, None]) -> None:
+        if self._closing:
+            coro.close()
+            return
         task = asyncio.ensure_future(coro)
         self._background.add(task)
-        task.add_done_callback(self._background.discard)
+        task.add_done_callback(self._background_finished)
+
+    def _background_finished(self, task: asyncio.Task[None]) -> None:
+        self._background.discard(task)
+        if not task.cancelled():
+            task.exception()
 
     # -- Target/frame tracking -------------------------------------------------------------------------
 
@@ -238,7 +314,8 @@ class BrowserSession:
     def _on_target_created(self, event: TargetCreatedEvent, session_id: str | None) -> None:
         info = event["targetInfo"]
         opener_id = info.get("openerId")
-        if info["type"] == "page" and opener_id in self._owned:
+        if not self._closing and info["type"] == "page" and opener_id in self._owned:
+            self._owned.add(info["targetId"])
             self._spawn(self._adopt_popup(info["targetId"], opener_id))
 
     async def _adopt_popup(self, target_id: str, opener_id: str) -> None:
@@ -248,7 +325,6 @@ class BrowserSession:
             await self.client.send.Target.activateTarget(params={"targetId": target_id})
         await self._prepare_session(session_id)
         self._tabs[target_id] = _TabState(target_id=target_id, session_id=session_id, opener_id=opener_id)
-        self._owned.add(target_id)
         # The popup may already have navigated to its final URL before this coroutine got scheduled
         # (targetCreated -> targetInfoChanged can both fire while we're still awaiting attachToTarget
         # above), so a targetInfoChanged event carrying it can arrive and be dropped because the tab

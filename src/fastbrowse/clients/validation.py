@@ -2,7 +2,7 @@
 
 import asyncio
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import assert_never
 
 import httpx
@@ -83,34 +83,62 @@ def json_object(response: httpx.Response) -> dict[str, JsonValue]:
     return TypeAdapter(dict[str, JsonValue]).validate_json(response.content)
 
 
+def body_excerpt(response: httpx.Response) -> str:
+    """The start of a response body for an error message, minus the credential it was requested with.
+
+    Some providers echo the rejected key back in an authentication error, and error text is logged.
+    """
+    text = response.text
+    try:
+        credential = response.request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    except RuntimeError:  # a response built without a request carries no credential to leak
+        credential = ""
+    if credential:
+        text = text.replace(credential, "[api key]")
+    return text[:400]
+
+
 def response_error(response: httpx.Response, detail: str) -> JevError:
-    return JevError(f"{detail[:300]}; HTTP {response.status_code}: {response.text[:400]}")
+    return JevError(f"{detail[:300]}; HTTP {response.status_code}: {body_excerpt(response)}")
 
 
 RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0)
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
+JEV_ATTEMPT_SECONDS = 15.0
+"""Jev answers in about a second, so an attempt this old is stuck upstream, and a retry beats waiting on it."""
+LLM_ATTEMPT_SECONDS = 30.0
+"""Six times the mean plan call, the slowest request a run makes; a live run stalled 60s on one attempt."""
 
 
 async def post_with_retry(
-    http: httpx.AsyncClient, url: str, body: dict[str, JsonValue], headers: Mapping[str, str]
+    http: httpx.AsyncClient,
+    url: str,
+    body: dict[str, JsonValue],
+    headers: Mapping[str, str],
+    *,
+    attempt_seconds: float,
+    before_retry: Callable[[], None] | None = None,
 ) -> httpx.Response | None:
     """Retry an overloaded or dropped request, which produced nothing and is always safe to repeat.
 
-    Returns None when the transport never completed, leaving each client to name its own failure.
+    `before_retry` runs ahead of every repeat, so a budget counts each request actually sent: a request
+    that timed out may still have been billed. Returns None when the transport never completed, leaving
+    each client to name its own failure.
     """
-    for delay in RETRY_DELAYS_SECONDS:
+    response: httpx.Response | None = None
+    for attempt, delay in enumerate((*RETRY_DELAYS_SECONDS, None)):
+        if attempt and before_retry is not None:
+            before_retry()
         try:
-            response = await http.post(url, json=body, headers=headers)
+            response = await http.post(url, json=body, headers=headers, timeout=attempt_seconds)
         except httpx.HTTPError:
+            response = None
+        else:
+            if response.status_code not in RETRYABLE_STATUS:
+                return response
+        if delay is not None:
             await asyncio.sleep(delay)
-            continue
-        if response.status_code not in RETRYABLE_STATUS:
-            return response
-        await asyncio.sleep(delay)
-    try:
-        return await http.post(url, json=body, headers=headers)
-    except httpx.HTTPError:
-        return None
+    return response
 
 
 async def post(
@@ -120,11 +148,12 @@ async def post(
     body: dict[str, JsonValue],
     headers: Mapping[str, str] | None = None,
 ) -> httpx.Response:
-    response = await post_with_retry(http, url, body, {"Authorization": f"Bearer {api_key}", **(headers or {})})
+    auth = {"Authorization": f"Bearer {api_key}", **(headers or {})}
+    response = await post_with_retry(http, url, body, auth, attempt_seconds=JEV_ATTEMPT_SECONDS)
     if response is None:
         raise JevError("Jev transport failed")
     if response.status_code == 400 and "max_tokens_exceeded" in response.text:
-        raise JevInputTooLarge(f"Jev input too large; HTTP 400: {response.text[:400]}")
+        raise JevInputTooLarge(f"Jev input too large; HTTP 400: {body_excerpt(response)}")
     if not response.is_success:
         raise response_error(response, "Jev request failed")
     return response

@@ -46,6 +46,10 @@ class Notes:
     def evidenced(self, requirement_id: str) -> bool:
         return any(requirement_id in requirements for requirements in self._requirements.values())
 
+    def supporting(self, requirement_id: str) -> tuple[tuple[str, Fact], ...]:
+        """The facts citing a requirement, keyed by evidence id, in the order they were read."""
+        return tuple((key, self._facts[key]) for key, ids in self._requirements.items() if requirement_id in ids)
+
     def unresolved(self, plan: Plan) -> tuple[Requirement, ...]:
         return tuple(requirement for requirement in plan.requirements if not self.evidenced(requirement.id))
 

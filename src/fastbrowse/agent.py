@@ -35,14 +35,13 @@ from fastbrowse.models import (
     StepResult,
     UntilCheck,
 )
-from fastbrowse.page import Action, ActResult, Capture, Control, Observation, Page
+from fastbrowse.page import Action, ActResult, BrowserError, Capture, Control, Observation, Page
 from fastbrowse.planner import Plan, RequirementKind, make_plan
 from fastbrowse.policy import Decision, HistoryEntry, ObservationTooLarge, StepContext, decide
-from fastbrowse.retrieval import ComposedAnswer, compose, read
+from fastbrowse.retrieval import ComposedAnswer, compose, draft_answer, read
 from fastbrowse.safety import (
     Redactor,
     irreversible_question,
-    is_authorized,
     may_be_irreversible,
     origin_of,
     resolve_secret,
@@ -61,9 +60,23 @@ from fastbrowse.verification import (
 
 GENERATE = "generate"
 
+# Long enough for a browser-verification page to run its check and hand over, short enough that a page
+# which never moves still ends as needs_login well inside a run's time budget.
+_INTERSTITIAL_SECONDS = 12.0
+_INTERSTITIAL_POLL_SECONDS = 0.5
+
+type _Prepared = ComposedAnswer | asyncio.Task[Generation[ComposedAnswer]] | None
+"""An answer ready before conclusion: the reader's facts Jev accepted as written, or a composer in flight."""
+
 
 class _FieldText(Frozen):
-    text: str = Field(description="Exactly the text to type into the field, with no commentary.")
+    missing: bool = Field(
+        description=(
+            "True when the field wants a fact about the user (a phone number, address, account or order id) "
+            "that the task and notes do not contain. Such a value is never invented."
+        )
+    )
+    text: str = Field(description="Exactly the text to type into the field, with no commentary; empty when missing.")
 
 
 class _Recovery(Frozen):
@@ -73,11 +86,14 @@ class _Recovery(Frozen):
 
 
 class _Stop(Exception):
-    def __init__(self, status: Status, error: str | None = None, resume_token: str | None = None) -> None:
+    def __init__(self, status: Status, error: str | None = None) -> None:
         super().__init__(error or status.value)
         self.status = status
         self.error = error
-        self.resume_token = resume_token
+
+
+class _Unsure(Exception):
+    """The next action is authorized but not clearly the right one: a case for recovery, not for the caller."""
 
 
 @dataclass(slots=True)
@@ -87,7 +103,7 @@ class _RunState:
     attachments: tuple[Attachment, ...]
     authorization: Authorization
     ledger: Ledger
-    plan: Plan
+    planning: asyncio.Task[Generation[Plan]]
     notes: Notes = field(default_factory=Notes)
     steps: list[StepResult] = field(default_factory=list[StepResult])
     history: list[HistoryEntry] = field(default_factory=list[HistoryEntry])
@@ -96,6 +112,21 @@ class _RunState:
     recoveries: int = 0
     edited: set[tuple[Operation, str | None]] = field(default_factory=set[tuple[Operation, str | None]])
     last_page: tuple[str, str] | None = None
+    ready_plan: Plan | None = None
+
+    @property
+    def plan(self) -> Plan:
+        """The plan, for code that only runs after `await_plan`: reading, judging DONE and answering."""
+        if self.ready_plan is None:
+            raise RuntimeError("the plan was used before it was awaited")
+        return self.ready_plan
+
+    async def await_plan(self) -> Plan:
+        if self.ready_plan is None:
+            planned = await self.planning
+            self.ledger.record(planned.cost)
+            self.ready_plan = planned.data
+        return self.ready_plan
 
 
 class Agent:
@@ -134,22 +165,36 @@ class Agent:
         ledger = Ledger(limits or Limits())
         self._artifact_start = len(self._page.artifacts)
         state: _RunState | None = None
+        # The ledger checks `max_seconds` between operations; only a deadline around the awaits bounds a
+        # browser or provider call that never returns.
+        deadline = asyncio.timeout(ledger.limits.max_seconds)
         try:
-            observation = await self._observe()
-            planned = await make_plan(self._llm, task, observation, ledger=ledger)
-            ledger.record(planned.cost)
-            state = _RunState(
-                task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planned.data
-            )
-            return await self._loop(state, output_schema, until)
+            async with deadline:
+                observation = await self._observe()
+                # The plan is needed to read, to judge DONE and to answer, and the first fills and clicks
+                # usually come before all three, so it is written while they run instead of ahead of them.
+                planning = asyncio.create_task(make_plan(self._llm, task, observation, ledger=ledger))
+                state = _RunState(
+                    task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planning
+                )
+                return await self._loop(state, output_schema, until)
         except _Stop as stop:
-            return self._result(state, ledger, stop.status, error=stop.error, resume_token=stop.resume_token)
+            return self._result(state, ledger, stop.status, error=stop.error)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            limit = f"time limit {ledger.limits.max_seconds}s reached"
+            return self._result(state, ledger, Status.BUDGET_EXCEEDED, error=limit)
         except BudgetExceeded as error:
             return self._result(state, ledger, Status.BUDGET_EXCEEDED, error=str(error))
         except ObservationTooLarge as error:
             return self._result(state, ledger, Status.OBSERVATION_LIMIT, error=str(error))
-        except (JevError, LLMError) as error:
+        except (JevError, LLMError, BrowserError) as error:
             return self._result(state, ledger, Status.ERROR, error=self._redactor.redact(str(error))[:500])
+        finally:
+            # A run can end before it ever needed the plan, and a plan still being written would bill it.
+            if state is not None:
+                await _discard(state.planning)
 
     async def _loop(
         self, state: _RunState, output_schema: type[BaseModel] | None, until: UntilCheck | None
@@ -160,19 +205,30 @@ class Agent:
             raw = self._raw_observation or observation
             origin = origin_of(raw.url)
             page = (raw.url, raw.document_key)
+            if state.planning.done():
+                await state.await_plan()
             context = self._context(state, check_login=page != state.last_page and not self._can_sign_in(origin))
             state.last_page = page
             decision = await decide(self._jev, observation, context, self._config, ledger=state.ledger)
             if (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
+                # A wall offering nothing to act on cannot be signed into. It is a bot check such as PyPI's
+                # "Client Challenge", which clears itself once its script runs, and stopping on it failed
+                # five runs in six of a task hosted agents finish by waiting.
+                if not raw.controls and await self._outwait(raw):
+                    continue
                 raise _Stop(Status.NEEDS_LOGIN, f"sign-in required at {origin}")
             uncertain = decision.confidence < self._config.thresholds.recover_below
             # The confidence gate exists to stop the agent acting on a page it does not understand, and a
             # READ is not acting: it changes nothing and is what one does when unsure what the page says.
             # Routing it to recovery spent the recovery budget on the page that held the answer.
+            if uncertain and state.ready_plan is None:
+                # Unsure without the requirements: the plan is already in flight and costs less than recovery.
+                await state.await_plan()
+                continue
             if (uncertain and decision.operation is not Operation.READ) or decision.operation is Operation.ESCALATE:
                 await self._recover(state, observation, f"uncertain next step ({decision.confidence:.2f})")
                 continue
-            if decision.operation is Operation.DONE and self._unread(state):
+            if decision.operation is Operation.DONE and _unread(await state.await_plan(), state.notes):
                 # DONE cannot hold while the plan still needs information nobody has read; reading is the move.
                 decision = decision.model_copy(update={"operation": Operation.READ, "target": None})
             if decision.operation is Operation.DONE:
@@ -180,7 +236,19 @@ class Agent:
                 if result is not None:
                     return result
                 continue
-            await self._step(state, observation, decision)
+            try:
+                await self._step(state, observation, decision)
+            except _Unsure as unsure:
+                await self._recover(state, observation, str(unsure))
+
+    async def _outwait(self, stuck: Observation) -> bool:
+        """Re-observe until the page is no longer `stuck`, returning whether it moved in time."""
+        deadline = time.monotonic() + _INTERSTITIAL_SECONDS
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_INTERSTITIAL_POLL_SECONDS)
+            if (await self._observe()).page_key != stuck.page_key:
+                return True
+        return False
 
     async def _step(self, state: _RunState, observation: Observation, decision: Decision) -> None:
         started = time.monotonic()
@@ -381,27 +449,35 @@ class Agent:
         self, state: _RunState, observation: Observation, decision: Decision, label: str, question: NoulQuestion
     ) -> None:
         thresholds = self._config.thresholds
+        authorized = state.authorization.irreversible_actions
+        # Authorized and confident proceeds whatever Jev would say about the action, so it is not asked.
+        if authorized and decision.confidence >= thresholds.sensitive_act_from:
+            return
         state.ledger.reserve(CostComponent.JEV)
+        # Only the address goes with the question: the page's own text is what would argue a harmful action
+        # is harmless, and the control's label and form are already in the question.
         evaluation = await self._jev.evaluate(
-            page_state(observation, state.notes),
-            {"irreversible": question},
+            {"page": {"url": observation.url, "title": observation.title}}, {"irreversible": question}
         )
         state.ledger.record(evaluation.cost)
         answer = evaluation.answers.get("irreversible")
         if isinstance(answer, NoulAnswer) and answer.probability <= thresholds.irreversible_above:
             return
-        if is_authorized(state.authorization) and decision.confidence >= thresholds.sensitive_act_from:
-            return
-        token = hashlib.sha256(f"{state.task}|{observation.url}|{label}".encode()).hexdigest()[:24]
-        raise _Stop(Status.NEEDS_CONFIRMATION, f"{decision.operation.value} {label!r} needs confirmation", token)
+        what = f"{decision.operation.value} {label!r}"
+        if authorized:
+            raise _Unsure(f"unsure {what} is the irreversible action the task means ({decision.confidence:.2f})")
+        raise _Stop(Status.NEEDS_CONFIRMATION, f"{what} needs confirmation")
 
     async def _text(self, state: _RunState, observation: Observation, target: Control) -> str:
         secrets = tuple(ref.name for ref in self._secrets.available()) if self._secrets else ()
+        origin = self._target_origin(target)
+        if target.sensitive:
+            return await self._sensitive_text(state, observation, target, secrets, origin)
         criteria: dict[str, JsonValue] = {
             f"input:{k}": f"The provided value named {k}: {v}" for k, v in state.inputs.items()
         }
-        criteria |= {f"secret:{name}": f"The stored secret named {name}" for name in secrets}
-        criteria[GENERATE] = "None of these; write new text from the task and notes."
+        criteria |= {f"secret:{name}": f"The stored secret named {name} (value hidden)" for name in secrets}
+        criteria[GENERATE] = "None of these; write new text stated in the task or notes."
         choice = (
             await self._ask_choice(state, observation, f"What should be typed into {target.label!r}?", criteria)
             if len(criteria) > 1
@@ -410,8 +486,23 @@ class Agent:
         if choice.startswith("input:"):
             return state.inputs[choice.removeprefix("input:")]
         if choice.startswith("secret:"):
-            return await self._secret(choice.removeprefix("secret:"), self._target_origin(target))
+            return await self._secret(choice.removeprefix("secret:"), origin)
         return await self._generate_text(state, observation, target)
+
+    async def _sensitive_text(
+        self, state: _RunState, observation: Observation, target: Control, secrets: tuple[str, ...], origin: str
+    ) -> str:
+        """A password field takes a stored secret or nothing: a generated value is at best a guess, and a guess
+        that happens to work (a demo site's well-known password) is a pass nobody authorized."""
+        match secrets:
+            case ():
+                raise _Stop(Status.NEEDS_LOGIN, f"{target.label!r} wants a secret and none is stored")
+            case (only,):
+                return await self._secret(only, origin)
+            case _:
+                criteria: dict[str, JsonValue] = {name: f"The stored secret named {name}" for name in secrets}
+                question = f"Which stored secret belongs in {target.label!r}?"
+                return await self._secret(await self._ask_choice(state, observation, question, criteria), origin)
 
     def _raw_target(self, target: Control) -> Control:
         if self._raw_observation is not None:
@@ -451,6 +542,8 @@ class Agent:
             ledger=state.ledger,
         )
         state.ledger.record(generation.cost)
+        if generation.data.missing:
+            raise _Stop(Status.NEEDS_INPUT, f"{target.label!r} needs a value the task does not give")
         return generation.data.text
 
     async def _choose(self, state: _RunState, observation: Observation, question: str, options: Sequence[str]) -> str:
@@ -495,7 +588,8 @@ class Agent:
     async def _read(self, state: _RunState) -> bool:
         """Return whether reading added evidence, which is the only progress a read can make."""
         capture = await self._capture()
-        wanted = [r for r in state.notes.unresolved(state.plan) if r.kind is RequirementKind.INFORMATION]
+        plan = await state.await_plan()
+        wanted = [r for r in state.notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION]
         question = "\n".join(f"- {r.text}" for r in wanted) or state.task
         before = len(state.notes.facts)
         await read(self._llm, capture, question, [r.id for r in wanted], state.notes, ledger=state.ledger)
@@ -558,7 +652,9 @@ class Agent:
         """Return the final result when DONE holds up; None sends the loop back to work."""
         fresh = await self._observe()
         state.ledger.reserve(CostComponent.JEV)
-        check = await check_done(self._jev, state.task, state.plan, fresh, state.notes, self._config.thresholds)
+        await state.await_plan()
+        draft = draft_answer(state.plan, state.notes) if state.plan.answer_expected else None
+        check = await check_done(self._jev, state.task, state.plan, fresh, state.notes, self._config.thresholds, draft)
         state.ledger.record(check.cost)
         accepted = check.verdict is DoneVerdict.ACCEPT
         drafting: asyncio.Task[Generation[ComposedAnswer]] | None = None
@@ -571,7 +667,7 @@ class Agent:
                 # Write the answer while the verifier is still deciding. Both read the same finished
                 # notes, and every accepted run wants an answer, so the whole cost of guessing wrong is
                 # one discarded call on the branch that was going back to work anyway.
-                if state.plan.answer_expected:
+                if state.plan.answer_expected and check.answer is None:
                     drafting = asyncio.create_task(
                         compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
                     )
@@ -594,22 +690,28 @@ class Agent:
                 await self._recover(state, observation, f"DONE rejected: {unmet}")
                 return None
             handed, drafting = drafting, None
-            return await self._conclude(state, output_schema, handed)
+            return await self._conclude(state, output_schema, check.answer or handed)
         finally:
             if drafting is not None:
                 await _discard(drafting)
 
-    async def _answer(
-        self, state: _RunState, drafting: asyncio.Task[Generation[ComposedAnswer]] | None
-    ) -> tuple[str, bool]:
-        """The composed answer and whether its claims held, taking the draft started during verification."""
+    async def _answer(self, state: _RunState, prepared: _Prepared) -> tuple[str, bool]:
+        """The answer and whether its claims held, composing only when nothing prepared survives the check."""
+        if isinstance(prepared, ComposedAnswer):
+            if await self._holds(state, prepared):
+                return self._redactor.redact(prepared.answer), True
+            # Jev took the reader's facts as the answer and then doubted a claim in them, which is what
+            # the composer exists for.
+            prepared = None
         composed = await (
-            drafting
-            if drafting is not None
+            prepared
+            if prepared is not None
             else compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
         )
-        ok, _ = await check_claims(self._jev, composed.data, state.notes, self._config.thresholds, ledger=state.ledger)
-        return self._redactor.redact(composed.data.answer), ok
+        return self._redactor.redact(composed.data.answer), await self._holds(state, composed.data)
+
+    async def _holds(self, state: _RunState, answer: ComposedAnswer) -> bool:
+        return await check_claims(self._jev, answer, state.notes, self._config.thresholds, ledger=state.ledger)
 
     async def _extraction(self, state: _RunState, output_schema: type[BaseModel]) -> Extraction:
         """The caller's schema, filled from a capture taken inside this branch so it overlaps the answer."""
@@ -621,7 +723,7 @@ class Agent:
         self,
         state: _RunState,
         output_schema: type[BaseModel] | None,
-        drafting: asyncio.Task[Generation[ComposedAnswer]] | None = None,
+        prepared: _Prepared = None,
     ) -> RunResult:
         answer: str | None = None
         data: JsonValue | None = None
@@ -629,7 +731,7 @@ class Agent:
         verified = True
         # Writing the answer and filling the caller's schema read the same finished notes and neither
         # needs the other's output, so a task that wants both pays for the slower one rather than both.
-        answering = self._answer(state, drafting) if state.plan.answer_expected else None
+        answering = self._answer(state, prepared) if state.plan.answer_expected else None
         extracting = self._extraction(state, output_schema) if output_schema is not None else None
         if answering is not None and extracting is not None:
             first, second = asyncio.create_task(answering), asyncio.create_task(extracting)
@@ -653,20 +755,13 @@ class Agent:
         status = Status.COMPLETE if verified else Status.UNVERIFIED
         return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(evidence))
 
-    def _unread(self, state: _RunState) -> bool:
-        return any(r.kind is RequirementKind.INFORMATION for r in state.notes.unresolved(state.plan))
-
     def _context(self, state: _RunState, *, check_login: bool) -> StepContext:
-        last = state.steps[-1] if state.steps else None
         return StepContext(
             task=state.task,
             subgoal=state.hint,
-            requirements=tuple(r.text for r in state.plan.requirements),
+            requirements=tuple(r.text for r in state.ready_plan.requirements) if state.ready_plan else (),
             notes=state.notes.render(4000),
             history=tuple(state.history[-self._config.observation.history_entries :]),
-            previous_intent=f"{last.operation.value} {last.target}"
-            if last and last.operation is not Operation.READ
-            else None,
             check_login=check_login,
             has_attachments=bool(state.attachments),
         )
@@ -681,7 +776,6 @@ class Agent:
         data: JsonValue | None = None,
         evidence: tuple[Evidence, ...] = (),
         error: str | None = None,
-        resume_token: str | None = None,
     ) -> RunResult:
         return RunResult(
             status=status,
@@ -691,10 +785,13 @@ class Agent:
             steps=tuple(state.steps) if state else (),
             cost=ledger.breakdown(),
             artifacts=self._page.artifacts[self._artifact_start :],
-            final_url=state.last_page[0] if state and state.last_page else None,
+            final_url=self._redactor.redact(state.last_page[0]) if state and state.last_page else None,
             error=error,
-            resume_token=resume_token,
         )
+
+
+def _unread(plan: Plan, notes: Notes) -> bool:
+    return any(r.kind is RequirementKind.INFORMATION for r in notes.unresolved(plan))
 
 
 async def _discard[T](task: asyncio.Task[T]) -> None:

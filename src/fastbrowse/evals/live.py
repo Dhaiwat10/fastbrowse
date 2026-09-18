@@ -25,9 +25,9 @@ from urllib.parse import unquote, urlparse
 import httpx
 from pydantic import BaseModel
 
-from fastbrowse.models import CostBreakdown, Limits, RunResult, SecretRef, Status
+from fastbrowse.models import CostBreakdown, Limits, RunResult, Status
 from fastbrowse.run import run_task
-from fastbrowse.safety import origin_of
+from fastbrowse.safety import ScopedSecrets, origin_of
 
 HOSTED_MAX_DOLLARS = 0.50
 
@@ -58,20 +58,6 @@ class LiveTask:
     check: Check
     secrets: Mapping[str, str] = field(default_factory=dict[str, str])
     output_schema: type[BaseModel] | None = None
-
-
-class StaticSecrets:
-    """Secret values held in this process, each usable only on the task's own origin."""
-
-    def __init__(self, values: Mapping[str, str], origin: str) -> None:
-        self._values = values
-        self._origin = origin
-
-    def available(self) -> tuple[SecretRef, ...]:
-        return tuple(SecretRef(name=name, origins=(self._origin,)) for name in self._values)
-
-    async def resolve(self, name: str, origin: str) -> str | None:
-        return self._values.get(name) if origin == self._origin else None
 
 
 async def _json(http: httpx.AsyncClient, url: str) -> object:
@@ -203,7 +189,7 @@ async def fast_arm(
         start=task.start,
         browser_api_key=os.environ["BROWSER_USE_API_KEY"],
         output_schema=task.output_schema,
-        secrets=StaticSecrets(task.secrets, origin_of(task.start)) if task.secrets else None,
+        secrets=ScopedSecrets(task.secrets, origin_of(task.start)) if task.secrets else None,
         limits=Limits(max_steps=30, max_dollars=0.25, max_seconds=300),
         downloads=downloads,
         http=http,

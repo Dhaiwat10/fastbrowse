@@ -1,16 +1,17 @@
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from pydantic import BaseModel, Field, JsonValue
 
-from fastbrowse.jev import ChoiceAnswer
+from fastbrowse.config import Thresholds
+from fastbrowse.jev import Answer, ChoiceAnswer, Evaluation, NoulAnswer, Question
 from fastbrowse.llm import Generation, Message
 from fastbrowse.memory import Fact, Notes, evidence_id
 from fastbrowse.models import CostBasis, CostComponent, CostLine, Frozen, LLMPurpose
-from fastbrowse.page import Block, BlockKind, Capture
+from fastbrowse.page import Block, BlockKind, Capture, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.retrieval import (
     UnsupportedField,
@@ -18,6 +19,7 @@ from fastbrowse.retrieval import (
     claim_check_questions,
     compose,
     copy_field,
+    draft_answer,
     field_candidates,
     field_question,
     locate_quote,
@@ -25,6 +27,7 @@ from fastbrowse.retrieval import (
     read,
 )
 from fastbrowse.telemetry import Ledger
+from fastbrowse.verification import check_done
 
 
 def capture(*parts: tuple[BlockKind, str]) -> Capture:
@@ -374,3 +377,47 @@ async def test_composition_and_claims_share_budget() -> None:
     with pytest.raises(BudgetExceeded):
         await check_claims(jev, composed.data, Notes(), Thresholds(), ledger=ledger)
     assert len(llm.calls) == 1 and jev.requests == []
+
+
+class _DraftJev:
+    """Answers the done check with `doubt` for the draft question, or omits that answer when None."""
+
+    def __init__(self, doubt: float | None) -> None:
+        self.doubt = doubt
+
+    async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        answers: dict[str, Answer] = {"complete": NoulAnswer(probability=0.95)}
+        if self.doubt is not None and "draft_needs_writing" in questions:
+            answers["draft_needs_writing"] = NoulAnswer(probability=self.doubt)
+        cost = CostLine(component=CostComponent.JEV, basis=CostBasis.ESTIMATED, dollars=0.0)
+        return Evaluation(model="test", answers=answers, input_tokens=1, cost=cost)
+
+
+@pytest.mark.parametrize(("doubt", "skips_composer"), [(0.1, True), (0.6, False), (None, False)])
+async def test_only_a_confident_jev_no_lets_the_read_facts_stand_as_the_answer(
+    doubt: float | None, skips_composer: bool
+) -> None:
+    page = capture((BlockKind.PARAGRAPH, "Price is $12"))
+    evidence = locate_quote(page, "s0", "Price is $12")
+    assert evidence is not None
+    notes = Notes((Fact(requirement_id="r1", text="The price is $12.", evidence=evidence),))
+    plan = Plan(
+        requirements=(Requirement(id="r1", text="Find price", kind=RequirementKind.INFORMATION),),
+        subgoals=(),
+        answer_expected=True,
+    )
+    draft = draft_answer(plan, notes)
+    assert draft is not None and draft.answer == "The price is $12."
+    assert draft.claims[0].evidence_ids == (evidence_id(evidence),)
+    observation = Observation(
+        url=page.url,
+        title=page.title,
+        page_key="k",
+        captured_at=page.captured_at,
+        controls=(),
+        omitted_controls=0,
+        viewport_text=page.text,
+        tabs=(),
+    )
+    check = await check_done(_DraftJev(doubt), "Find the price", plan, observation, notes, Thresholds(), draft)
+    assert (check.answer is draft) is skips_composer

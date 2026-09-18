@@ -16,6 +16,8 @@ class Thresholds(Frozen):
     done_accept_from: float = 0.85
     claim_problem_above: float = 0.70
     """Any "yes = something is wrong" answer check above this rejects the claim."""
+    rewrite_from: float = 0.30
+    """Jev's doubt that the read facts already answer the task, from which the LLM composer writes it instead."""
 
 
 class ObservationLimits(Frozen):
