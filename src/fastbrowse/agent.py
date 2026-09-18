@@ -629,8 +629,17 @@ class Agent:
         wanted = [r for r in state.notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION]
         question = "\n".join(f"- {r.text}" for r in wanted) or state.task
         before = len(state.notes.facts)
-        await read(self._llm, capture, question, [r.id for r in wanted], state.notes, ledger=state.ledger)
-        return len(state.notes.facts) > before
+        await read(
+            self._llm,
+            capture,
+            question,
+            [r.id for r in wanted],
+            state.notes,
+            ledger=state.ledger,
+            jev=self._jev,
+            requirements=wanted,
+        )
+        return len(state.notes.facts) > before or any(state.notes.evidenced(r.id) for r in wanted)
 
     async def _recover(self, state: _RunState, observation: Observation, reason: str) -> None:
         state.recoveries += 1

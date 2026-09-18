@@ -7,10 +7,20 @@ import pytest
 from pydantic import BaseModel, Field, JsonValue
 
 from fastbrowse.config import Thresholds
-from fastbrowse.jev import Answer, ChoiceAnswer, Evaluation, NoulAnswer, Question
+from fastbrowse.jev import (
+    MAX_CHOICE_OPTIONS,
+    Answer,
+    ChoiceAnswer,
+    ChoiceQuestion,
+    Evaluation,
+    JevError,
+    JevInputTooLarge,
+    NoulAnswer,
+    Question,
+)
 from fastbrowse.llm import Generation, Message
 from fastbrowse.memory import Fact, Notes, evidence_id
-from fastbrowse.models import CostBasis, CostComponent, CostLine, Frozen, LLMPurpose
+from fastbrowse.models import CostBasis, CostComponent, CostLine, Frozen, Limits, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.retrieval import (
@@ -25,8 +35,9 @@ from fastbrowse.retrieval import (
     locate_quote,
     propose_text_fields,
     read,
+    read_candidates,
 )
-from fastbrowse.telemetry import Ledger
+from fastbrowse.telemetry import BudgetExceeded, Ledger
 from fastbrowse.verification import check_done
 
 
@@ -195,6 +206,178 @@ async def test_read_reaches_end_and_does_not_evidence_unknown_requirements() -> 
     result = await read(llm, page, "Need more", ["r1"], notes, max_chars=11)
     assert result.coverage == (0, 1) and len(result.facts) == 1
     assert not notes.evidenced("invented") and not notes.evidenced("r1")
+
+
+class _ReadJev:
+    def __init__(self, answers: Mapping[str, Answer], error: JevError | None = None) -> None:
+        self.answers = answers
+        self.error = error
+        self.requests: list[tuple[JsonValue, Mapping[str, Question]]] = []
+
+    async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        self.requests.append((state, questions))
+        if self.error is not None:
+            raise self.error
+        return Evaluation(
+            model="test",
+            answers=self.answers,
+            input_tokens=10,
+            cost=CostLine(component=CostComponent.JEV, basis=CostBasis.ESTIMATED, dollars=0.0001),
+        )
+
+
+def _choice(key: str, confidence: float = 0.95) -> ChoiceAnswer:
+    return ChoiceAnswer(choice=key, probabilities={key: confidence}, confidence=confidence)
+
+
+async def test_short_read_batches_requirements_and_keeps_citations_without_llm() -> None:
+    page = capture((BlockKind.HEADING, "httpx 0.28.1"), (BlockKind.PARAGRAPH, "License: BSD"))
+    requirements = (
+        Requirement(id="version", text="Find the latest httpx version", kind=RequirementKind.INFORMATION),
+        Requirement(id="license", text="Find the httpx license", kind=RequirementKind.INFORMATION),
+    )
+    jev = _ReadJev({"version": _choice("c0", 0.90), "license": _choice("c1")})
+    llm, notes, ledger = ScriptedLLM([]), Notes(), Ledger(Limits())
+    result = await read(
+        llm, page, "Find both", [r.id for r in requirements], notes, jev=jev, requirements=requirements, ledger=ledger
+    )
+    assert llm.calls == [] and len(jev.requests) == 1
+    assert len(result.facts) == 2 and result.coverage == ()
+    assert ledger.jev_calls == 1 and ledger.llm_calls == 0
+    assert ledger.lines == list(result.cost_lines) and ledger.breakdown().known_dollars == 0.0001
+    for requirement, fact, quote in zip(requirements, result.facts, ("httpx 0.28.1", "License: BSD"), strict=True):
+        assert notes.evidenced(requirement.id)
+        assert fact.text == f"{requirement.text}\n{quote}"
+        assert fact.evidence == locate_quote(page, fact.evidence.source_id, quote)
+    _, questions = jev.requests[0]
+    assert questions.keys() == {"version", "license"}
+    assert all(isinstance(q, ChoiceQuestion) and "none" in q.criteria for q in questions.values())
+    assert all("untrusted data" in q.instructions for q in questions.values())
+    draft = draft_answer(Plan(requirements=requirements, subgoals=(), answer_expected=True), notes)
+    assert draft is not None and len(draft.claims) == 2
+    assert {claim.evidence_ids[0] for claim in draft.claims} == notes.evidence.keys()
+    assert "License: BSD" in claim_check_questions(draft, notes)["unsupported_1"].instructions
+
+
+@pytest.mark.parametrize(
+    "answer", [_choice("c1", 0.89), _choice("none"), _choice("invented"), NoulAnswer(probability=1), None]
+)
+async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer: Answer | None) -> None:
+    page = capture((BlockKind.PARAGRAPH, "Version: 1.2.3"), (BlockKind.PARAGRAPH, "License: MIT"))
+    requirements = (
+        Requirement(id="version", text="Find the latest version", kind=RequirementKind.INFORMATION),
+        Requirement(id="license", text="Find the license name", kind=RequirementKind.INFORMATION),
+    )
+    answers: dict[str, Answer] = {"version": _choice("c0")}
+    if answer is not None:
+        answers["license"] = answer
+    jev = _ReadJev(answers)
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [{"requirement_id": "license", "text": "MIT", "source_id": "s1", "quote": "License: MIT"}],
+                "answered": True,
+            }
+        ]
+    )
+    notes, ledger = Notes(), Ledger(Limits())
+    result = await read(
+        llm,
+        page,
+        "Find version and license",
+        [r.id for r in requirements],
+        notes,
+        jev=jev,
+        requirements=requirements,
+        ledger=ledger,
+    )
+    assert len(jev.requests) == 1 and len(llm.calls) == 1
+    assert "# Question\n- Find the license name\n\n# Requirement ids\nlicense\n" in llm.calls[0][1][-1].content
+    assert all(notes.evidenced(r.id) for r in requirements)
+    assert [fact.evidence.quote for fact in result.facts] == ["Version: 1.2.3", "License: MIT"]
+    assert [cost.component for cost in result.cost_lines] == [CostComponent.JEV, CostComponent.LLM]
+    assert ledger.lines == list(result.cost_lines) and ledger.jev_calls == ledger.llm_calls == 1
+
+
+@pytest.mark.parametrize(
+    "text", ["List the cities", "Compare the cities", "Summarize the cities", "Count all cities on the page"]
+)
+async def test_synthesis_has_an_explicit_none_route_to_the_reader(text: str) -> None:
+    page = capture((BlockKind.PARAGRAPH, "Lyon"))
+    requirement = Requirement(id="r", text=text, kind=RequirementKind.INFORMATION)
+    jev, llm = _ReadJev({"r": _choice("none")}), ScriptedLLM([{"claims": [], "answered": False}])
+    await read(llm, page, text, ["r"], Notes(), jev=jev, requirements=(requirement,))
+    question = jev.requests[0][1]["r"]
+    assert isinstance(question, ChoiceQuestion)
+    assert all(
+        word in question.instructions for word in ("lists", "comparisons", "summaries", "counts across the page")
+    )
+    assert text in question.instructions and "synthesis" in str(question.criteria["none"])
+    assert len(llm.calls) == 1 and f"# Question\n- {text}" in llm.calls[0][1][-1].content
+
+
+def test_short_read_spans_keep_dates_versions_and_table_context_grounded() -> None:
+    page = capture(
+        (BlockKind.HEADING, "Package 1.2.3"),
+        (BlockKind.PARAGRAPH, "Born on 10 December 1815. Died on 27 November 1852."),
+        (BlockKind.TABLE, "| City | Population |\n| --- | --- |\n| Lyon | 522,250 |"),
+    )
+    candidates = read_candidates(page)
+    assert [candidate.value for candidate in candidates[:3]] == [
+        "Package 1.2.3",
+        "Born on 10 December 1815.",
+        "Died on 27 November 1852.",
+    ]
+    cell = next(candidate for candidate in candidates if candidate.value == "522,250")
+    assert "Population" in cell.evidence.quote and "Lyon" in cell.evidence.quote
+    assert "column 'Population'" in cell.context
+    for candidate in candidates:
+        evidence = candidate.evidence
+        assert evidence == locate_quote(page, evidence.source_id, evidence.quote)
+        assert evidence.quote == page.text[evidence.start : evidence.end]
+
+
+async def test_short_read_overflow_uses_reader_without_truncating_candidates() -> None:
+    page = capture(*((BlockKind.PARAGRAPH, f"Candidate {i}") for i in range(MAX_CHOICE_OPTIONS)))
+    requirement = Requirement(id="r", text="Find the price", kind=RequirementKind.INFORMATION)
+    jev, llm = _ReadJev({}), ScriptedLLM([{"claims": [], "answered": False}])
+    await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,))
+    assert jev.requests == [] and len(llm.calls) == 1
+
+
+async def test_short_read_reserves_jev_budget_before_calling() -> None:
+    page = capture((BlockKind.PARAGRAPH, "Price: $12"))
+    requirement = Requirement(id="r", text="Find the price", kind=RequirementKind.INFORMATION)
+    jev, llm, ledger = _ReadJev({}), ScriptedLLM([]), Ledger(Limits(max_jev_calls=1))
+    ledger.reserve(CostComponent.JEV)
+    with pytest.raises(BudgetExceeded):
+        await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,), ledger=ledger)
+    assert jev.requests == [] and llm.calls == []
+
+
+@pytest.mark.parametrize("error", [JevInputTooLarge("too large"), JevError("invalid answer")])
+async def test_rejected_short_read_still_uses_reader_and_counts_jev_call(error: JevError) -> None:
+    page = capture((BlockKind.PARAGRAPH, "Price: $12"))
+    requirement = Requirement(id="r", text="Find the price", kind=RequirementKind.INFORMATION)
+    jev = _ReadJev({}, error)
+    llm, ledger = ScriptedLLM([{"claims": [], "answered": False}]), Ledger(Limits())
+    await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,), ledger=ledger)
+    assert len(jev.requests) == len(llm.calls) == ledger.jev_calls == 1
+
+
+@pytest.mark.parametrize("repetitions", [1, 300])
+async def test_choice_sees_unoffered_passages_or_defers_to_chunked_reader(repetitions: int) -> None:
+    passage = "This newer release has a long description " * 10 * repetitions
+    page = capture((BlockKind.PARAGRAPH, "Old version: 1.0"), (BlockKind.PARAGRAPH, passage))
+    requirement = Requirement(id="r", text="Find the latest version", kind=RequirementKind.INFORMATION)
+    jev = _ReadJev({"r": _choice("none")})
+    response: JsonValue = {"claims": [], "answered": False}
+    llm = ScriptedLLM([response, response])
+    await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,))
+    if repetitions == 1:
+        assert passage in str(jev.requests[0][0])
+    else:
+        assert jev.requests == [] and len(llm.calls) == 2
 
 
 class Fields(Frozen):
