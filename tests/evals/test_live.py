@@ -138,3 +138,12 @@ def test_the_flights_answer_task_needs_the_search_and_a_price() -> None:
     assert check(Outcome("JetBlue", None, "https://www.google.com/travel/flights", controls=page), None) is not None
     # Hosted Browser Use reports no page, so only its answer is graded.
     assert check(Outcome("JetBlue, $846", None, None), None) is None
+
+
+def test_a_repeated_label_passes_when_any_control_holds_the_value() -> None:
+    day = date.today() + timedelta(days=28)
+    page = (("Where from?", ""), *_flights_page(day))
+    assert (
+        task("flights-search").check(Outcome(None, None, "https://www.google.com/travel/flights", controls=page), None)
+        is None
+    )

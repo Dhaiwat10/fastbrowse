@@ -234,13 +234,26 @@ def _flight_results(outcome: Outcome, *, one_way_nonstop: bool) -> str | None:
     guide: a search typed as a query stays on /travel/flights?q=..., and an unsubmitted form can carry the date."""
     if outcome.controls is None:
         return None
-    values = {label.strip(): value or "" for label, value in outcome.controls}
+    # A label can repeat (an overlay editor over the field it edits), so any control holding the value counts.
+    values: dict[str, list[str]] = {}
+    for label, value in outcome.controls:
+        values.setdefault(label.strip(), []).append(value or "")
     departure = f"{_FLIGHT_DAY:%a, %b} {_FLIGHT_DAY.day}"
     day = f"{_FLIGHT_DAY:%A, %B} {_FLIGHT_DAY.day}"
     wanted = {"Where from?": "London", "Where to?": "New York", "Departure": departure}
-    if one_way_nonstop:
-        wanted["Change ticket type. One way"] = "One way"
-    wrong = [f"{label}={values.get(label)!r}" for label, part in wanted.items() if part not in values.get(label, "")]
+    wrong = [
+        f"{label}={values.get(label)!r}"
+        for label, part in wanted.items()
+        if not any(part in value for value in values.get(label, []))
+    ]
+    trip = [
+        f"{label} {value}"
+        for label, found in values.items()
+        if label.startswith("Change ticket type")
+        for value in found
+    ]
+    if one_way_nonstop and not any("One way" in text for text in trip):
+        wrong.append(f"ticket type {trip!r}")
     if one_way_nonstop and not any(label.startswith("Nonstop, Stops, Selected") for label in values):
         wrong.append("no nonstop filter")
     # A result row names its day ("Leaves ... on Friday, October 16", or "Select flight" in some renderings); the
