@@ -427,3 +427,21 @@ async def test_fill_activates_picker_before_typing_and_offers_suggestion(
     option = find(obs, "York Central")
     assert (await page.act(Action(operation=Operation.CLICK, target_id=option.id), obs)).outcome is StepOutcome.EXECUTED
     assert find(await page.observe(), "Station").value == "York Central"
+
+
+async def test_frameset_pages_are_read_through_their_frames(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/frames.html")
+    # A frameset document has no text of its own: everything a user sees is in its frames.
+    assert "Left pane" in (await page.observe()).viewport_text
+    text = (await page.capture()).text
+    assert "Left pane" in text
+    assert "Right pane" in text
+
+
+async def test_a_table_cell_drawn_with_an_icon_is_not_read_as_blank(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/icons.html")
+    text = (await page.capture()).text
+    assert "| First | [flag icon] | [yes] |" in text
+    # A size or weight class shares the icon font's prefix without naming the glyph.
+    assert "| Second |  | [xmark icon] |" in text
+

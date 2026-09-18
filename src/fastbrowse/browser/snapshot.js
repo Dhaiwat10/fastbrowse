@@ -27,7 +27,7 @@
       // innerText omits shadow trees and child documents even when their content is visible.
       for (const e of root.querySelectorAll('*')) {
         if (e.shadowRoot) include(e.shadowRoot);
-        if (e.tagName === 'IFRAME') {
+        if (e.tagName === 'IFRAME' || e.tagName === 'FRAME') {
           let inner = null;
           try { inner = e.contentDocument; } catch { inner = null; }
           if (inner?.body) include(inner);
@@ -132,7 +132,7 @@
     for (const e of root.querySelectorAll(SELECTOR)) yield e;
     for (const e of root.querySelectorAll('*')) {
       if (e.shadowRoot) yield* walk(e.shadowRoot);
-      if (e.tagName === 'IFRAME') {
+      if (e.tagName === 'IFRAME' || e.tagName === 'FRAME') {
         let inner = null;
         try { inner = e.contentDocument; } catch { inner = null; }
         if (inner && inner.body) yield* walk(inner);
@@ -242,18 +242,34 @@
   // Python applies the configured caps after merging frames; keep the nearest controls first.
   controls.sort((a, b) => a.distance - b.distance);
 
-  const words = [], walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  const range = document.createRange();
-  let node;
-  while ((node = walker.nextNode())) {
-    const value = node.textContent.trim(), parent = node.parentElement;
-    if (!value || !parent || parent.closest('script,style,noscript,template') || !visible(parent)) continue;
-    range.selectNodeContents(node);
-    const r = range.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth) {
-      words.push(value);
+  // Text in a same-process child document is on screen as much as the parent's: a frameset page has no text of
+  // its own at all. Each child is read in its own coordinates, shifted by where its frame sits.
+  const words = [];
+  const readText = (doc, dx, dy) => {
+    if (!doc.body) return;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    const range = doc.createRange();
+    let node;
+    while ((node = walker.nextNode())) {
+      const value = node.textContent.trim(), parent = node.parentElement;
+      if (!value || !parent || parent.closest('script,style,noscript,template') || !visible(parent)) continue;
+      range.selectNodeContents(node);
+      const r = range.getBoundingClientRect();
+      const top = r.top + dy, left = r.left + dx;
+      if (r.width > 0 && r.height > 0 && top + r.height > 0 && top < innerHeight && left + r.width > 0
+        && left < innerWidth) {
+        words.push(value);
+      }
     }
-  }
+    for (const frame of doc.querySelectorAll('iframe,frame')) {
+      let inner = null;
+      try { inner = frame.contentDocument; } catch { inner = null; }
+      if (!inner) continue;
+      const f = frame.getBoundingClientRect();
+      readText(inner, dx + f.left + frame.clientLeft, dy + f.top + frame.clientTop);
+    }
+  };
+  readText(document, 0, 0);
   const viewport_text = words.join('\n');
 
   const guards = {};
