@@ -13,7 +13,6 @@ the hosted SDK does not expose a final URL, so its navigation tasks rest on the 
 import argparse
 import asyncio
 import json
-import os
 import sys
 import tempfile
 import time
@@ -25,6 +24,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 from pydantic import BaseModel
 
+from fastbrowse.clients.environment import load_settings
 from fastbrowse.models import CostBreakdown, Limits, RunResult, Status
 from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
@@ -187,7 +187,7 @@ async def fast_arm(
     result = await run_task(
         task.task,
         start=task.start,
-        browser_api_key=os.environ["BROWSER_USE_API_KEY"],
+        browser_api_key=load_settings().browser_key(),
         output_schema=task.output_schema,
         secrets=ScopedSecrets(task.secrets, origin_of(task.start)) if task.secrets else None,
         limits=Limits(max_steps=30, max_dollars=0.25, max_seconds=300),
@@ -200,7 +200,7 @@ async def fast_arm(
 async def hosted_arm(task: LiveTask) -> tuple[Outcome, str, float | None]:
     from browser_use_sdk.v3 import AsyncBrowserUse  # pyright: ignore[reportMissingTypeStubs] - optional extra
 
-    client = AsyncBrowserUse(api_key=os.environ["BROWSER_USE_API_KEY"])
+    client = AsyncBrowserUse(api_key=load_settings().browser_key())
     result = await client.run(
         f"Start at {task.start}. {task.task}",
         output_schema=task.output_schema,

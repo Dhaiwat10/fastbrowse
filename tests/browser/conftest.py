@@ -18,6 +18,7 @@ import pytest_asyncio
 from fastbrowse.adapters.local_chrome import find_chrome, free_port, local_chrome
 from fastbrowse.browser.page import CdpPage
 from fastbrowse.browser.session import BrowserSession
+from fastbrowse.clients.environment import load_settings
 from fastbrowse.config import Config
 from fastbrowse.models import Artifact, ArtifactKind, BrowserConnection
 
@@ -109,9 +110,9 @@ def main_site(iframe_site: str) -> Iterator[str]:
 
 @pytest.fixture(scope="session")
 def chrome_connection() -> Iterator[BrowserConnection]:
-    if find_chrome() is None:
+    if find_chrome(load_settings().chrome) is None:
         pytest.skip("Chrome is not installed")
-    with local_chrome() as connection:
+    with local_chrome(load_settings().chrome) as connection:
         yield connection
 
 

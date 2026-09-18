@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import shutil
 import socket
 import subprocess
@@ -21,8 +20,9 @@ def free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def find_chrome() -> str | None:
-    if override := os.environ.get("FASTBROWSE_CHROME"):
+def find_chrome(override: str | None) -> str | None:
+    """`override` is `Settings.chrome`, a name or path that replaces discovery rather than joining it."""
+    if override:
         return shutil.which(override)
     for name in (
         "google-chrome-stable",
@@ -38,8 +38,8 @@ def find_chrome() -> str | None:
 
 
 @asynccontextmanager
-async def async_local_chrome() -> AsyncGenerator[BrowserConnection]:
-    manager = local_chrome()
+async def async_local_chrome(chrome: str | None) -> AsyncGenerator[BrowserConnection]:
+    manager = local_chrome(chrome)
     opening = asyncio.create_task(asyncio.to_thread(manager.__enter__))
     try:
         try:
@@ -57,9 +57,9 @@ async def async_local_chrome() -> AsyncGenerator[BrowserConnection]:
 
 
 @contextmanager
-def local_chrome() -> Generator[BrowserConnection]:
+def local_chrome(chrome: str | None) -> Generator[BrowserConnection]:
     """Yield a connection to a headless Chrome with a fresh profile, killed on exit."""
-    binary = find_chrome()
+    binary = find_chrome(chrome)
     if binary is None:
         raise RuntimeError("Chrome is not installed")
     port = free_port()

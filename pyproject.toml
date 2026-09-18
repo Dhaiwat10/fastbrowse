@@ -7,7 +7,12 @@ license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Cillian Berragan" }]
 requires-python = ">=3.14"
-dependencies = ["cdp-use==1.4.5", "httpx[http2]>=0.28,<1", "pydantic>=2.11,<3"]
+dependencies = [
+    "cdp-use==1.4.5",
+    "httpx[http2]>=0.28,<1",
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.10,<3",
+]
 
 [project.optional-dependencies]
 browser-use = ["browser-use-sdk>=3.10,<3.11"]

@@ -14,7 +14,6 @@ a model that is fast and unparseable costs a retry and is slower than it looks.
 
 import argparse
 import asyncio
-import os
 import re
 import statistics
 import sys
@@ -24,8 +23,8 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel, Field
 
-from fastbrowse.clients.environment import reasoning_from_environment
-from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM
+from fastbrowse.clients.environment import ConfigurationError, load_settings
+from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM, ReasoningEffort
 from fastbrowse.llm import LLMError, Message
 from fastbrowse.models import LLMPurpose
 
@@ -105,13 +104,13 @@ def read_messages() -> tuple[Message, ...]:
     )
 
 
-async def measure(model: str, http: httpx.AsyncClient, key: str, repeat: int) -> None:
+async def measure(model: str, http: httpx.AsyncClient, key: str, reasoning: ReasoningEffort, repeat: int) -> None:
     llm = OpenAICompatibleLLM(
         key,
         http=http,
         base_url="https://openrouter.ai/api/v1",
         models=dict.fromkeys(LLMPurpose, model),
-        reasoning_effort=reasoning_from_environment(),
+        reasoning_effort=reasoning,
     )
     reads = read_messages()
     for label, messages, schema in (("plan", PLAN_MESSAGES, PlanShape), ("read", reads, ReadShape)):
@@ -137,14 +136,16 @@ async def main(argv: list[str]) -> int:
     parser.add_argument("--models", nargs="*", default=list(CANDIDATES))
     parser.add_argument("--repeat", type=int, default=3)
     args = parser.parse_args(argv)
-    key = os.environ.get("OPENROUTER_API_KEY")
-    if not key:
-        print("set OPENROUTER_API_KEY", file=sys.stderr)
+    settings = load_settings()
+    try:
+        key = settings.openrouter_key()
+    except ConfigurationError as exc:
+        print(exc, file=sys.stderr)
         return 1
     async with httpx.AsyncClient(timeout=120) as http:
         # One model at a time: concurrent candidates would measure our own contention.
         for model in args.models:
-            await measure(model, http, key, args.repeat)
+            await measure(model, http, key, settings.llm_reasoning, args.repeat)
     return 0
 
 

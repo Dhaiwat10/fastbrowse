@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser, BrowserUseCloudError
 from fastbrowse.adapters.local_chrome import async_local_chrome, find_chrome, local_chrome
 from fastbrowse.browser import BrowserSession, CdpPage
+from fastbrowse.clients.environment import Settings
 from fastbrowse.config import Config
 from fastbrowse.models import BrowserConnection, CostLine, Status
 from fastbrowse.page import BrowserError
@@ -147,7 +148,7 @@ async def test_initial_navigation_error_returns_error_result(monkeypatch: pytest
     transport.failures["Page.navigate"] = ConnectionError("secret")
 
     @contextmanager
-    def chrome() -> Generator[BrowserConnection]:
+    def chrome(_binary: str | None) -> Generator[BrowserConnection]:
         yield CONNECTION
 
     monkeypatch.setattr(chrome_adapter, "local_chrome", chrome)
@@ -246,7 +247,7 @@ async def test_cloud_teardown_preserves_original_error_and_cost(stop_fails: bool
     original = RuntimeError("original")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         with pytest.raises(RuntimeError) as raised:
-            async with _browser("key", http, cost):
+            async with _browser("key", Settings.model_construct(), http, cost):
                 raise original
         assert raised.value is original
         assert cost[0].dollars == (0.25 if stop_fails else 0.50)
@@ -264,7 +265,7 @@ async def test_local_chrome_threads_startup_and_shutdown(monkeypatch: pytest.Mon
     loop_thread = threading.get_ident()
 
     @contextmanager
-    def chrome() -> Generator[BrowserConnection]:
+    def chrome(_binary: str | None) -> Generator[BrowserConnection]:
         assert threading.get_ident() != loop_thread
         loop.call_soon_threadsafe(started.set)
         assert release.wait(timeout=5)
@@ -277,7 +278,7 @@ async def test_local_chrome_threads_startup_and_shutdown(monkeypatch: pytest.Mon
     monkeypatch.setattr(chrome_adapter, "local_chrome", chrome)
 
     async def use() -> None:
-        async with async_local_chrome():
+        async with async_local_chrome(None):
             pass
 
     task = asyncio.create_task(use())
@@ -301,10 +302,10 @@ async def test_local_chrome_threads_startup_and_shutdown(monkeypatch: pytest.Mon
 def test_chrome_is_killed_and_reaped_on_shutdown_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     process = Mock()
     process.wait.side_effect = [subprocess.TimeoutExpired("chrome", 10), 0]
-    monkeypatch.setattr(chrome_adapter, "find_chrome", lambda: "/chrome")
+    monkeypatch.setattr(chrome_adapter, "find_chrome", Mock(return_value="/chrome"))
     monkeypatch.setattr(chrome_adapter.subprocess, "Popen", Mock(return_value=process))
     monkeypatch.setattr(chrome_adapter, "_wait_for_ws", Mock(return_value=CONNECTION.cdp_url))
-    with local_chrome():
+    with local_chrome(None):
         pass
     process.terminate.assert_called_once()
     process.kill.assert_called_once()
@@ -324,12 +325,8 @@ def test_chrome_is_killed_and_reaped_on_shutdown_timeout(monkeypatch: pytest.Mon
     ],
 )
 def test_chrome_discovery(monkeypatch: pytest.MonkeyPatch, binary: str) -> None:
-    monkeypatch.delenv("FASTBROWSE_CHROME", raising=False)
-    if binary == "/custom/chrome":
-        monkeypatch.setenv("FASTBROWSE_CHROME", binary)
-
     def which(name: str) -> str | None:
         return binary if name == binary else None
 
     monkeypatch.setattr(chrome_adapter.shutil, "which", which)
-    assert find_chrome() == binary
+    assert find_chrome(binary if binary == "/custom/chrome" else None) == binary

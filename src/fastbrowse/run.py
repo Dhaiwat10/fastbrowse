@@ -19,7 +19,7 @@ from fastbrowse.adapters.local_chrome import async_local_chrome
 from fastbrowse.agent import Agent
 from fastbrowse.artifacts import DirectorySink
 from fastbrowse.browser import BrowserSession, CdpPage
-from fastbrowse.clients.environment import jev_from_environment, llm_from_environment
+from fastbrowse.clients.environment import Settings, load_settings
 from fastbrowse.config import Config
 from fastbrowse.jev import JevClient
 from fastbrowse.llm import LLMClient
@@ -40,10 +40,12 @@ from fastbrowse.page import BrowserError
 
 
 @asynccontextmanager
-async def _browser(key: str | None, http: httpx.AsyncClient, cost: list[CostLine]) -> AsyncGenerator[BrowserConnection]:
+async def _browser(
+    key: str | None, settings: Settings, http: httpx.AsyncClient, cost: list[CostLine]
+) -> AsyncGenerator[BrowserConnection]:
     """A cloud browser when a key is given, otherwise local headless Chrome."""
     if key is None:
-        async with async_local_chrome() as connection:
+        async with async_local_chrome(settings.chrome) as connection:
             yield connection
         return
     remote = BrowserUseCloudBrowser(key, http=http)
@@ -77,22 +79,23 @@ async def run_task(
     """Open `start`, pursue `task`, and return what the run could prove.
 
     `browser_api_key` picks the browser: a Browser Use Cloud key runs there, and None runs local
-    headless Chrome. `jev` and `llm` default to clients built from the environment, so an embedder
-    that resolves its own credentials passes them instead of exporting variables into the process.
+    headless Chrome. `jev` and `llm` default to clients built from `Settings` (the environment, then
+    `.env`), so an embedder that resolves its own credentials passes them instead.
 
     Files the run downloads are discarded unless `downloads` names a directory to keep them in.
     """
     config = config or Config()
+    settings = load_settings()
     browser_cost: list[CostLine] = []
     with TemporaryDirectory() as scratch:
         sink = DirectorySink(downloads or Path(scratch))
         async with httpx.AsyncClient(timeout=60) if http is None else _borrowed(http) as client:
-            jev = jev or jev_from_environment(client)
-            llm = llm or llm_from_environment(client)
+            jev = jev or settings.jev(client)
+            llm = llm or settings.llm(client)
             session: BrowserSession | None = None
             result: RunResult | None = None
             try:
-                async with _browser(browser_api_key, client, browser_cost) as connection:
+                async with _browser(browser_api_key, settings, client, browser_cost) as connection:
                     session = BrowserSession(connection, sink)
                     async with session:
                         page = CdpPage(session, config)

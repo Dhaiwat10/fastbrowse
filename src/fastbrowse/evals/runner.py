@@ -19,7 +19,7 @@ from fastbrowse.adapters.local_chrome import local_chrome
 from fastbrowse.agent import Agent
 from fastbrowse.artifacts import DirectorySink
 from fastbrowse.browser import BrowserSession, CdpPage
-from fastbrowse.clients.environment import jev_from_environment, llm_from_environment
+from fastbrowse.clients.environment import Settings, load_settings
 from fastbrowse.config import Config
 from fastbrowse.evals.local import Recorder, fixture_server
 from fastbrowse.evals.tasks import TASKS, LocalTask
@@ -33,10 +33,11 @@ async def run_task(
     connection: BrowserConnection,
     http: httpx.AsyncClient,
     sink: DirectorySink,
+    settings: Settings,
 ) -> dict[str, object]:
     recorder.clear()
     config = Config()
-    jev, llm = jev_from_environment(http), llm_from_environment(http)
+    jev, llm = settings.jev(http), settings.llm(http)
     started = time.monotonic()
     async with BrowserSession(connection, sink) as session:
         page = CdpPage(session, config)
@@ -72,18 +73,21 @@ async def main(argv: list[str]) -> int:
     parser.add_argument("--out", type=Path, default=Path("artifacts/evals/local.jsonl"))
     args = parser.parse_args(argv)
     tasks = [t for t in TASKS if not args.only or t.id in args.only]
+    settings = load_settings()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
     with (
         fixture_server() as (base_url, recorder),
-        local_chrome() as connection,
+        local_chrome(settings.chrome) as connection,
         tempfile.TemporaryDirectory() as downloads,
         args.out.open("a") as out,
     ):
         async with httpx.AsyncClient(timeout=60) as http:
             for _ in range(args.repeat):
                 for task in tasks:
-                    row = await run_task(task, base_url, recorder, connection, http, DirectorySink(Path(downloads)))
+                    row = await run_task(
+                        task, base_url, recorder, connection, http, DirectorySink(Path(downloads)), settings
+                    )
                     rows.append(row)
                     out.write(json.dumps(row) + "\n")
                     mark = "PASS" if row["passed"] else "FAIL"

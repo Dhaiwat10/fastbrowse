@@ -58,8 +58,7 @@ Needs Python 3.14, [uv](https://docs.astral.sh/uv/), and Chrome (not needed with
 ```sh
 git clone https://github.com/agent-labs-dev/fastbrowse.git && cd fastbrowse
 uv sync
-export AI_GATEWAY_API_KEY=...   # Jev, via Vercel AI Gateway (or TYPESAFE_API_KEY directly)
-export OPENROUTER_API_KEY=...   # the LLM
+cp .env.example .env            # then add a Jev key (AI_GATEWAY_API_KEY) and OPENROUTER_API_KEY
 uv run fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
 

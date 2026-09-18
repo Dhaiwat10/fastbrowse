@@ -13,7 +13,7 @@ import os
 import sys
 from pathlib import Path
 
-from fastbrowse.clients.environment import ConfigurationError
+from fastbrowse.clients.environment import ConfigurationError, load_settings
 from fastbrowse.models import Authorization, Limits, StepEvent
 from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
@@ -53,10 +53,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
 def _browser_key(cloud: bool) -> str | None:
     if not cloud:
         return None
-    key = os.environ.get("BROWSER_USE_API_KEY")
-    if not key:
-        raise ConfigurationError("set BROWSER_USE_API_KEY for --cloud")
-    return key
+    return load_settings().browser_key()
 
 
 async def _print_step(event: StepEvent) -> None:

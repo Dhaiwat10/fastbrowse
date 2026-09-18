@@ -1,14 +1,17 @@
-"""Build the default Jev and LLM clients from environment variables.
+"""Settings from the environment and `.env`, and the default Jev and LLM clients built from them.
 
-Jev: TYPESAFE_API_KEY (direct) or AI_GATEWAY_API_KEY (Vercel AI Gateway).
-LLM: OPENROUTER_API_KEY. FASTBROWSE_LLM_MODEL overrides every purpose at once, and
+Jev: TYPESAFE_API_KEY (direct) or AI_GATEWAY_API_KEY (Vercel AI Gateway). LLM: OPENROUTER_API_KEY.
+Cloud browser: BROWSER_USE_API_KEY. FASTBROWSE_LLM_MODEL overrides every purpose at once, and
 FASTBROWSE_LLM_MODEL_<PURPOSE> (PLAN, READ, FIELD_TEXT, RECOVER, COMPOSE, VERIFY) overrides one.
-FASTBROWSE_LLM_REASONING sets the reasoning effort: low (default), medium or high.
+FASTBROWSE_LLM_REASONING sets the reasoning effort: low (default), medium or high. FASTBROWSE_CHROME
+names the Chrome binary. `.env.example` lists them all. A real environment variable beats `.env`.
 """
 
-import os
+from typing import assert_never
 
 import httpx
+from pydantic import AliasChoices, Field, SecretStr, ValidationError
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM, ReasoningEffort
 from fastbrowse.clients.typesafe import TypeSafeJevClient
@@ -46,40 +49,81 @@ class ConfigurationError(RuntimeError):
     """A missing key or an invalid setting in the environment, reported without a traceback."""
 
 
-def reasoning_from_environment() -> ReasoningEffort:
-    value = os.environ.get("FASTBROWSE_LLM_REASONING", DEFAULT_REASONING)
+def _key(name: str) -> SecretStr | None:
+    return Field(default=None, validation_alias=AliasChoices(name))
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="FASTBROWSE_", extra="ignore", frozen=True)
+
+    typesafe_api_key: SecretStr | None = _key("TYPESAFE_API_KEY")
+    ai_gateway_api_key: SecretStr | None = _key("AI_GATEWAY_API_KEY")
+    openrouter_api_key: SecretStr | None = _key("OPENROUTER_API_KEY")
+    browser_use_api_key: SecretStr | None = _key("BROWSER_USE_API_KEY")
+    llm_model: str | None = None
+    llm_model_plan: str | None = None
+    llm_model_read: str | None = None
+    llm_model_field_text: str | None = None
+    llm_model_recover: str | None = None
+    llm_model_compose: str | None = None
+    llm_model_verify: str | None = None
+    llm_reasoning: ReasoningEffort = DEFAULT_REASONING
+    chrome: str | None = None
+
+    def models(self) -> dict[LLMPurpose, str]:
+        """Per-purpose models, most specific setting winning."""
+        return {
+            purpose: self._purpose_model(purpose) or self.llm_model or DEFAULT_MODELS[purpose] for purpose in LLMPurpose
+        }
+
+    def _purpose_model(self, purpose: LLMPurpose) -> str | None:
+        match purpose:
+            case LLMPurpose.PLAN:
+                return self.llm_model_plan
+            case LLMPurpose.READ:
+                return self.llm_model_read
+            case LLMPurpose.FIELD_TEXT:
+                return self.llm_model_field_text
+            case LLMPurpose.RECOVER:
+                return self.llm_model_recover
+            case LLMPurpose.COMPOSE:
+                return self.llm_model_compose
+            case LLMPurpose.VERIFY:
+                return self.llm_model_verify
+            case _:
+                assert_never(purpose)
+
+    def jev(self, http: httpx.AsyncClient) -> JevClient:
+        if self.typesafe_api_key:
+            return TypeSafeJevClient(self.typesafe_api_key.get_secret_value(), http=http)
+        if self.ai_gateway_api_key:
+            return VercelGatewayJevClient(self.ai_gateway_api_key.get_secret_value(), http=http)
+        raise ConfigurationError("set TYPESAFE_API_KEY or AI_GATEWAY_API_KEY for Jev")
+
+    def llm(self, http: httpx.AsyncClient) -> LLMClient:
+        return OpenAICompatibleLLM(
+            self.openrouter_key(),
+            http=http,
+            base_url="https://openrouter.ai/api/v1",
+            models=self.models(),
+            reasoning_effort=self.llm_reasoning,
+        )
+
+    def openrouter_key(self) -> str:
+        if not self.openrouter_api_key:
+            raise ConfigurationError("set OPENROUTER_API_KEY for the LLM")
+        return self.openrouter_api_key.get_secret_value()
+
+    def browser_key(self) -> str:
+        if not self.browser_use_api_key:
+            raise ConfigurationError("set BROWSER_USE_API_KEY for a cloud browser")
+        return self.browser_use_api_key.get_secret_value()
+
+
+def load_settings() -> Settings:
     try:
-        return ReasoningEffort(value)
-    except ValueError:
-        choices = ", ".join(effort.value for effort in ReasoningEffort)
-        raise ConfigurationError(f"FASTBROWSE_LLM_REASONING={value!r} is not one of {choices}") from None
-
-
-def jev_from_environment(http: httpx.AsyncClient) -> JevClient:
-    if key := os.environ.get("TYPESAFE_API_KEY"):
-        return TypeSafeJevClient(key, http=http)
-    if key := os.environ.get("AI_GATEWAY_API_KEY"):
-        return VercelGatewayJevClient(key, http=http)
-    raise ConfigurationError("set TYPESAFE_API_KEY or AI_GATEWAY_API_KEY for Jev")
-
-
-def models_from_environment() -> dict[LLMPurpose, str]:
-    """Per-purpose models, most specific variable winning."""
-    every = os.environ.get("FASTBROWSE_LLM_MODEL")
-    return {
-        purpose: os.environ.get(f"FASTBROWSE_LLM_MODEL_{purpose.name}") or every or default
-        for purpose, default in DEFAULT_MODELS.items()
-    }
-
-
-def llm_from_environment(http: httpx.AsyncClient) -> LLMClient:
-    key = os.environ.get("OPENROUTER_API_KEY")
-    if not key:
-        raise ConfigurationError("set OPENROUTER_API_KEY for the LLM")
-    return OpenAICompatibleLLM(
-        key,
-        http=http,
-        base_url="https://openrouter.ai/api/v1",
-        models=models_from_environment(),
-        reasoning_effort=reasoning_from_environment(),
-    )
+        return Settings()
+    except ValidationError as exc:
+        # Name the setting, never echo the input: the field may be a key.
+        fields = ", ".join(".".join(str(part) for part in error["loc"]) for error in exc.errors())
+        raise ConfigurationError(f"invalid settings: {fields}") from None
