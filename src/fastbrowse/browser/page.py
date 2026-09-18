@@ -631,6 +631,9 @@ class CdpPage(Page):
 
     async def _click_point(self, session_id: str, point: tuple[float, float]) -> None:
         x, y = point
+        # Arrive before pressing, as a pointer does: menus built on pointer events ignore a press with no hover.
+        moved: DispatchMouseEventParameters = {"type": "mouseMoved", "x": x, "y": y}
+        await self._input(self._session.client.send.Input.dispatchMouseEvent(params=moved, session_id=session_id))
         for kind in ("mousePressed", "mouseReleased"):
             params: DispatchMouseEventParameters = {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1}
             await self._input(self._session.client.send.Input.dispatchMouseEvent(params=params, session_id=session_id))
