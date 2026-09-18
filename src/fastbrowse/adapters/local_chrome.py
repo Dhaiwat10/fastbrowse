@@ -102,8 +102,13 @@ def local_chrome(options: LocalChrome) -> Generator[BrowserConnection]:
                 proc.wait()
 
 
-def _wait_for_ws(active: Path, proc: subprocess.Popen[bytes], log: IO[bytes], timeout: float = 30.0) -> str:
-    """Wait for Chrome to report its DevTools address, failing with its own output if it exits or never does."""
+def _wait_for_ws(active: Path, proc: subprocess.Popen[bytes], log: IO[bytes], timeout: float = 90.0) -> str:
+    """Wait for Chrome to report its DevTools address, failing with its own output if it exits or never does.
+
+    A first start reads Chrome's binary and resources from a cold disk: on CI runners that took 7s in one run
+    and just over 30s in another, with every Chrome process blocked on page-in, and printed "DevTools
+    listening" as the old 30s limit failed the whole browser suite.
+    """
     deadline = time.monotonic() + timeout
     while True:
         if proc.poll() is not None:
