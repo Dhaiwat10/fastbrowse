@@ -435,7 +435,6 @@ async def test_compose_drops_uncited_and_unknown_claims_including_answer_text() 
     llm = ScriptedLLM(
         [
             {
-                "answer": "It is $12 and shipping is free. It arrives tomorrow.",
                 "claims": [
                     {"text": "It is $12.", "evidence_ids": [key]},
                     {"text": "Shipping is free.", "evidence_ids": []},
@@ -463,7 +462,7 @@ async def test_compose_drops_uncited_and_unknown_claims_including_answer_text() 
 
 
 async def test_compose_cannot_return_uncited_free_text_without_claims() -> None:
-    llm = ScriptedLLM([{"answer": "Everything is complete", "claims": []}])
+    llm = ScriptedLLM([{"claims": []}])
     result = await compose(llm, "Do it", Plan(requirements=(), answer_expected=True), Notes())
     assert result.data.answer == "" and result.data.claims == ()
 
@@ -550,7 +549,7 @@ async def test_composition_and_claims_share_budget() -> None:
     from fastbrowse.verification import check_claims
     from tests.test_policy import ScriptedJev
 
-    llm = ScriptedLLM([{"answer": "", "claims": []}])
+    llm = ScriptedLLM([{"claims": []}])
     ledger = Ledger(Limits(max_dollars=0.001))
     composed = await compose(llm, "Find it", Plan(requirements=(), answer_expected=True), Notes(), ledger=ledger)
     jev = ScriptedJev({})

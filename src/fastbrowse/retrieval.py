@@ -604,7 +604,6 @@ class ComposedAnswer(Frozen):
 
 
 class _AnswerDraft(Frozen):
-    answer: str
     claims: tuple[Claim, ...]
 
 

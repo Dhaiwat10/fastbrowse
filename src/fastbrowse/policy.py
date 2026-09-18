@@ -1,8 +1,8 @@
 """Jev's per-step decision: one batched request picks the operation and its target.
 
 Question wording is adapted from browser-use/jev-ultrafast (MIT) `questions.py` and `model.py`, where it was
-live-bench proven; the request shape adds a previous-step check, an optional login check, and a
-group -> element stage for choices beyond Jev's option limit.
+live-bench proven. The batch asks for an operation, its possible targets, and an optional login check.
+Choices beyond Jev's option limit use a group choice followed by a separate element request.
 """
 
 import json
@@ -121,7 +121,6 @@ class _Request:
     questions: Mapping[str, Question]
     targets: Mapping[Operation, tuple[Control, ...]]
     groups: Mapping[Operation, tuple[tuple[Control, ...], ...]]
-    offered: tuple[Operation, ...]
 
 
 async def decide(
@@ -134,7 +133,7 @@ async def decide(
         request = build_request(observation, controls, context, config)
         if fits(request, config):
             try:
-                return await _evaluate(jev, request, observation, controls, context, config, reduction, ledger)
+                return await _evaluate(jev, request, controls, context, reduction, ledger)
             except JevInputTooLarge:
                 pass
         if reduction is Reduction.ONSCREEN_ONLY or not any(c.offscreen for c in controls):
@@ -224,7 +223,7 @@ def build_request(
             "A sign-in, verification or access wall blocks the task and the task gives no way through it.",
             "The task can progress without signing in, or the task supplies the credentials to sign in.",
         )
-    return _Request(_state(observation, controls, context), questions, targets, groups, offered)
+    return _Request(_state(observation, controls, context), questions, targets, groups)
 
 
 def fits(request: _Request, config: Config) -> bool:
@@ -240,10 +239,8 @@ def fits(request: _Request, config: Config) -> bool:
 async def _evaluate(
     jev: JevClient,
     request: _Request,
-    observation: Observation,
     controls: Sequence[Control],
     context: StepContext,
-    config: Config,
     reduction: Reduction,
     ledger: Ledger | None,
 ) -> Decision:
