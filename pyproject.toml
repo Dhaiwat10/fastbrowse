@@ -14,6 +14,11 @@ dependencies = [
     "pydantic-settings>=2.10,<3",
 ]
 
+[project.urls]
+Homepage = "https://github.com/agent-labs-dev/fastbrowse"
+Repository = "https://github.com/agent-labs-dev/fastbrowse"
+Issues = "https://github.com/agent-labs-dev/fastbrowse/issues"
+
 [project.optional-dependencies]
 browser-use = ["browser-use-sdk>=3.10,<3.11"]
 
