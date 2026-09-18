@@ -46,6 +46,18 @@ Twelve runs is a smoke test, not a benchmark: single runs swing by several secon
 wiki-godel run took 34s on a slow read. `passed` counts only `complete`; the hosted miss ended with
 "Task ended unexpectedly".
 
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
+  <img src="assets/architecture.svg" alt="The task is planned and the start page opened in parallel; each step indexes the page, Jev picks an operation and target, code gates it and acts; reads keep verbatim quotes, and the answer cites every claim.">
+</picture>
+
+Jev never writes an action, it picks one of the candidates on the page, so it cannot click something
+that is not there. The LLM plans, reads and writes. Code owns the gates: irreversible actions stop
+without `--authorize`, secrets reach models by name only, and an answer counts only when every
+claim quotes the page. More in [docs/design.md](docs/design.md).
+
 ## How it compares
 
 | | hosted Browser Use | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | fastbrowse |
