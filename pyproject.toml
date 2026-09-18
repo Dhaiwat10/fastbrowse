@@ -20,7 +20,7 @@ Repository = "https://github.com/agent-labs-dev/fastbrowse"
 Issues = "https://github.com/agent-labs-dev/fastbrowse/issues"
 
 [project.optional-dependencies]
-browser-use = ["browser-use-sdk>=3.10,<3.11"]
+browser-use = ["browser-use-sdk>=3.11.3,<3.12"]
 
 [project.scripts]
 fastbrowse = "fastbrowse.cli:main"
