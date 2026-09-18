@@ -154,5 +154,5 @@ from a site's own API, or the URL the browser ended on. See [docs/evals.md](docs
 
 ## License
 
-MIT, copyright Agent Labs. Built by Cillian Berragan. Adapted third-party code is credited in
+MIT, copyright Agent Labs. Adapted third-party code is credited in
 [NOTICE](NOTICE).

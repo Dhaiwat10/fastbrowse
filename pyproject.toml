@@ -5,7 +5,7 @@ description = "A browser agent that picks instead of generating: Jev chooses, an
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
-authors = [{ name = "Cillian Berragan" }]
+authors = [{ name = "Agent Labs" }]
 requires-python = ">=3.14"
 dependencies = [
     "cdp-use==1.4.5",
