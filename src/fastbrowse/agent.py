@@ -167,6 +167,8 @@ class _RunState:
     ready_plan: Plan | None = None
     read_here: bool = False
     """This page has been read since it last changed."""
+    tried_unsure: set[str] = field(default_factory=set[str])
+    """Page states where an unsure pick has been acted on instead of recovering; the next one there recovers."""
     read_urls: set[str] = field(default_factory=set[str])
     """Pages read on the way out of them, each read once."""
     leaving: list[asyncio.Task[bool]] = field(default_factory=list[asyncio.Task[bool]])
@@ -313,7 +315,9 @@ class Agent:
             # do not act: a read changes nothing, and DONE is judged again by `_finish`. Jev splitting DONE from
             # READ on the page that shows the answer sent every such run to recovery, and one spent the whole
             # recovery budget there and ended without an answer.
-            if (uncertain and decision.operation not in _NOT_ACTING) or decision.operation is Operation.ESCALATE:
+            if decision.operation is Operation.ESCALATE or (
+                uncertain and decision.operation not in _NOT_ACTING and not _try_unsure(state, observation)
+            ):
                 await self._recover(state, observation, f"uncertain next step ({decision.confidence:.2f})")
                 continue
             if decision.operation is Operation.DONE:
@@ -673,7 +677,8 @@ class Agent:
         if isinstance(answer, NoulAnswer) and answer.probability <= thresholds.irreversible_above:
             return
         what = f"{decision.operation.value} {label!r}"
-        if authorized:
+        # An unsure pick that may commit something is more likely the wrong pick than the step to confirm.
+        if authorized or decision.confidence < thresholds.recover_below:
             raise _Unsure(f"unsure {what} is the irreversible action the task means ({decision.confidence:.2f})")
         raise _Stop(Status.NEEDS_CONFIRMATION, f"{what} needs confirmation")
 
@@ -1218,6 +1223,21 @@ def _controls_text(observation: Observation) -> str:
             for index, control in enumerate(observation.controls)
         ]
     )
+
+
+def _try_unsure(state: _RunState, observation: Observation) -> bool:
+    """Whether to act on Jev's unsure pick rather than recover: once per page state.
+
+    Recovery costs about 5s, and on a flights form 9 of 12 recoveries for an unsure step named the control Jev
+    had already picked. Acting costs one step when the pick is wrong, and a wrong pick is still caught: one that
+    changes nothing leaves Jev unsure on the same state, which then recovers, one that goes round is caught by
+    the revisit check, and one that may commit something irreversible is asked about before it dispatches.
+    """
+    key = state_key(observation)
+    if key in state.tried_unsure:
+        return False
+    state.tried_unsure.add(key)
+    return True
 
 
 def _follow_recovery(
