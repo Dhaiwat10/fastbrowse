@@ -15,7 +15,7 @@ import httpx
 from pydantic import BaseModel
 
 from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser
-from fastbrowse.adapters.local_chrome import local_chrome
+from fastbrowse.adapters.local_chrome import async_local_chrome
 from fastbrowse.agent import Agent
 from fastbrowse.artifacts import DirectorySink
 from fastbrowse.browser import BrowserSession, CdpPage
@@ -33,21 +33,26 @@ from fastbrowse.models import (
     Limits,
     RunResult,
     SecretResolver,
+    Status,
     UntilCheck,
 )
+from fastbrowse.page import BrowserError
 
 
 @asynccontextmanager
 async def _browser(key: str | None, http: httpx.AsyncClient, cost: list[CostLine]) -> AsyncGenerator[BrowserConnection]:
     """A cloud browser when a key is given, otherwise local headless Chrome."""
     if key is None:
-        with local_chrome() as connection:
+        async with async_local_chrome() as connection:
             yield connection
         return
-    async with BrowserUseCloudBrowser(key, http=http) as remote:
-        yield remote.connection
-    # Read after stopping: the session reports what the browser and its proxy cost only once it ends.
-    cost.extend(remote.cost)
+    remote = BrowserUseCloudBrowser(key, http=http)
+    try:
+        async with remote:
+            yield remote.connection
+    finally:
+        # Keep the last reported cost even when setup or teardown fails.
+        cost.extend(remote.cost)
 
 
 async def run_task(
@@ -84,21 +89,35 @@ async def run_task(
         async with httpx.AsyncClient(timeout=60) if http is None else _borrowed(http) as client:
             jev = jev or jev_from_environment(client)
             llm = llm or llm_from_environment(client)
-            async with (
-                _browser(browser_api_key, client, browser_cost) as connection,
-                BrowserSession(connection, sink) as session,
-            ):
-                page = CdpPage(session, config)
-                await page.navigate(start)
-                result = await Agent(page, jev, llm, config=config, secrets=secrets, on_event=on_event).run(
-                    task,
-                    output_schema=output_schema,
-                    inputs=inputs,
-                    attachments=attachments,
-                    limits=limits,
-                    authorization=authorization,
-                    until=until,
+            session: BrowserSession | None = None
+            result: RunResult | None = None
+            try:
+                async with _browser(browser_api_key, client, browser_cost) as connection:
+                    session = BrowserSession(connection, sink)
+                    async with session:
+                        page = CdpPage(session, config)
+                        await page.navigate(start)
+                        result = await Agent(page, jev, llm, config=config, secrets=secrets, on_event=on_event).run(
+                            task,
+                            output_schema=output_schema,
+                            inputs=inputs,
+                            attachments=attachments,
+                            limits=limits,
+                            authorization=authorization,
+                            until=until,
+                        )
+            except BrowserError as exc:
+                result = result or RunResult(
+                    status=Status.ERROR,
+                    answer=None,
+                    data=None,
+                    evidence=(),
+                    steps=(),
+                    cost=CostBreakdown(),
+                    artifacts=session.artifacts if session is not None else (),
                 )
+                result = result.model_copy(update={"status": Status.ERROR, "error": str(exc)})
+    assert result is not None
     return result.model_copy(update={"cost": CostBreakdown(lines=(*result.cost.lines, *browser_cost))})
 
 

@@ -1,13 +1,12 @@
 """Fixtures for browser-layer tests: a real headless Chrome plus two-host fixture sites.
 
-Skips the whole module cleanly when `google-chrome-stable` is not installed, since these tests exercise
+Skips browser fixtures when Chrome is not installed, since these tests exercise
 real CDP mechanics (OOPIFs, downloads, dialogs) that cannot be faked without losing their signal.
 """
 
 from __future__ import annotations
 
 import hashlib
-import shutil
 import threading
 from collections.abc import AsyncIterator, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,17 +15,13 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from fastbrowse.adapters.local_chrome import free_port, local_chrome
+from fastbrowse.adapters.local_chrome import find_chrome, free_port, local_chrome
 from fastbrowse.browser.page import CdpPage
 from fastbrowse.browser.session import BrowserSession
 from fastbrowse.config import Config
 from fastbrowse.models import Artifact, ArtifactKind, BrowserConnection
 
 SITES = Path(__file__).parent / "sites"
-CHROME = shutil.which("google-chrome-stable") or shutil.which("google-chrome")
-
-if CHROME is None:
-    pytest.skip("google-chrome-stable is not installed", allow_module_level=True)
 
 
 class RecordingArtifactSink:
@@ -114,6 +109,8 @@ def main_site(iframe_site: str) -> Iterator[str]:
 
 @pytest.fixture(scope="session")
 def chrome_connection() -> Iterator[BrowserConnection]:
+    if find_chrome() is None:
+        pytest.skip("Chrome is not installed")
     with local_chrome() as connection:
         yield connection
 

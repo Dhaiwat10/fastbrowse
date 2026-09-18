@@ -97,9 +97,6 @@
     }
   }
 
-  registry.pageKey = () => [performance.timeOrigin, location.href, scrollX, scrollY, innerWidth, innerHeight,
-    [...document.querySelectorAll('input,textarea,select')].filter(safe)
-      .map(e => [identity(e), reveal(e), e.checked, e.selectedIndex, e.disabled, e.readOnly])];
   registry.guard = e => {
     if (!e?.isConnected || !visible(e)) return null;
     const scope = e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
@@ -107,7 +104,7 @@
       e.readOnly ?? null, e.matches(':disabled'), e.getAttribute('aria-disabled'),
       e.getAttribute('aria-expanded'), e.getAttribute('aria-checked'), e.getAttribute('aria-selected'),
       e.getAttribute('href'), scope?.innerText?.slice(0, 6000) || '',
-      e.ownerDocument.defaultView.origin, e.ownerDocument.defaultView.performance.timeOrigin, submitSemantics(e)];
+      e.ownerDocument.location.origin, e.ownerDocument.defaultView.performance.timeOrigin, submitSemantics(e)];
   };
 
   const controls = [];
@@ -121,7 +118,7 @@
       id, role: rname, label: labelOf(e) || rname, offscreen: y < 0 || y >= innerHeight,
       distance: (y < 0 || y >= innerHeight) ? 1 + Math.abs(y - innerHeight / 2) : 0,
       sensitive: secret(e), input_type: e.type || null,
-      frame_origin: e.ownerDocument.defaultView.origin, frame_path: framePath(e.ownerDocument),
+      frame_origin: e.ownerDocument.location.origin, frame_path: framePath(e.ownerDocument),
       submit_semantics: submitSemantics(e),
     };
     if (rname === 'link' && e.href) {
@@ -151,48 +148,34 @@
     controls.push(base);
   }
 
-  // Within the cap, prefer what is on screen, then what is nearest to it.
+  // Python applies the configured caps after merging frames; keep the nearest controls first.
   controls.sort((a, b) => a.distance - b.distance);
-  const kept = [], offscreenIds = new Set();
-  for (const c of controls) {
-    if (c.offscreen) {
-      if (offscreenIds.size >= 40 && !offscreenIds.has(c.id)) continue;
-      offscreenIds.add(c.id);
-    }
-    kept.push(c);
-  }
-  const omitted = controls.length - kept.length;
 
   const words = [], walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   const range = document.createRange();
-  let node, length = 0;
-  while ((node = walker.nextNode()) && length < 6000) {
+  let node;
+  while ((node = walker.nextNode())) {
     const value = node.textContent.trim(), parent = node.parentElement;
     if (!value || !parent || parent.closest('script,style,noscript,template') || !visible(parent)) continue;
     range.selectNodeContents(node);
     const r = range.getBoundingClientRect();
     if (r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth) {
       words.push(value);
-      length += value.length;
     }
   }
-  const viewport_text = words.join('\n').slice(0, 6000);
+  const viewport_text = words.join('\n');
 
   const guards = {};
-  for (const c of kept) guards[c.id] = registry.guard(registry.nodes.get(c.id));
-  const page_key_raw = registry.pageKey();
+  for (const c of controls) guards[c.id] = registry.guard(registry.nodes.get(c.id));
+  const field_state = [...document.querySelectorAll('input,textarea,select')].filter(safe)
+    .map(e => [identity(e), reveal(e), e.checked, e.selectedIndex, e.disabled, e.readOnly]);
   // Compare meaning and identity for the page_key fingerprint; geometry is re-resolved just before input.
-  const semantics = kept.map(({ distance, ...c }) => c);
+  const semantics = controls.map(({ distance, ...c }) => c);
   const page_key = JSON.stringify([location.href, scrollX, scrollY, innerWidth, innerHeight,
-    document.title, viewport_text, semantics, page_key_raw[6]]);
-
-  let dialog = null;
-  if (window.__fastbrowseDialog) dialog = window.__fastbrowseDialog;
+    document.title, viewport_text, semantics, field_state]);
 
   return {
     url: location.href, title: document.title, viewport_text, document_key: String(performance.timeOrigin),
-    controls: kept.map(({ distance, ...c }) => c), omitted_controls: omitted,
-    page_key, guards, scroll_bottom: scrollY + innerHeight >= document.documentElement.scrollHeight - 2,
-    scroll_top: scrollY <= 0, inaccessible_frames: inaccessible,
+    controls: semantics, page_key, guards, inaccessible_frames: inaccessible,
   };
 })()

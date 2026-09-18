@@ -13,8 +13,9 @@ import pytest
 
 from fastbrowse.browser.page import CdpPage
 from fastbrowse.browser.session import BrowserSession
+from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.models import Attachment, Operation, StepOutcome
-from fastbrowse.page import Action, Control, Observation
+from fastbrowse.page import Action, BrowserError, Control, Observation
 from tests.browser.conftest import RecordingArtifactSink
 
 pytestmark = pytest.mark.asyncio
@@ -297,3 +298,42 @@ async def test_fill_fails_when_another_field_holds_the_text_we_could_not_insert(
     field = find(obs, "Rejecting field")
     result = await loaded_page.act(Action(operation=Operation.FILL, target_id=field.id, text="godel"), obs)
     assert result.outcome == StepOutcome.FAILED
+
+
+async def test_observation_limits_can_exceed_old_javascript_caps(
+    loaded_page: CdpPage, browser_session: BrowserSession
+) -> None:
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.body.replaceChildren(); "
+        "const text = document.createElement('div'); text.textContent = 'x'.repeat(8000); "
+        "document.body.append(text); "
+        "for (let i = 0; i < 60; i++) { const b = document.createElement('button'); "
+        "b.textContent = 'Button ' + i; b.style.cssText = 'position:absolute;left:20px;top:' + (10000+i*40) + 'px'; "
+        "document.body.append(b); }",
+    )
+    default = await loaded_page.observe()
+    assert len(default.controls) == 40 and default.omitted_controls == 20
+    assert len(default.viewport_text) == 6000
+
+    page = CdpPage(
+        browser_session,
+        Config(observation=ObservationLimits(max_controls=100, max_offscreen_controls=55, viewport_text_chars=7500)),
+    )
+    expanded = await page.observe()
+    assert len(expanded.controls) == 55 and expanded.omitted_controls == 5
+    assert len(expanded.viewport_text) == 7500
+
+
+async def test_page_exception_is_typed_and_does_not_echo_page_text(
+    loaded_page: CdpPage, browser_session: BrowserSession
+) -> None:
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "Object.defineProperty(document, 'title', {get() { throw new Error('echoed-secret'); }});",
+    )
+    with pytest.raises(BrowserError, match=r"Runtime.evaluate failed \(JavaScriptError\)") as raised:
+        await loaded_page.observe()
+    assert "echoed-secret" not in str(raised.value)
