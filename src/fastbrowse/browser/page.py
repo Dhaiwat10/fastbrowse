@@ -23,7 +23,7 @@ from cdp_use.cdp.page.commands import CaptureScreenshotParameters
 
 from fastbrowse.browser.session import BrowserSession
 from fastbrowse.config import Config
-from fastbrowse.models import Artifact, Attachment, Operation, StepOutcome
+from fastbrowse.models import TARGETED, Artifact, Attachment, Operation, StepOutcome
 from fastbrowse.page import (
     Action,
     ActResult,
@@ -296,15 +296,7 @@ class CdpPage(Page):
         if self._session.pending_dialog() is None:
             before_fingerprint, live_guard, point = await self._before_action(
                 target,
-                hit_test=action.operation
-                in {
-                    Operation.CLICK,
-                    Operation.HOVER,
-                    Operation.FILL,
-                    Operation.SELECT,
-                    Operation.ENTER,
-                    Operation.UPLOAD,
-                },
+                hit_test=action.operation in TARGETED,
             )
             if target is not None and live_guard != target[3]:
                 return ActResult(
@@ -382,10 +374,8 @@ class CdpPage(Page):
             return StepOutcome.STALE, "target disconnected"
         if point == "covered":
             return StepOutcome.COVERED, None
-        x, y = point
         # The pointer stays where it lands, so what the hover reveals is still shown when the page is next read.
-        params: DispatchMouseEventParameters = {"type": "mouseMoved", "x": x, "y": y}
-        await self._input(self._session.client.send.Input.dispatchMouseEvent(params=params, session_id=target[0]))
+        await self._move(target[0], point)
         return StepOutcome.EXECUTED, None
 
     async def _announces_popup(self, session_id: str, local_id: int) -> bool:
@@ -629,11 +619,14 @@ class CdpPage(Page):
             return StepOutcome.STALE, "upload target disconnected"
         return StepOutcome.EXECUTED, None
 
+    async def _move(self, session_id: str, point: tuple[float, float]) -> None:
+        params: DispatchMouseEventParameters = {"type": "mouseMoved", "x": point[0], "y": point[1]}
+        await self._input(self._session.client.send.Input.dispatchMouseEvent(params=params, session_id=session_id))
+
     async def _click_point(self, session_id: str, point: tuple[float, float]) -> None:
-        x, y = point
         # Arrive before pressing, as a pointer does: menus built on pointer events ignore a press with no hover.
-        moved: DispatchMouseEventParameters = {"type": "mouseMoved", "x": x, "y": y}
-        await self._input(self._session.client.send.Input.dispatchMouseEvent(params=moved, session_id=session_id))
+        await self._move(session_id, point)
+        x, y = point
         for kind in ("mousePressed", "mouseReleased"):
             params: DispatchMouseEventParameters = {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1}
             await self._input(self._session.client.send.Input.dispatchMouseEvent(params=params, session_id=session_id))

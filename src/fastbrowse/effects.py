@@ -48,6 +48,7 @@ def effect(before: Observation, after: Observation) -> Effect:
     if navigated:
         parts.append(f"went to {_short(after.url)}")
     changes: list[str] = []
+    setting = False
     for key, now in new.items():
         was = old.get(key)
         if was is None:
@@ -56,7 +57,8 @@ def effect(before: Observation, after: Observation) -> Effect:
             a, b = getattr(was, name), getattr(now, name)
             if a != b:
                 changes.append(f"{_short(was.label)} {name}: {_short(a)} -> {_short(b)}")
-    setting = [c for c in changes if " expanded: " not in c]
+                # A menu opening or closing is not a value set.
+                setting = setting or name != "expanded"
     if changes:
         parts.append(
             "changed "
@@ -69,4 +71,4 @@ def effect(before: Observation, after: Observation) -> Effect:
         parts.append(f"showed {_listed(shown)}")
     if hidden:
         parts.append(f"removed {_listed(hidden)}")
-    return Effect(summary="; ".join(parts) or "nothing visible changed", set_something=navigated or bool(setting))
+    return Effect(summary="; ".join(parts) or "nothing visible changed", set_something=navigated or setting)

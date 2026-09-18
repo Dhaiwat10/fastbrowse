@@ -49,6 +49,12 @@ class Operation(StrEnum):
     ESCALATE = "escalate"
 
 
+TARGETED = frozenset(
+    {Operation.CLICK, Operation.HOVER, Operation.FILL, Operation.SELECT, Operation.ENTER, Operation.UPLOAD}
+)
+"""Operations aimed at one observed control, which is hit-tested before input reaches it."""
+
+
 class Decider(StrEnum):
     JEV = "jev"
     LLM = "llm"

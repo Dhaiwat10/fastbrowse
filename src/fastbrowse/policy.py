@@ -24,7 +24,7 @@ from fastbrowse.jev import (
     NoulQuestion,
     Question,
 )
-from fastbrowse.models import CostComponent, CostLine, Frozen, Operation, StepOutcome
+from fastbrowse.models import TARGETED, CostComponent, CostLine, Frozen, Operation, StepOutcome
 from fastbrowse.page import Control, Observation
 from fastbrowse.telemetry import Ledger
 
@@ -70,10 +70,6 @@ OPERATION_LABELS: Mapping[Operation, str] = {
     Operation.DONE: "Every requirement is visibly satisfied.",
     Operation.ESCALATE: "No offered operation can make progress.",
 }
-
-TARGETED = frozenset(
-    {Operation.CLICK, Operation.HOVER, Operation.FILL, Operation.SELECT, Operation.ENTER, Operation.UPLOAD}
-)
 
 
 class Reduction(StrEnum):
