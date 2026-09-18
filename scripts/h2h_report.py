@@ -15,8 +15,9 @@ action repeated on the same target. Hosted Browser Use reports no step trace, so
 import argparse
 import json
 import statistics
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import cast
 
 from fastbrowse.evals.live_tasks import TASKS
 
@@ -34,14 +35,32 @@ def load(path: Path, since: float) -> list[dict[str, object]]:
 _PASSIVE = {"read", "scroll", "done", "wait"}
 
 
-def wasted(trace: Sequence[str]) -> int:
-    """Steps in a run's trace ("operation target -> outcome") that did not move it forward."""
+def _steps(row: Mapping[str, object]) -> list[tuple[str, str, str]] | None:
+    """(operation, the action as a repeat is judged, outcome) per step; None for an arm that reports no steps."""
+    log = row.get("step_log")
+    if isinstance(log, list):
+        # The same action from another page is a new action: the second of two searches fills the same box.
+        steps = cast(list[dict[str, object]], log)
+        return [
+            (str(s["operation"]), f"{s['operation']} {s.get('target')} @ {s.get('url')}", str(s["outcome"]))
+            for s in steps
+        ]
+    trace = row.get("trace")
+    if not isinstance(trace, list):
+        return None
+    # Rows from before step_log hold only "operation target -> outcome", so a repeat there ignores the page.
+    parsed = [str(step).rpartition(" -> ") for step in cast(list[object], trace)]
+    return [(action.split(" ", 1)[0], action, outcome.strip()) for action, _, outcome in parsed]
+
+
+def wasted(row: Mapping[str, object]) -> int | None:
+    """Steps that did not move a run forward: help requests, actions that failed or changed nothing, repeats."""
+    if (steps := _steps(row)) is None:
+        return None
     seen: set[str] = set()
     count = 0
-    for step in trace:
-        action, _, outcome = step.rpartition(" -> ")
-        operation = action.split(" ", 1)[0]
-        if operation == "escalate" or outcome.strip() not in {"executed", "changed"}:
+    for operation, action, outcome in steps:
+        if operation == "escalate" or outcome not in {"executed", "changed"}:
             count += 1
         elif operation not in _PASSIVE:
             count += action in seen
@@ -68,8 +87,8 @@ def table(rows: Sequence[dict[str, object]]) -> str:
         cost = f"${statistics.mean(dollars):.4f}" if dollars else "unknown"
         if unknown and dollars:
             cost += f" ({unknown} unknown)"
-        traces = [t for r in runs if isinstance(t := r.get("trace"), list)]
-        waste = f"{statistics.mean(wasted(t) for t in traces):.1f}" if traces else "not reported"
+        counts = [w for r in runs if (w := wasted(r)) is not None]
+        waste = f"{statistics.mean(counts):.1f}" if counts else "not reported"
         lines.append(
             f"| {name} | {sum(bool(r['passed']) for r in runs)}/{len(runs)} "
             f"| {sum(bool(r.get('correct')) for r in runs)}/{len(runs)} "
@@ -83,8 +102,7 @@ def videos(rows: Sequence[dict[str, object]]) -> str:
     for r in sorted(rows, key=lambda r: (str(r["task"]), str(r["arm"]), str(r.get("video")))):
         if r.get("video"):
             mark = "pass" if r["passed"] else "fail"
-            trace = r.get("trace")
-            waste = wasted(trace) if isinstance(trace, list) else "-"
+            waste = "-" if (count := wasted(r)) is None else count
             lines.append(
                 f"| `{Path(str(r['video'])).name}` | {r['arm']} | {r['task']} | {mark} | {r['seconds']}s | {waste} |"
             )
