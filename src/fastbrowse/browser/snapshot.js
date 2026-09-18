@@ -18,13 +18,30 @@
     };
     registry.track(document);
   }
-  if (mode === 'fingerprint') return {
-    fingerprint: location.href + '|' + document.title + '|' +
-      (document.body ? document.body.innerText.length : 0) + '|' + scrollY,
-    ready: document.readyState === 'interactive' || document.readyState === 'complete',
-    quietFor: performance.now() - registry.lastMutation,
-    hidden: document.hidden,
-  };
+  if (mode === 'fingerprint') {
+    let hash = 2166136261;
+    const include = root => {
+      registry.track(root);
+      const text = root.body?.innerText ?? root.textContent ?? '';
+      for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+      // innerText omits shadow trees and child documents even when their content is visible.
+      for (const e of root.querySelectorAll('*')) {
+        if (e.shadowRoot) include(e.shadowRoot);
+        if (e.tagName === 'IFRAME') {
+          let inner = null;
+          try { inner = e.contentDocument; } catch { inner = null; }
+          if (inner?.body) include(inner);
+        }
+      }
+    };
+    include(document);
+    return {
+      fingerprint: location.href + '|' + document.title + '|' + (hash >>> 0) + '|' + scrollY,
+      ready: document.readyState === 'interactive' || document.readyState === 'complete',
+      quietFor: performance.now() - registry.lastMutation,
+      hidden: document.hidden,
+    };
+  }
   if (!document.body) return null;
   const identity = e => {
     if (!registry.ids.has(e)) registry.ids.set(e, registry.next++);

@@ -84,7 +84,7 @@ async def test_observe_lists_controls_and_masks_password(loaded_page: CdpPage) -
     assert password2.value == "•" * len("s3cr3t")
 
 
-async def test_secret_typed_into_text_field_is_masked_but_submitted(
+async def test_secret_typed_into_text_field_is_masked_but_preserves_value(
     loaded_page: CdpPage, browser_session: BrowserSession
 ) -> None:
     obs = await loaded_page.observe()

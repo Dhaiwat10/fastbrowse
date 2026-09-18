@@ -159,7 +159,7 @@ async def test_settling_tracks_same_length_mutations(
     obs = await page.observe()
     result = await page.act(Action(operation=Operation.CLICK, target_id=find(obs, "Change").id), obs)
     assert result.outcome is StepOutcome.EXECUTED
-    assert not result.page_changed
+    assert result.page_changed
     assert (
         await eval_value(browser_session, browser_session.active_session_id, "window.fixtureRoot.textContent")
         == "State 3"

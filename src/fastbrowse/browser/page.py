@@ -40,9 +40,7 @@ from fastbrowse.page import (
 _PAGE_JS = (Path(__file__).with_name("snapshot.js")).read_text()
 _SNAPSHOT_JS = _PAGE_JS + "('snapshot')"
 _CAPTURE_JS = (Path(__file__).with_name("capture.js")).read_text()
-_FINGERPRINT_JS = (
-    "location.href + '|' + document.title + '|' + (document.body ? document.body.innerText.length : 0) + '|' + scrollY"
-)
+_FINGERPRINT_JS = _PAGE_JS + "('fingerprint').fingerprint"
 _SELECT_TEXT_JS = (
     "if (typeof e.select === 'function') e.select(); else { const range = e.ownerDocument.createRange(); "
     "range.selectNodeContents(e); const selection = e.ownerDocument.getSelection(); "
@@ -87,7 +85,8 @@ _SETTLE_SECONDS = 5.0
 _SETTLE_POLL_SECONDS = 0.1
 _SETTLE_QUIET_SECONDS = 0.2
 _SCREENSHOT_WAIT_SECONDS = 1.0
-_FOCUS_SETTLE_SECONDS = 0.3
+# A deadline, not a wait: focus normally lands in one or two ticks. A loaded CI runner took over 0.3s.
+_FOCUS_SETTLE_SECONDS = 1.0
 # Long enough for a suggestion request to come back over a slow connection, and paid only by a field
 # that advertises a popup at all.
 _SUGGESTION_SECONDS = 1.2
@@ -99,12 +98,11 @@ _MAIN = "main"
 class _FrameObservation:
     """Raw snapshot.js output for one frame, tagged with how to reach it again."""
 
-    __slots__ = ("frame_id", "local_id", "raw", "session_id")
+    __slots__ = ("frame_id", "raw", "session_id")
 
-    def __init__(self, frame_id: str | None, session_id: str, local_id: str, raw: dict[str, Any]) -> None:
+    def __init__(self, frame_id: str | None, session_id: str, raw: dict[str, Any]) -> None:
         self.frame_id = frame_id
         self.session_id = session_id
-        self.local_id = local_id
         self.raw = raw
 
 
@@ -211,7 +209,7 @@ class CdpPage(Page):
                 return None
             if raw is None:
                 return None
-            return _FrameObservation(None if frame_key == _MAIN else frame_key, session_id, frame_key, raw)
+            return _FrameObservation(None if frame_key == _MAIN else frame_key, session_id, raw)
 
         # Preserve source order regardless of completion order so capture offsets and hashes stay stable.
         tasks = [asyncio.create_task(read(key, sid)) for key, sid in sources]
