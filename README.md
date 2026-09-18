@@ -24,25 +24,27 @@ candidates and has [Jev](https://typesafe.ai), a choice model, **pick one**, so 
 something that was never on the page. An answer only counts if every fact in it is quoted verbatim
 from a stored capture of the page.
 
-Same six live tasks, two passes each, against hosted Browser Use ([method](docs/evals.md)):
+Same six live tasks, two passes each, against hosted Browser Use measured the same day
+([method](docs/evals.md)):
 
 | | passed | correct answer | median time | mean time | cost per task |
 |:--|:--|:--|:--|:--|:--|
-| **fastbrowse** (cloud browser) | 11/12 | 12/12 | **18.1s** | 27.6s | **$0.0152** |
+| **fastbrowse** (cloud browser) | **12/12** | 12/12 | **12.9s** | **15.4s** | **$0.0072** |
 | fastbrowse, previous build | 11/12 | | 27.5s | 26.7s | $0.0160 |
-| hosted Browser Use | 11/12 | not graded apart | 16.9s | 27.4s | $0.4236 |
+| hosted Browser Use | 11/12 | 11/12 | 14.7s | 25.8s | $0.3767 |
 
-**Speed.** This build cut the median task by a third, 27.5s to 18.1s, and every lookup on the second
-pass finished in 11 to 19s. Four changes did it: a direct address for the task proposed while the
-start page loads, settling on DOM quiet instead of every image and tracker, short facts picked by
-Jev instead of read by the LLM, and one fewer browser round trip per click. The mean has not moved
-yet because it is carried by provider stalls (one 26s plan call, 34s of Jev in one run); cutting
-those tails is next ([details](docs/evals.md#results)).
+**Speed.** This build more than halved the median, 27.5s to 12.9s, and now beats hosted Browser Use
+on median and mean at about a fiftieth of the cost. Best of two per task, fastbrowse against hosted:
+pypi-version 9.5s against 18.1s, pypi-structured 11.8s against 15.7s, saucedemo-cart 20.0s against
+90.7s; hosted is still ahead by 1 to 2.6s on hn-top, github-license and wiki-godel. What did it: a
+direct address for the task proposed while the start page loads, a plan written from the task
+alone on a small model, settling on DOM quiet instead of every image and tracker, short facts picked
+by Jev, hedged requests against provider tails, and no recovery for steps that do not act
+([details](docs/evals.md#results)).
 
-Twelve runs is a smoke test, not a benchmark: read it as "both finish these, at about the same
-speed, and fastbrowse costs about a twenty-eighth". `passed` counts only `complete`; our miss had
-the right answer but could not confirm the cart on the page, so it reported `unverified`. The
-hosted row was measured once, on 2026-09-17.
+Twelve runs is a smoke test, not a benchmark: single runs swing by several seconds, and one
+wiki-godel run took 34s on a slow read. `passed` counts only `complete`; the hosted miss ended with
+"Task ended unexpectedly".
 
 ## How it compares
 
