@@ -3,8 +3,13 @@
     uv run python scripts/h2h_report.py artifacts/evals/h2h.jsonl [--since UNIX_TIME] [--videos]
 
 Prints a table for the answer tasks, the navigation tasks, and each category (pass rate, correct answers,
-median and mean time, cost per task, for each arm), and with --videos one line per recorded run. A run whose
-cost is unknown is left out of the cost column and counted beside it, never guessed.
+median and mean time, cost per task, wasted actions, for each arm), and with --videos one line per recorded run.
+A run whose cost is unknown is left out of the cost column and counted beside it, never guessed.
+
+Passing is not the bar: a run that clicks a dead button three times and asks for help twice before it finishes
+passes, and is still slow and costly. Wasted actions count, from each run's own step trace, the steps that did
+not move it forward: a request for help, an action that did not execute or left the page unchanged, and an
+action repeated on the same target. Hosted Browser Use reports no step trace, so it has no count.
 """
 
 import argparse
@@ -26,14 +31,32 @@ def load(path: Path, since: float) -> list[dict[str, object]]:
     return [r for r in rows if float(r.get("at", 0) or 0) >= since and r["arm"] in arms.get(str(r["task"]), ())]
 
 
+_PASSIVE = {"read", "scroll", "done", "wait"}
+
+
+def wasted(trace: Sequence[str]) -> int:
+    """Steps in a run's trace ("operation target -> outcome") that did not move it forward."""
+    seen: set[str] = set()
+    count = 0
+    for step in trace:
+        action, _, outcome = step.rpartition(" -> ")
+        operation = action.split(" ", 1)[0]
+        if operation == "escalate" or outcome.strip() not in {"executed", "changed"}:
+            count += 1
+        elif operation not in _PASSIVE:
+            count += action in seen
+            seen.add(action)
+    return count
+
+
 def _number(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) else None
 
 
 def table(rows: Sequence[dict[str, object]]) -> str:
     lines = [
-        "| | passed | correct answer | median time | mean time | cost per task |",
-        "|:--|:--|:--|:--|:--|:--|",
+        "| | passed | correct answer | median time | mean time | cost per task | wasted actions per run |",
+        "|:--|:--|:--|:--|:--|:--|:--|",
     ]
     for arm, name in ARMS.items():
         runs = [r for r in rows if r["arm"] == arm]
@@ -45,20 +68,26 @@ def table(rows: Sequence[dict[str, object]]) -> str:
         cost = f"${statistics.mean(dollars):.4f}" if dollars else "unknown"
         if unknown and dollars:
             cost += f" ({unknown} unknown)"
+        traces = [t for r in runs if isinstance(t := r.get("trace"), list)]
+        waste = f"{statistics.mean(wasted(t) for t in traces):.1f}" if traces else "not reported"
         lines.append(
             f"| {name} | {sum(bool(r['passed']) for r in runs)}/{len(runs)} "
             f"| {sum(bool(r.get('correct')) for r in runs)}/{len(runs)} "
-            f"| {statistics.median(seconds):.1f}s | {statistics.mean(seconds):.1f}s | {cost} |"
+            f"| {statistics.median(seconds):.1f}s | {statistics.mean(seconds):.1f}s | {cost} | {waste} |"
         )
     return "\n".join(lines)
 
 
 def videos(rows: Sequence[dict[str, object]]) -> str:
-    lines = ["| video | arm | task | result | time |", "|:--|:--|:--|:--|:--|"]
+    lines = ["| video | arm | task | result | time | wasted actions |", "|:--|:--|:--|:--|:--|:--|"]
     for r in sorted(rows, key=lambda r: (str(r["task"]), str(r["arm"]), str(r.get("video")))):
         if r.get("video"):
             mark = "pass" if r["passed"] else "fail"
-            lines.append(f"| `{Path(str(r['video'])).name}` | {r['arm']} | {r['task']} | {mark} | {r['seconds']}s |")
+            trace = r.get("trace")
+            waste = wasted(trace) if isinstance(trace, list) else "-"
+            lines.append(
+                f"| `{Path(str(r['video'])).name}` | {r['arm']} | {r['task']} | {mark} | {r['seconds']}s | {waste} |"
+            )
     return "\n".join(lines)
 
 
