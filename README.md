@@ -158,8 +158,9 @@ uv run ruff format . && uv run ruff check . && uv run pyright && uv run pytest &
 ```
 
 Grades come only from things the agent cannot write: requests the fixture server recorded, truth
-from a site's own API, or the URL the browser ended on. See [docs/evals.md](docs/evals.md) and
-[docs/design.md](docs/design.md).
+from a site's own API, or the URL the browser ended on. See [docs/evals.md](docs/evals.md),
+[docs/design.md](docs/design.md), and [docs/jev.md](docs/jev.md) for every Jev assumption checked against
+Typesafe's documentation.
 
 ## License
 
