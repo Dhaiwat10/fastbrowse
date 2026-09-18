@@ -103,7 +103,7 @@ class _RunState:
     attachments: tuple[Attachment, ...]
     authorization: Authorization
     ledger: Ledger
-    plan: Plan
+    planning: asyncio.Task[Generation[Plan]]
     notes: Notes = field(default_factory=Notes)
     steps: list[StepResult] = field(default_factory=list[StepResult])
     history: list[HistoryEntry] = field(default_factory=list[HistoryEntry])
@@ -112,6 +112,21 @@ class _RunState:
     recoveries: int = 0
     edited: set[tuple[Operation, str | None]] = field(default_factory=set[tuple[Operation, str | None]])
     last_page: tuple[str, str] | None = None
+    ready_plan: Plan | None = None
+
+    @property
+    def plan(self) -> Plan:
+        """The plan, for code that only runs after `await_plan`: reading, judging DONE and answering."""
+        if self.ready_plan is None:
+            raise RuntimeError("the plan was used before it was awaited")
+        return self.ready_plan
+
+    async def await_plan(self) -> Plan:
+        if self.ready_plan is None:
+            planned = await self.planning
+            self.ledger.record(planned.cost)
+            self.ready_plan = planned.data
+        return self.ready_plan
 
 
 class Agent:
@@ -156,10 +171,11 @@ class Agent:
         try:
             async with deadline:
                 observation = await self._observe()
-                planned = await make_plan(self._llm, task, observation, ledger=ledger)
-                ledger.record(planned.cost)
+                # The plan is needed to read, to judge DONE and to answer, and the first fills and clicks
+                # usually come before all three, so it is written while they run instead of ahead of them.
+                planning = asyncio.create_task(make_plan(self._llm, task, observation, ledger=ledger))
                 state = _RunState(
-                    task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planned.data
+                    task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planning
                 )
                 return await self._loop(state, output_schema, until)
         except _Stop as stop:
@@ -175,6 +191,10 @@ class Agent:
             return self._result(state, ledger, Status.OBSERVATION_LIMIT, error=str(error))
         except (JevError, LLMError, BrowserError) as error:
             return self._result(state, ledger, Status.ERROR, error=self._redactor.redact(str(error))[:500])
+        finally:
+            # A run can end before it ever needed the plan, and a plan still being written would bill it.
+            if state is not None:
+                await _discard(state.planning)
 
     async def _loop(
         self, state: _RunState, output_schema: type[BaseModel] | None, until: UntilCheck | None
@@ -202,7 +222,7 @@ class Agent:
             if (uncertain and decision.operation is not Operation.READ) or decision.operation is Operation.ESCALATE:
                 await self._recover(state, observation, f"uncertain next step ({decision.confidence:.2f})")
                 continue
-            if decision.operation is Operation.DONE and self._unread(state):
+            if decision.operation is Operation.DONE and _unread(await state.await_plan(), state.notes):
                 # DONE cannot hold while the plan still needs information nobody has read; reading is the move.
                 decision = decision.model_copy(update={"operation": Operation.READ, "target": None})
             if decision.operation is Operation.DONE:
@@ -544,7 +564,8 @@ class Agent:
     async def _read(self, state: _RunState) -> bool:
         """Return whether reading added evidence, which is the only progress a read can make."""
         capture = await self._capture()
-        wanted = [r for r in state.notes.unresolved(state.plan) if r.kind is RequirementKind.INFORMATION]
+        plan = await state.await_plan()
+        wanted = [r for r in state.notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION]
         question = "\n".join(f"- {r.text}" for r in wanted) or state.task
         before = len(state.notes.facts)
         await read(self._llm, capture, question, [r.id for r in wanted], state.notes, ledger=state.ledger)
@@ -607,6 +628,7 @@ class Agent:
         """Return the final result when DONE holds up; None sends the loop back to work."""
         fresh = await self._observe()
         state.ledger.reserve(CostComponent.JEV)
+        await state.await_plan()
         draft = draft_answer(state.plan, state.notes) if state.plan.answer_expected else None
         check = await check_done(self._jev, state.task, state.plan, fresh, state.notes, self._config.thresholds, draft)
         state.ledger.record(check.cost)
@@ -709,14 +731,11 @@ class Agent:
         status = Status.COMPLETE if verified else Status.UNVERIFIED
         return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(evidence))
 
-    def _unread(self, state: _RunState) -> bool:
-        return any(r.kind is RequirementKind.INFORMATION for r in state.notes.unresolved(state.plan))
-
     def _context(self, state: _RunState, *, check_login: bool) -> StepContext:
         return StepContext(
             task=state.task,
             subgoal=state.hint,
-            requirements=tuple(r.text for r in state.plan.requirements),
+            requirements=tuple(r.text for r in state.ready_plan.requirements) if state.ready_plan else (),
             notes=state.notes.render(4000),
             history=tuple(state.history[-self._config.observation.history_entries :]),
             check_login=check_login,
@@ -745,6 +764,10 @@ class Agent:
             final_url=self._redactor.redact(state.last_page[0]) if state and state.last_page else None,
             error=error,
         )
+
+
+def _unread(plan: Plan, notes: Notes) -> bool:
+    return any(r.kind is RequirementKind.INFORMATION for r in notes.unresolved(plan))
 
 
 async def _discard[T](task: asyncio.Task[T]) -> None:
