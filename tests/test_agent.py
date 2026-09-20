@@ -22,7 +22,18 @@ from fastbrowse.agent import (
 from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.llm import Generation
 from fastbrowse.memory import Fact, Notes
-from fastbrowse.models import Authorization, Decider, Limits, LLMPurpose, Operation, Status, StepOutcome, StepResult
+from fastbrowse.models import (
+    Authorization,
+    BrowserEvent,
+    Decider,
+    Limits,
+    LLMPurpose,
+    Operation,
+    Status,
+    StepEvent,
+    StepOutcome,
+    StepResult,
+)
 from fastbrowse.page import ActResult, BlockKind, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.policy import HistoryEntry, decide
@@ -634,3 +645,27 @@ def test_a_pager_the_page_marks_rel_next_is_followed_whatever_its_label() -> Non
     icon = _link("n", "→→→", "/page/2/").model_copy(update={"label": "Weiter", "next_page": True})
     found = agent_module._next_page_control(_at("https://example.test/list/", icon))
     assert found is not None and found.id == "n"
+
+
+@pytest.mark.parametrize(
+    ("frames", "secret_on_screen", "sent"), [(True, False, b"png"), (True, True, None), (False, False, None)]
+)
+async def test_a_step_carries_the_page_it_acted_on_when_frames_are_asked_for(
+    frames: bool, secret_on_screen: bool, sent: bytes | None
+) -> None:
+    events: list[StepEvent] = []
+
+    async def collect(event: StepEvent | BrowserEvent) -> None:
+        if isinstance(event, StepEvent):
+            events.append(event)
+
+    page = Mock(spec=Page)
+    page.screenshot = AsyncMock(return_value=b"png")
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]), config=Config(step_frames=frames), on_event=collect)
+    # A secret showing as page text cannot be masked in pixels, so no frame is sent at all.
+    agent._secret_on_screen = secret_on_screen
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    await _click(agent, state, observation((_button("Done"),)), "Done")
+    assert [event.frame for event in events] == [sent]

@@ -226,6 +226,10 @@ complete {'package': 'httpx', 'version': '0.28.1'} $0.0114
   "pip install httpx" from https://pypi.org/project/httpx/
 ```
 
+To show a run as it happens, pass `on_event=`: a `BrowserEvent` arrives first with the live-view URL of a
+cloud browser, then a `StepEvent` per step. `Config(step_frames=True)` adds a PNG of the page each step acted
+on, for an interface that renders the run; a step whose page is showing a resolved secret sends no frame.
+
 Jev comes from Typesafe directly or through the Vercel AI Gateway, whichever key is set
 (`FASTBROWSE_JEV_SOURCE` picks when both are, `FASTBROWSE_JEV_BASE_URL` adds a proxy). Any other source
 can be passed as `run_task(jev=...)`, an object with one `evaluate(state, questions)` method; the LLM
