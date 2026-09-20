@@ -25,8 +25,9 @@ types. Each of these came from wiring it into a product that already had one.
 - **Start from the task alone.** `start` is optional now. A caller whose own interface takes a goal and no
   URL had nowhere to get one; the first address is worked out from the task, as a person would. `--start`
   is optional in the CLI and `start` is optional on the MCP server's `browse` tool, where `task` is now the
-  only thing a call must carry. A secret is still only offered when a start page names the origin to scope
-  it to: with no page named, none is sent to whatever the run opens.
+  only thing a call must carry, and it holds for an attached browser too, which the run opens its own tab on.
+  A secret is only ever typed on the start origin, so asking for one without a start page is refused rather
+  than quietly dropped.
 - **Stop a cloud browser you did not start.** The browser event carries the cloud browser's id, so an
   application that has to end a run out of band (a user pressing cancel, a subscription ending) can.
 - **`proxy_country` and `viewport`** reach a cloud browser the run starts, instead of being fixed at what

@@ -274,9 +274,9 @@ class Agent:
                 # The plan is needed to read, to judge DONE and to answer, and the start page, the first fills
                 # and clicks all come before those, so it is written from the task while they run.
                 planning = asyncio.create_task(make_plan(self._llm, task, start=start, ledger=ledger))
-                # `start=None` means the browser is already where the run should begin, which is how an
-                # embedder driving its own browser uses this. `choose_start` is the other case: a caller
-                # with a goal and no page at all, who wants the first address worked out from the task.
+                # `start=None` leaves the browser where it is, which is what a caller stepping a run on
+                # from a page it opened itself wants. `choose_start` is the other case: a caller with a goal
+                # and no page at all, who wants the first address worked out from the task.
                 opening = start if start is not None or not choose_start else await self._first_page(task, ledger)
                 history = [] if opening is None else await self._open(task, opening, ledger)
                 state = _RunState(

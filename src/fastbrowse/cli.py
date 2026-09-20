@@ -29,8 +29,16 @@ from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
 
 
-def _secrets(pairs: list[tuple[str, str]], bitwarden: str | None, start: str) -> ScopedSecrets | None:
-    """Values read now, so a missing one fails before a browser is opened."""
+def _secrets(pairs: list[tuple[str, str]], bitwarden: str | None, start: str | None) -> ScopedSecrets | None:
+    """Values read now, so a missing one fails before a browser is opened.
+
+    A secret is usable only on the start origin, so asking for one without `--start` is refused rather than
+    quietly dropped: a caller who named a credential means the run to use it.
+    """
+    if start is None:
+        if pairs or bitwarden is not None:
+            raise ConfigurationError("--secret and --bitwarden need --start: a secret is scoped to its origin")
+        return None
     if missing := options.unset_variables(pairs):
         raise ConfigurationError(f"--secret names unset variables: {', '.join(missing)}")
     values = {name: os.environ[variable] for name, variable in pairs}
@@ -105,7 +113,7 @@ async def run(args: argparse.Namespace) -> int:
         browser_api_key=options.browser_key(load_settings(), args.cloud),
         chrome=options.chrome(load_settings(), args.headed, args.profile),
         cloud_profile=args.cloud_profile,
-        secrets=_secrets(args.secret, args.bitwarden, args.start) if args.start else None,
+        secrets=_secrets(args.secret, args.bitwarden, args.start),
         limits=limits,
         authorization=Authorization(irreversible_actions=args.authorize),
         downloads=args.downloads,

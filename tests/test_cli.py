@@ -45,3 +45,17 @@ def test_a_limit_argparse_accepts_but_the_run_cannot_use_is_refused_as_a_configu
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "error" and result["steps"] == []
     assert named in result["error"] and named in str(exit_.value.code)
+
+
+@pytest.mark.parametrize("flag", [["--secret", "p=SET"], ["--bitwarden", "vault-item"]])
+def test_a_credential_without_a_start_page_is_refused_rather_than_dropped(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], flag: list[str]
+) -> None:
+    # A secret is only ever typed on the start origin, so with no page named there is nowhere it could be used.
+    monkeypatch.setenv("SET", "value")
+    monkeypatch.setattr("sys.argv", ["fastbrowse", "t", "--json", *flag])
+    with pytest.raises(SystemExit) as exit_:
+        cli.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "error" and "--start" in result["error"]
+    assert "--start" in str(exit_.value.code)

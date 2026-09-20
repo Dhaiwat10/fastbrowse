@@ -153,10 +153,10 @@ async def run_task(
                             result = await agent.run(
                                 task,
                                 start=start,
-                                # No page named and a browser of our own: work the first address out from
-                                # the task. A caller driving its own browser through `cdp_url` means "where
-                                # it already is", and gets that.
-                                choose_start=start is None and cdp_url is None,
+                                # With no page named, the first address is worked out from the task. That
+                                # holds for an attached browser too: the run opens its own tab rather than
+                                # taking over one already open, so there is no page it is "already on".
+                                choose_start=start is None,
                                 output_schema=output_schema,
                                 inputs=inputs,
                                 attachments=attachments,

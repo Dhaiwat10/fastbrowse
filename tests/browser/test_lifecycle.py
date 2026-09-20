@@ -21,9 +21,10 @@ from pydantic import ValidationError
 
 from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser, BrowserUseCloudError
 from fastbrowse.adapters.local_chrome import async_local_chrome, find_chrome, local_chrome
+from fastbrowse.agent import Agent
 from fastbrowse.browser import BrowserSession, CdpPage
 from fastbrowse.config import Config
-from fastbrowse.models import BrowserConnection, CostLine, LocalChrome, Status
+from fastbrowse.models import BrowserConnection, CostBreakdown, CostLine, LocalChrome, RunResult, Status
 from fastbrowse.page import BrowserError
 from fastbrowse.run import _browser, run_task
 from tests.browser.conftest import RecordingArtifactSink
@@ -464,3 +465,33 @@ async def test_a_browser_handed_over_refuses_what_belongs_to_one_we_start(
         with pytest.raises(BrowserError, match=message):
             async with _browser(key, LocalChrome(), http, cost, profile=profile, cdp_url="ws://given.test/devtools"):
                 pass
+
+
+async def test_a_browser_handed_over_with_no_page_named_still_works_one_out_from_the_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run opens a tab of its own, so an attached browser is never already on the page the task wants."""
+    CdpTransport(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    async def capture(_self: Agent, task: str, **kwargs: Any) -> RunResult:
+        captured.update(kwargs)
+        return RunResult(
+            status=Status.COMPLETE,
+            answer=task,
+            data=None,
+            evidence=(),
+            steps=(),
+            cost=CostBreakdown(lines=()),
+            artifacts=(),
+        )
+
+    monkeypatch.setattr(Agent, "run", capture)
+    await run_task(
+        "What is the top story on Hacker News?",
+        cdp_url="ws://given.test/devtools",
+        jev=ScriptedJev({}),
+        llm=ScriptedLLM([]),
+    )
+    assert captured["start"] is None
+    assert captured["choose_start"], "with no page named the first address comes from the task"
