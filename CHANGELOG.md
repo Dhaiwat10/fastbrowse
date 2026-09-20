@@ -16,8 +16,8 @@ Nothing yet.
 ## [0.4.1] - 2026-09-20
 
 - **A secret can be declared for a site rather than for one of its hosts.** `https://*.example.com` covers
-  `www.example.com`, `accounts.example.com` and `example.com` itself, which is how a single sign-in usually
-  works: a login typed on the account host is the same login as the one the shop host asks for. The wildcard
+  `www.example.com`, `accounts.example.com` and `example.com` itself, which is how one sign-in spans a site:
+  the login typed on the account host is the login the shop host asks for. The wildcard
   stands for whole labels only, so it does not cover `example.com.evil.test`, and neither the scheme nor the
   port is ever wildcarded. An exact origin behaves exactly as before. This reaches the MCP server too
   (`--secret NAME=ENV_VAR@https://*.example.com`).
