@@ -798,3 +798,33 @@ async def test_a_run_with_no_page_named_works_the_first_address_out_of_the_task(
         assert stopped.value.status is Status.NEEDS_INPUT
     else:
         assert await agent._first_page("What is the top story?", ledger) == opened
+
+
+@pytest.mark.parametrize(
+    ("opened", "controls", "text", "goes_to"),
+    [
+        # The case from a live run: a path the site does not serve, read as an empty page.
+        ("https://shop.test/login", (), "", "https://shop.test"),
+        # A path that served something is the page the run wanted.
+        ("https://shop.test/login", (), "Sign in to continue", None),
+        ("https://shop.test/login", (_button("Login"),), "", None),
+        # Nothing to fall back to: this is already the front page.
+        ("https://shop.test/", (), "", None),
+    ],
+)
+async def test_a_start_page_this_run_guessed_falls_back_to_the_front_page_when_it_opens_nothing(
+    opened: str, controls: tuple[Control, ...], text: str, goes_to: str | None
+) -> None:
+    page = Mock(spec=Page)
+    page.navigate = AsyncMock()
+    page.observe = AsyncMock(
+        return_value=observation(controls).model_copy(update={"url": opened, "viewport_text": text})
+    )
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
+
+    await agent._front_page_if_blank(opened)
+
+    if goes_to is None:
+        page.navigate.assert_not_called()
+    else:
+        page.navigate.assert_awaited_once_with(goes_to)
