@@ -165,6 +165,17 @@ model calls did slow under that load (Jev 2.6s to 3.5s, the LLM read 3.0s to 5.0
 repeated one at a time to see what it cost. It cost nothing: 24.1s median run time alone against 20.8s in
 parallel, and per task the two are a coin flip, seven faster each way. A run waits on pages, not on us.
 
+**How a failure is counted.** A run that fails because an upstream provider was down is not a measurement of
+the agent, so it is re-run and the re-run is what counts. That is a rule about the cause, not about the
+result: the provider's own error is on the row (`Jev request failed; HTTP 503`, gateway routing included), so
+which runs it covers is checkable rather than a judgement call, and it applies the same way to every arm.
+Everything else counts, including a run that stalls, gives up, or answers something the check rejects.
+
+The run published above needed none of that. It holds no upstream error, and its one failure is the agent's
+own: `saucedemo-locked-out` escalated and then read the same page four times without progress, which is the
+stall detector doing its job on a run that had stopped getting anywhere. Three of the six failures across all
+126 runs that day were one Jev outage, which is [#72](https://github.com/agent-labs-dev/fastbrowse/issues/72).
+
 **Run-to-run variance is real.** That serial repeat scored 38/42 on the same build and the same day: `hn-top`
 failed twice having taken no steps at all, the site unreachable from here, and `google-flights` failed twice
 on the grader reading an empty form from a search it had correctly run. Re-running the three tasks that
@@ -209,6 +220,18 @@ Per category:
 | navigate | 18/18, 8.5s, $0.0079 | | 11/18, 12.8s, $0.0050 |
 
 The three arms cost $0.64, $0.09 and $14.45 in total.
+
+**What the step logs said about the runs that passed.** A pass rate hides the cost of getting there, and
+three patterns showed up across all 93 fastbrowse runs that day:
+
+- `saucedemo-locked-out` clicks the site's **Dismiss error** button in five runs of nine, removing the message
+  the task asks it to report, then escalates twice and signs in again to get it back: 35s and $0.0088 against
+  16s and $0.0020 on the runs that read it first ([#74](https://github.com/agent-labs-dev/fastbrowse/issues/74)).
+- `pypi-newer` writes the search box two to four times per search in five runs of six, every fill executing
+  cleanly. It is the most expensive lookup in the suite at $0.0160 against the category's $0.0052
+  ([#75](https://github.com/agent-labs-dev/fastbrowse/issues/75); #7 bounded this, it did not remove it).
+- Every step in those 93 runs that did not execute cleanly - 11 stale, 2 failed, 1 covered - is on
+  `google-flights`. The other 462 executed steps had none ([#12]).
 
 **Where fastbrowse loses.**
 - `pypi-newer` 2/3: the failed run stopped `stuck` when the done check would not confirm a correct comparison. All three runs filled the search box four times for two searches ([#7](https://github.com/agent-labs-dev/fastbrowse/issues/7)).
