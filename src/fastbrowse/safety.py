@@ -5,7 +5,7 @@ Models only ever see secret names. Values are resolved here, at dispatch time, f
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from urllib.parse import quote, quote_plus, urlsplit
 
 from fastbrowse.jev import NoulQuestion
@@ -76,6 +76,10 @@ def origin_of(url: str) -> str:
         return f"{parts.scheme}://{parts.netloc}".lower()
     if port == _DEFAULT_PORTS.get(parts.scheme.lower()):
         port = None
+    # `hostname` unwraps an IPv6 literal, and `https://::1` is not a URL any parser reads back: the colons
+    # become a port that is not a number. An origin this returns has to survive being parsed again.
+    if ":" in host:
+        host = f"[{host}]"
     return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port else "")
 
 
@@ -113,23 +117,38 @@ async def resolve_secret(resolver: SecretResolver, name: str, origin: str) -> st
 
 
 class ScopedSecrets:
-    """Secret values held in this process, each usable only on one origin: the `SecretResolver` for a run.
+    """Secret values held in this process, each usable only where it was declared: a run's `SecretResolver`.
 
-    The origin may be a `*.` pattern, and the same rule decides here as everywhere: a resolver that answered
-    on a wider origin than it declared would put the gate in two places with two answers.
+    `ScopedSecrets(values, origin)` gives every value the same scope, which is what a run whose secrets all
+    belong to its start page needs. `ScopedSecrets.per_secret(...)` scopes each one separately, for a caller
+    holding a person's credentials against the sites each of them belongs to.
+
+    An origin may be a `*.` pattern either way, and the same rule decides here as everywhere: a resolver that
+    answered on a wider origin than it declared would put the gate in two places with two answers.
     """
 
     def __init__(self, values: Mapping[str, str], origin: str) -> None:
-        self._values = dict(values)
-        self._origin = origin
+        self._secrets: dict[str, tuple[str, tuple[str, ...]]] = {
+            name: (value, (origin,)) for name, value in values.items()
+        }
+
+    @classmethod
+    def per_secret(cls, secrets: Mapping[str, tuple[str, Sequence[str]]]) -> "ScopedSecrets":
+        """`{name: (value, origins)}`. A secret left with no origins is held by nobody and offered nowhere."""
+        scoped = cls({}, "")
+        scoped._secrets = {
+            name: (value, tuple(origins)) for name, (value, origins) in secrets.items() if tuple(origins)
+        }
+        return scoped
 
     def available(self) -> tuple[SecretRef, ...]:
-        return tuple(SecretRef(name=name, origins=(self._origin,)) for name in self._values)
+        return tuple(SecretRef(name=name, origins=origins) for name, (_, origins) in self._secrets.items())
 
     async def resolve(self, name: str, origin: str) -> str | None:
-        if name not in self._values or not secret_allowed(SecretRef(name=name, origins=(self._origin,)), origin):
+        held = self._secrets.get(name)
+        if held is None or not secret_allowed(SecretRef(name=name, origins=held[1]), origin):
             return None
-        return self._values[name]
+        return held[0]
 
 
 class Redactor:

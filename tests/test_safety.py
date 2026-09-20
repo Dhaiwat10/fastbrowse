@@ -2,7 +2,7 @@ import pytest
 
 from fastbrowse.models import Operation, SecretRef
 from fastbrowse.page import Control
-from fastbrowse.safety import Redactor, may_be_irreversible, origin_of, secret_allowed
+from fastbrowse.safety import Redactor, ScopedSecrets, may_be_irreversible, origin_of, secret_allowed
 
 
 def control(label: str, *, role: str = "button", href: str | None = None, input_type: str | None = None) -> Control:
@@ -88,3 +88,38 @@ def test_a_wildcard_that_covers_nothing_is_not_a_wildcard_that_covers_everything
     # A pattern with no domain after it would otherwise match whatever the run opened.
     for pattern in ("https://*.", "https://*"):
         assert not secret_allowed(SecretRef(name="p", origins=(pattern,)), origin_of("https://evil.test"))
+
+
+@pytest.mark.parametrize(
+    ("url", "origin"),
+    [
+        ("https://[::1]/login", "https://[::1]"),
+        ("https://[::1]:8443/", "https://[::1]:8443"),
+        ("http://[2001:db8::1]:80/", "http://[2001:db8::1]"),
+    ],
+)
+def test_an_ipv6_origin_survives_being_parsed_again(url: str, origin: str) -> None:
+    # `hostname` unwraps the literal, and every check here reparses what this returns.
+    assert origin_of(url) == origin
+    ref = SecretRef(name="password", origins=(origin,))
+    assert secret_allowed(ref, origin_of(url))
+    assert not secret_allowed(ref, origin_of("https://[::2]/login"))
+
+
+async def test_each_secret_keeps_the_scope_it_was_declared_with() -> None:
+    held = ScopedSecrets.per_secret(
+        {
+            "shop": ("shop-password", ("https://*.example.test",)),
+            "bank": ("bank-password", ("https://secure.bank.test",)),
+            "orphan": ("nowhere", ()),
+        }
+    )
+    assert {ref.name for ref in held.available()} == {"shop", "bank"}
+    # The wildcard is not narrowed to whichever host was opened first.
+    assert await held.resolve("shop", origin_of("https://accounts.example.test")) == "shop-password"
+    assert await held.resolve("shop", origin_of("https://www.example.test")) == "shop-password"
+    # One secret's scope is not another's.
+    assert await held.resolve("bank", origin_of("https://www.example.test")) is None
+    assert await held.resolve("bank", origin_of("https://secure.bank.test")) == "bank-password"
+    # A secret declared for nowhere is offered nowhere, rather than everywhere.
+    assert await held.resolve("orphan", origin_of("https://www.example.test")) is None

@@ -20,7 +20,14 @@ Nothing yet.
   the login typed on the account host is the login the shop host asks for. The wildcard
   stands for whole labels only, so it does not cover `example.com.evil.test`, and neither the scheme nor the
   port is ever wildcarded. An exact origin behaves exactly as before. This reaches the MCP server too
-  (`--secret NAME=ENV_VAR@https://*.example.com`).
+  (`--secret NAME=ENV_VAR@https://*.example.com`), where each secret keeps the scope it was declared with
+  rather than the start page's.
+- **`ScopedSecrets.per_secret({name: (value, origins)})`** holds a person's credentials each scoped to the
+  sites it belongs to, for an application that stores them that way. The single-origin constructor is
+  unchanged.
+- **An IPv6 origin survives being read back.** `origin_of` returned `https://::1`, which is not a URL any
+  parser reads again, so a check against an IPv6 origin could raise rather than answer. The literal keeps its
+  brackets.
 
 ## [0.4.0] - 2026-09-20
 
