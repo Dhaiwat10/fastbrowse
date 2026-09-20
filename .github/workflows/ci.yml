@@ -36,9 +36,11 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ty check
       # Prose is part of the product surface: ASCII punctuation everywhere, and Vale's wording rules on prose.
+      # A release publishes its changelog entry, so the entry has to exist before the tag does.
+      - run: uv run python scripts/changelog.py --check "$(uv version --short)"
       - run: uv run python scripts/no_slop.py
       - run: uv run vale sync
-      - run: uv run vale README.md docs src scripts tests
+      - run: uv run vale README.md CHANGELOG.md docs src scripts tests
       - run: uv run pytest -q
 
   # `check` is the required status check, so its name must not move when the matrix gains a version.

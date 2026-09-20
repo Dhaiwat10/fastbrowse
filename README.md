@@ -305,6 +305,11 @@ from a site's own API, or the URL the browser ended on. See [docs/evals.md](docs
 [docs/design.md](docs/design.md), and [docs/jev.md](docs/jev.md) for every Jev assumption checked against
 Typesafe's documentation.
 
+## Changelog
+
+What changed in each release is in [CHANGELOG.md](CHANGELOG.md), and every
+[GitHub release](https://github.com/agent-labs-dev/fastbrowse/releases) publishes that version's entry.
+
 ## License
 
 MIT, copyright Agent Labs. Adapted third-party code is credited in
