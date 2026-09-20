@@ -432,7 +432,7 @@ def field_candidates(capture: Capture, field: FieldInfo) -> tuple[Candidate, ...
         for start, end, raw in _spans(text, annotation):
             try:
                 value = validator.validate_python(_scalar(raw, annotation))
-            except ValidationError, ValueError, InvalidOperation, OverflowError:
+            except (ValidationError, ValueError, InvalidOperation, OverflowError):
                 continue
             candidates.append(
                 Candidate(

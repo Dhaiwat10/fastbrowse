@@ -125,7 +125,7 @@ def _wait_for_ws(active: Path, proc: subprocess.Popen[bytes], log: IO[bytes], ti
             port = int(active.read_text(encoding="utf-8").split("\n")[0])
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
                 return str(json.load(response)["webSocketDebuggerUrl"])
-        except OSError, ValueError:
+        except (OSError, ValueError):
             # Not written yet, written only partly, or written and not yet listening.
             if time.monotonic() > deadline:
                 raise RuntimeError(f"Chrome did not start DevTools within {timeout:.0f}s{_tail(log)}") from None

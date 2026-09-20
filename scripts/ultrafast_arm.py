@@ -137,7 +137,7 @@ class Screencast:
         self._frames: list[tuple[float, Path]] = []
         self._worker = threading.Thread(target=self._capture, daemon=True)
 
-    def __enter__(self) -> Screencast:
+    def __enter__(self) -> "Screencast":
         self._browser.call("Page.startScreencast", format="jpeg", quality=85)
         self._worker.start()
         return self
