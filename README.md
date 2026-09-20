@@ -72,7 +72,7 @@ as fast (38.5s against 71.7s), and it is the one task whose grade here wobbles r
 Treat the whole-suite median as the summary and the rows as the shape: the more a task does, the further
 ahead this gets.
 
-[Tasks, method and per-task results](docs/evals.md#head-to-head).
+[Every run, what it cost, and how a failure is counted](docs/evals.md#uncapped-2026-09-20).
 
 ### Why fastbrowse, against each kind of agent
 
@@ -83,7 +83,8 @@ ahead this gets.
 - **Choice-model navigators** ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast)): the same
   core technique, plus everything a real task needs. fastbrowse reads pages and returns cited answers,
   signs in without showing a model the password, and stops before anything irreversible. On the six
-  navigation tasks both can run, it passes 18/18 against 11/18.
+  navigation tasks both can run, it passes 18/18 against 11/18 - though six of those seven failures ran into
+  the shared 30-step limit rather than a wall, and jev-ultrafast is cheaper on all four tasks both finish.
 - **Scripts:** there are no selectors to maintain. The same agent handles a date picker, a checkout and
   a search box it has never seen.
 
@@ -329,7 +330,8 @@ seconds to minutes, so raise the client's tool timeout if it has one (`MCP_TOOL_
 uv sync --all-extras                                         # the hosted-arm SDK too, which ty checks
 uv run pre-commit install                                    # ruff and ty before each commit
 uv run python -m fastbrowse.evals.runner                     # local fixtures, under half a cent a task
-uv run --extra browser-use python -m fastbrowse.evals.live   # live head-to-head; --arms fast skips hosted
+uv run --extra browser-use python -m fastbrowse.evals.live --max-dollars 0 --concurrency 8   # live head-to-head
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fast              # ours alone, capped as configured
 uv run --extra browser-use python -m fastbrowse.evals.live --suite heldout   # the never-debugged split
 uv run ruff format . && uv run ruff check . && uv run ty check && uv run pytest
 uv run python scripts/no_slop.py && uv run vale sync && uv run vale README.md docs src scripts tests
