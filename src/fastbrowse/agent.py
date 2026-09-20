@@ -658,8 +658,11 @@ class Agent:
     async def _record_step(self, state: _RunState, step: StepResult) -> None:
         state.steps.append(step)
         state.ledger.steps += 1
-        if self._on_event is not None:
-            await self._on_event(StepEvent(step=step))
+        if self._on_event is None:
+            return
+        # Taken from the page the step acted on, before the next observation moves it on.
+        frames = await self._screenshots() if self._config.step_frames else ()
+        await self._on_event(StepEvent(step=step, frame=frames[0] if frames else None))
 
     async def _action(self, state: _RunState, observation: Observation, decision: Decision) -> Action:
         target = decision.target

@@ -60,6 +60,12 @@ class Config(Frozen):
     stall: StallRules = StallRules()
     refuse_cookie_banners: bool = True
     """Refuse cookie consent on the platforms DuckDuckGo's autoconsent knows, before the banner paints."""
+    step_frames: bool = False
+    """Send a PNG of the page with every step event, for a caller that shows the run as it happens.
+
+    Off by default: it costs a screenshot round trip per step, which a caller with nowhere to put the image
+    would pay for nothing. A step whose page is showing a resolved secret sends no frame.
+    """
     max_upload_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
     """Uploads move as bytes over the DevTools socket; larger files return NEEDS_INPUT with a reason."""
     max_pages: int = Field(default=12, ge=0)
