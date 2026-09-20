@@ -441,7 +441,12 @@ class Agent:
         if proposed.path in ("", "/"):
             return
         observation = await self._observe()
-        if observation.controls or observation.viewport_text.strip():
+        if _drew_something(observation):
+            return
+        # A page built by script is observable before it draws: navigation returns at `readyState`, and
+        # hydration follows. Waiting is what the loop already does before calling an empty page stuck, and
+        # without it a deep route that was right would be abandoned for being slow.
+        if await self._outwait(observation) and _drew_something(await self._observe()):
             return
         front = f"{proposed.scheme}://{proposed.netloc}"
         trace("start_page_blank", proposed=opened, front=front)
@@ -1391,6 +1396,11 @@ def _answered(plan: Plan, notes: Notes) -> bool:
     """
     asked = [r for r in plan.requirements if r.kind is RequirementKind.INFORMATION]
     return bool(asked) and all(notes.evidenced(r.id) for r in asked)
+
+
+def _drew_something(observation: Observation) -> bool:
+    """Whether this page has anything on it for a run to act on or read."""
+    return bool(observation.controls or observation.viewport_text.strip())
 
 
 def _answers_input(state: _RunState, observation: Observation) -> bool:
