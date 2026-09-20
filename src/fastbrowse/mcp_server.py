@@ -56,11 +56,12 @@ from fastbrowse.models import (
     Limits,
     LocalChrome,
     RunResult,
+    SecretRef,
     Status,
     StepEvent,
 )
 from fastbrowse.run import run_task
-from fastbrowse.safety import ScopedSecrets, origin_of
+from fastbrowse.safety import ScopedSecrets, origin_of, secret_allowed
 
 type Runner = Callable[..., Awaitable[RunResult]]
 """`run_task`'s shape; tests pass a fake so the tool can be driven without a browser or model keys."""
@@ -236,7 +237,14 @@ async def _secrets(config: ServerConfig, origin: str | None, bitwarden: str | No
         if bitwarden is not None:
             raise ToolError("bitwarden needs a start page: the vault item is matched against its origin")
         return None
-    values = {secret.name: secret.value for secret in config.secrets if secret.origin == origin}
+    # Each secret keeps the scope it was declared with. A server that offers `NAME@https://*.example.com` for
+    # a sign-in that moves between that site's hosts means the whole site, not whichever host the call opened.
+    declared = {
+        secret.name: secret.origin
+        for secret in config.secrets
+        if secret_allowed(SecretRef(name=secret.name, origins=(secret.origin,)), origin)
+    }
+    values = {secret.name: secret.value for secret in config.secrets if secret.name in declared}
     if bitwarden is not None:
         if bitwarden not in config.bitwarden:
             allowed = ", ".join(config.bitwarden) or "none"
@@ -249,7 +257,10 @@ async def _secrets(config: ServerConfig, origin: str | None, bitwarden: str | No
             values = options.merged_secrets(values, vault)
         except ValueError as exc:
             raise ToolError(f"{exc} on {origin}") from None
-    return ScopedSecrets(values, origin) if values else None
+    if not values:
+        return None
+    # A vault item is matched against the start origin, so that is the only scope it has.
+    return ScopedSecrets.per_secret({name: (value, (declared.get(name, origin),)) for name, value in values.items()})
 
 
 def _description(config: ServerConfig) -> str:

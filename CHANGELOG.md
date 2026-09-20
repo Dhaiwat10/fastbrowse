@@ -13,6 +13,22 @@ Older entries are kept verbatim rather than rewritten as the product moves.
 
 Nothing yet.
 
+## [0.4.1] - 2026-09-20
+
+- **A secret can be declared for a site rather than for one of its hosts.** `https://*.example.com` covers
+  `www.example.com`, `accounts.example.com` and `example.com` itself, which is how one sign-in spans a site:
+  the login typed on the account host is the login the shop host asks for. The wildcard
+  stands for whole labels only, so it does not cover `example.com.evil.test`, and neither the scheme nor the
+  port is ever wildcarded. An exact origin behaves exactly as before. This reaches the MCP server too
+  (`--secret NAME=ENV_VAR@https://*.example.com`), where each secret keeps the scope it was declared with
+  rather than the start page's.
+- **`ScopedSecrets.per_secret({name: (value, origins)})`** holds a person's credentials each scoped to the
+  sites it belongs to, for an application that stores them that way. The single-origin constructor is
+  unchanged.
+- **An IPv6 origin survives being read back.** `origin_of` returned `https://::1`, which is not a URL any
+  parser reads again, so a check against an IPv6 origin could raise rather than answer. The literal keeps its
+  brackets.
+
 ## [0.4.0] - 2026-09-20
 
 Everything an application needs to run fastbrowse as its browser engine rather than as a command someone
@@ -110,7 +126,8 @@ Fixed in the same release, from tasks that failed in the field:
 - First release: a browser agent that picks its next action from the controls the page actually has, with an
   LLM to plan and read, and code owning verification, safety and secrets.
 
-[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.4.0...HEAD
+[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.1
 [0.4.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.0
 [0.3.4]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.4
 [0.3.3]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.3
