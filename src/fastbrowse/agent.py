@@ -193,7 +193,11 @@ class _RunState:
     tried_unsure: set[str] = field(default_factory=set[str])
     """Page states where an unsure pick has been acted on instead of recovering; the next one there recovers."""
     read_urls: set[str] = field(default_factory=set[str])
-    """Pages read on the way out of them, each read once."""
+    """Documents read on the way out of them, each read once.
+
+    Keyed by document rather than by address: a site that rewrites its own URL as a form is filled - Google
+    Flights encodes the whole search in the query string, so every click changes it - would otherwise look
+    like a new results page each time, and be read on the way out of each of them."""
     leaving: list[asyncio.Task[bool]] = field(default_factory=list[asyncio.Task[bool]])
     """Reads of pages an action is leaving, run alongside it; awaited before DONE is judged."""
     next_page: bool = False
@@ -1002,7 +1006,7 @@ class Agent:
         # times and never had the first one's date. Read those once, whatever the action.
         answering = (
             decision.operation in _LEAVING
-            and observation.url not in state.read_urls
+            and _leaving_key(observation) not in state.read_urls
             and _answers_input(state, observation)
         )
         if (
@@ -1013,7 +1017,7 @@ class Agent:
         ):
             return
         state.read_here = True
-        state.read_urls.add(observation.url)
+        state.read_urls.add(_leaving_key(observation))
         state.leaving.append(asyncio.create_task(self._read(state, await self._capture())))
 
     async def _read(
@@ -1369,6 +1373,15 @@ def _answered(plan: Plan, notes: Notes) -> bool:
     """
     asked = [r for r in plan.requirements if r.kind is RequirementKind.INFORMATION]
     return bool(asked) and all(notes.evidenced(r.id) for r in asked)
+
+
+def _leaving_key(observation: Observation) -> str:
+    """What counts as one page for the read-on-the-way-out rule: the document, or the address without one.
+
+    A page that rewrites its own query string as it is filled is still the page the run is on. Reading it
+    once per rewrite bought nothing on Google Flights and cost a third of the run.
+    """
+    return observation.document_key or observation.url
 
 
 def _answers_input(state: _RunState, observation: Observation) -> bool:
