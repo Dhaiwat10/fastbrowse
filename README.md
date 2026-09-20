@@ -83,12 +83,24 @@ shares its core techniques. Its column describes `main` as of 2026-09-18.
 
 ## Try it
 
-Needs Python 3.14, [uv](https://docs.astral.sh/uv/), and Chrome (not needed with `--cloud`).
+Needs [uv](https://docs.astral.sh/uv/) and Chrome (not needed with `--cloud`); uv fetches Python 3.14 itself.
+
+```sh
+export AI_GATEWAY_API_KEY=...   # or TYPESAFE_API_KEY, for Jev
+export OPENROUTER_API_KEY=...   # for the LLM that plans and reads
+uvx fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
+```
+
+`uvx` runs the published package without installing anything. `uv tool install fastbrowse` keeps it on your
+PATH, and `uv add fastbrowse` puts it in a project. Keys can live in a `.env` file in the working directory
+instead of the environment; [`.env.example`](.env.example) lists every setting.
+
+To work on fastbrowse itself:
 
 ```sh
 git clone https://github.com/agent-labs-dev/fastbrowse.git && cd fastbrowse
 uv sync
-cp .env.example .env            # add AI_GATEWAY_API_KEY or TYPESAFE_API_KEY, and OPENROUTER_API_KEY
+cp .env.example .env
 uv run fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
 
@@ -166,6 +178,8 @@ The exit code is 0 only for `complete`.
 
 ## Embed it
 
+`uv add fastbrowse` first, then:
+
 ```python
 import asyncio
 
@@ -213,8 +227,8 @@ Desktop, Cursor or any other MCP client can hand it a task. It returns the answe
 the quotes behind them, the status and what to do about it, and reports progress on every step.
 
 ```sh
-uv sync --extra mcp
-claude mcp add fastbrowse -e OPENROUTER_API_KEY=... -e AI_GATEWAY_API_KEY=...   -- uv run --directory "$PWD" fastbrowse-mcp --max-dollars 0.25
+claude mcp add fastbrowse -e OPENROUTER_API_KEY=... -e AI_GATEWAY_API_KEY=... \
+  -- uvx --from 'fastbrowse[mcp]' fastbrowse-mcp --max-dollars 0.25
 ```
 
 For a client configured by JSON, such as Claude Desktop:
@@ -223,8 +237,8 @@ For a client configured by JSON, such as Claude Desktop:
 {
   "mcpServers": {
     "fastbrowse": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/fastbrowse", "fastbrowse-mcp"],
+      "command": "uvx",
+      "args": ["--from", "fastbrowse[mcp]", "fastbrowse-mcp"],
       "env": { "OPENROUTER_API_KEY": "...", "AI_GATEWAY_API_KEY": "..." }
     }
   }
