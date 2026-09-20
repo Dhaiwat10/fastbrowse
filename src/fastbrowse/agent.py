@@ -279,6 +279,8 @@ class Agent:
                 # and no page at all, who wants the first address worked out from the task.
                 opening = start if start is not None or not choose_start else await self._first_page(task, ledger)
                 history = [] if opening is None else await self._open(task, opening, ledger)
+                if start is None and opening is not None:
+                    await self._front_page_if_blank(opening)
                 state = _RunState(
                     task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planning
                 )
@@ -424,6 +426,31 @@ class Agent:
             raise _Stop(Status.NEEDS_INPUT, "the task names no page to start from, and none was given")
         trace("start_page", url=opening)
         return opening
+
+    async def _front_page_if_blank(self, opened: str) -> None:
+        """Go to the site's front page when the address this run chose for itself opened nothing.
+
+        A start page worked out from the task is a guess at an address, and a guess can name a path the site
+        does not serve - `/login` on a site that only serves `/`. The run then reads a page with nothing on
+        it, learns nothing, and spends its recovery discovering it is stuck: three empty reads and a
+        navigation, in the run that prompted this. Only the path was ever in doubt, so the front page of the
+        site already chosen is where to be. A start page the caller gave is left alone: that address is not
+        a guess and this run is not entitled to second-guess it.
+        """
+        proposed = urlsplit(opened)
+        if proposed.path in ("", "/"):
+            return
+        observation = await self._observe()
+        if _drew_something(observation):
+            return
+        # A page built by script is observable before it draws: navigation returns at `readyState`, and
+        # hydration follows. Waiting is what the loop already does before calling an empty page stuck, and
+        # without it a deep route that was right would be abandoned for being slow.
+        if await self._outwait(observation) and _drew_something(await self._observe()):
+            return
+        front = f"{proposed.scheme}://{proposed.netloc}"
+        trace("start_page_blank", proposed=opened, front=front)
+        await self._page.navigate(front)
 
     async def _open(self, task: str, start: str, ledger: Ledger) -> list[HistoryEntry]:
         """Open `start`, or a direct address for the task on its site when one is proposed in time.
@@ -1369,6 +1396,11 @@ def _answered(plan: Plan, notes: Notes) -> bool:
     """
     asked = [r for r in plan.requirements if r.kind is RequirementKind.INFORMATION]
     return bool(asked) and all(notes.evidenced(r.id) for r in asked)
+
+
+def _drew_something(observation: Observation) -> bool:
+    """Whether this page has anything on it for a run to act on or read."""
+    return bool(observation.controls or observation.viewport_text.strip())
 
 
 def _answers_input(state: _RunState, observation: Observation) -> bool:
