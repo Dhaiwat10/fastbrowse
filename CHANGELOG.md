@@ -13,6 +13,16 @@ Older entries are kept verbatim rather than rewritten as the product moves.
 
 Nothing yet.
 
+## [0.4.2] - 2026-09-20
+
+- **A form is set up in the order that works.** Its mode - which tab of a search, which kind of account or
+  ticket, which category - decides which fields it has and empties what they hold, so it is chosen before
+  any value is typed rather than after, which used to mean typing the values twice. The filters a task asks
+  for are set before submitting where the form offers them, because setting one afterwards submits twice,
+  and a filter the page only reveals once there are results is set there. On a flight search this removed
+  five steps of rework; on a two-package comparison it removed the repeated writes to the search box that
+  had made it the most expensive lookup in the suite.
+
 ## [0.4.1] - 2026-09-20
 
 - **A secret can be declared for a site rather than for one of its hosts.** `https://*.example.com` covers
@@ -126,7 +136,8 @@ Fixed in the same release, from tasks that failed in the field:
 - First release: a browser agent that picks its next action from the controls the page actually has, with an
   LLM to plan and read, and code owning verification, safety and secrets.
 
-[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.4.1...HEAD
+[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.2
 [0.4.1]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.1
 [0.4.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.0
 [0.3.4]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.4
