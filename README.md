@@ -91,7 +91,7 @@ answer, and cost by component.
 
 | Flag | Effect |
 |:--|:--|
-| `--start URL` | required: the page to open first |
+| `--start URL` | the page to open first; worked out from the task when omitted |
 | `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`); far less likely to be bot-challenged. Prints a URL to watch it live |
 | `--headed` | show the local Chrome window |
 | `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in |
@@ -226,6 +226,10 @@ complete {'package': 'httpx', 'version': '0.28.1'} $0.0114
   "httpx 0.28.1" from https://pypi.org/project/httpx/
   "pip install httpx" from https://pypi.org/project/httpx/
 ```
+
+`run_task(cdp_url=...)` drives a browser that is already running, wherever it is, instead of starting one:
+the run opens a tab and closes that tab, and the browser is left as it was found. With neither that nor a
+cloud key, it runs local Chrome.
 
 To show a run as it happens, pass `on_event=`: a `BrowserEvent` arrives first with the live-view URL of a
 cloud browser, then a `StepEvent` per step. `Config(step_frames=True)` adds a PNG of the page each step acted

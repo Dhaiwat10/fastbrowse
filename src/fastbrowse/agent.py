@@ -61,7 +61,7 @@ from fastbrowse.safety import (
     resolve_secret,
     secret_allowed,
 )
-from fastbrowse.shortcut import Shortcut, accept, propose_shortcut
+from fastbrowse.shortcut import Shortcut, accept, accept_start, propose_shortcut, propose_start
 from fastbrowse.telemetry import BudgetExceeded, Ledger, trace
 from fastbrowse.verification import (
     DoneVerdict,
@@ -254,6 +254,7 @@ class Agent:
         task: str,
         *,
         start: str | None = None,
+        choose_start: bool = False,
         inputs: Mapping[str, str] | None = None,
         attachments: Sequence[Attachment] = (),
         output_schema: type[BaseModel] | None = None,
@@ -273,7 +274,11 @@ class Agent:
                 # The plan is needed to read, to judge DONE and to answer, and the start page, the first fills
                 # and clicks all come before those, so it is written from the task while they run.
                 planning = asyncio.create_task(make_plan(self._llm, task, start=start, ledger=ledger))
-                history = [] if start is None else await self._open(task, start, ledger)
+                # `start=None` means the browser is already where the run should begin, which is how an
+                # embedder driving its own browser uses this. `choose_start` is the other case: a caller
+                # with a goal and no page at all, who wants the first address worked out from the task.
+                opening = start if start is not None or not choose_start else await self._first_page(task, ledger)
+                history = [] if opening is None else await self._open(task, opening, ledger)
                 state = _RunState(
                     task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planning
                 )
@@ -404,6 +409,21 @@ class Agent:
                 await self._step(state, observation, decision, decided_by)
             except _Unsure as unsure:
                 await self._recover(state, observation, str(unsure))
+
+    async def _first_page(self, task: str, ledger: Ledger) -> str:
+        """The page to begin on when the caller named none.
+
+        An embedder whose own interface takes a goal and no URL (an agent handing over a sentence) has
+        nowhere to get one, and a browser opened on a blank page gives Jev nothing to choose between. So the
+        address is proposed from the task, exactly as the shortcut is, and the run begins there.
+        """
+        proposal = await propose_start(self._llm, task, ledger=ledger)
+        ledger.record(proposal.cost)
+        opening = accept_start(proposal.data.url)
+        if opening is None:
+            raise _Stop(Status.NEEDS_INPUT, "the task names no page to start from, and none was given")
+        trace("start_page", url=opening)
+        return opening
 
     async def _open(self, task: str, start: str, ledger: Ledger) -> list[HistoryEntry]:
         """Open `start`, or a direct address for the task on its site when one is proposed in time.

@@ -65,9 +65,10 @@ exactly like regressions, so re-read a red run before believing it.
 
 The run loop is `src/fastbrowse/agent.py`, and everything else is a seam it calls.
 
-- **`run.py`** opens the browser (local Chrome, or a Browser Use Cloud browser when a key is given) and builds
-  the Jev and LLM clients from `Settings`, then hands control to the loop. This is the embedding API:
-  `run_task(...)`.
+- **`run.py`** opens the browser and builds the Jev and LLM clients from `Settings`, then hands control to
+  the loop. This is the embedding API: `run_task(...)`. The browser is one of three, in this order: one the
+  caller hands over (`cdp_url`, neither started nor stopped here), a Browser Use Cloud browser (a key), or
+  local Chrome. `start` is optional; without one the first address is proposed from the task.
 - **`page.py` / `browser/`** index the page. `browser/snapshot.js` runs in the page and returns the controls
   with what tells them apart (role, label, the card or row that disambiguates twins, whether a field blocks
   its form); `browser/capture.js` returns the text with stable spans so a quote can be located later.

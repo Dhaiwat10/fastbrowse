@@ -773,3 +773,28 @@ async def test_a_bot_check_stops_the_run_even_where_a_secret_is_held_for_the_sit
     assert "bot_check" in asked
     # The sign-in question is the one a held credential answers, so it is not asked.
     assert "login_required" not in asked
+
+
+@pytest.mark.parametrize(
+    ("proposed", "opened"),
+    [
+        ("https://news.ycombinator.com/", "https://news.ycombinator.com/"),
+        # A run that began at `file:` or `javascript:` would be reading this process, not the web.
+        ("file:///etc/passwd", None),
+        (None, None),
+    ],
+)
+async def test_a_run_with_no_page_named_works_the_first_address_out_of_the_task(
+    proposed: str | None, opened: str | None
+) -> None:
+    page = Mock(spec=Page)
+    page.navigate = AsyncMock()
+    page.origin = AsyncMock(return_value="https://news.ycombinator.com")
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([{"url": proposed}]))
+    ledger = Ledger(Limits())
+    if opened is None:
+        with pytest.raises(_Stop) as stopped:
+            await agent._first_page("What is the top story?", ledger)
+        assert stopped.value.status is Status.NEEDS_INPUT
+    else:
+        assert await agent._first_page("What is the top story?", ledger) == opened

@@ -13,6 +13,25 @@ Older entries are kept verbatim rather than rewritten as the product moves.
 
 Nothing yet.
 
+## [0.4.0] - 2026-09-20
+
+Everything an application needs to run fastbrowse as its browser engine rather than as a command someone
+types. Each of these came from wiring it into a product that already had one.
+
+- **Drive a browser you already have.** `cdp_url` attaches to any browser over the DevTools protocol,
+  wherever it runs: a container, a VM, a machine you own. The run opens one tab and closes that tab, so a
+  browser handed over is left exactly as it was found, and nothing is billed to a cloud account. This is the
+  option to reach for when the browser should live next to the user rather than in someone else's cloud.
+- **Start from the task alone.** `start` is optional now. A caller whose own interface takes a goal and no
+  URL had nowhere to get one; the first address is worked out from the task, as a person would. `--start`
+  is optional in the CLI and `start` is optional on the MCP server's `browse` tool, where `task` is now the
+  only thing a call must carry. A secret is still only offered when a start page names the origin to scope
+  it to: with no page named, none is sent to whatever the run opens.
+- **Stop a cloud browser you did not start.** The browser event carries the cloud browser's id, so an
+  application that has to end a run out of band (a user pressing cancel, a subscription ending) can.
+- **`proxy_country` and `viewport`** reach a cloud browser the run starts, instead of being fixed at what
+  the library guessed.
+
 ## [0.3.4] - 2026-09-20
 
 - **A step frame can no longer carry a secret the step itself revealed.** `Config(step_frames=True)` checked
@@ -74,7 +93,8 @@ Nothing yet.
 - First release: a browser agent that picks its next action from the controls the page actually has, with an
   LLM to plan and read, and code owning verification, safety and secrets.
 
-[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.3.4...HEAD
+[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.0
 [0.3.4]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.4
 [0.3.3]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.3
 [0.3.2]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.2

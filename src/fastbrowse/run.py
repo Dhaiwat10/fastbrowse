@@ -44,16 +44,33 @@ from fastbrowse.page import BrowserError
 
 @asynccontextmanager
 async def _browser(
-    key: str | None, chrome: LocalChrome, http: httpx.AsyncClient, cost: list[CostLine], profile: str | None
+    key: str | None,
+    chrome: LocalChrome,
+    http: httpx.AsyncClient,
+    cost: list[CostLine],
+    *,
+    profile: str | None = None,
+    cdp_url: str | None = None,
+    proxy_country: str | None = "us",
+    viewport: tuple[int, int] | None = None,
 ) -> AsyncGenerator[BrowserConnection]:
-    """A cloud browser when a key is given, otherwise local Chrome."""
+    """The browser a run drives: one it is handed, a cloud browser, or local Chrome."""
+    if cdp_url is not None:
+        if key is not None:
+            raise BrowserError("cdp_url is a browser to attach to; a cloud key would start a second one")
+        if profile is not None:
+            raise BrowserError("cloud_profile belongs to a browser fastbrowse starts, not to one it is handed")
+        # Nothing to start and nothing to stop: the caller's browser outlives the run. The session opens its
+        # own tab and closes only that, so a browser handed over is left exactly as it was found.
+        yield BrowserConnection(cdp_url=cdp_url, live_url=None, remote=True)
+        return
     if key is None:
         if profile is not None:
             raise BrowserError("cloud_profile names a Browser Use Cloud profile, which needs a cloud browser")
         async with async_local_chrome(chrome) as connection:
             yield connection
         return
-    remote = BrowserUseCloudBrowser(key, http=http, profile=profile)
+    remote = BrowserUseCloudBrowser(key, http=http, profile=profile, proxy_country=proxy_country, viewport=viewport)
     try:
         async with remote:
             yield remote.connection
@@ -65,10 +82,13 @@ async def _browser(
 async def run_task(
     task: str,
     *,
-    start: str,
+    start: str | None = None,
     browser_api_key: str | None = None,
     chrome: LocalChrome | None = None,
     cloud_profile: str | None = None,
+    cdp_url: str | None = None,
+    proxy_country: str | None = "us",
+    viewport: tuple[int, int] | None = None,
     jev: JevClient | None = None,
     llm: LLMClient | None = None,
     output_schema: type[BaseModel] | None = None,
@@ -86,10 +106,16 @@ async def run_task(
 ) -> RunResult:
     """Open `start`, pursue `task`, and return what the run could prove.
 
-    `browser_api_key` picks the browser: a Browser Use Cloud key runs there, and None runs local
-    Chrome as `chrome` describes (default: from `Settings`, headless with a throwaway profile).
+    `start` may be omitted, for a caller whose own interface takes a goal and no URL: the first address is
+    then proposed from the task and the run begins there, which is what a person does with the same sentence.
+
+    The browser is one of three. `cdp_url` attaches to a browser that is already running, wherever it is
+    (a container, a VM, a machine the caller owns), and the run neither starts nor stops it: it opens one tab
+    and closes that tab. Otherwise `browser_api_key` runs on a Browser Use Cloud browser, and with neither,
+    local Chrome as `chrome` describes (default: from `Settings`, headless with a throwaway profile).
     `cloud_profile` names a profile on that cloud account, so a site someone signed into once in that
-    profile is still signed in here; it is the remote counterpart of `LocalChrome.profile`. `jev` and
+    profile is still signed in here; it is the remote counterpart of `LocalChrome.profile`. `proxy_country`
+    and `viewport` shape a cloud browser this run starts, and mean nothing for the other two. `jev` and
     `llm` default to clients built from `Settings` (the environment, then `.env`), so an embedder that
     resolves its own credentials, or serves Jev from somewhere else, passes them instead.
 
@@ -108,10 +134,17 @@ async def run_task(
             result: RunResult | None = None
             try:
                 async with _browser(
-                    browser_api_key, chrome or settings.local_chrome(), client, browser_cost, cloud_profile
+                    browser_api_key,
+                    chrome or settings.local_chrome(),
+                    client,
+                    browser_cost,
+                    profile=cloud_profile,
+                    cdp_url=cdp_url,
+                    proxy_country=proxy_country,
+                    viewport=viewport,
                 ) as connection:
                     if on_event is not None:
-                        await on_event(BrowserEvent(live_url=connection.live_url))
+                        await on_event(BrowserEvent(live_url=connection.live_url, browser_id=connection.browser_id))
                     session = BrowserSession(connection, sink, refuse_cookie_banners=config.refuse_cookie_banners)
                     async with session:
                         page = CdpPage(session, config)
@@ -120,6 +153,10 @@ async def run_task(
                             result = await agent.run(
                                 task,
                                 start=start,
+                                # No page named and a browser of our own: work the first address out from
+                                # the task. A caller driving its own browser through `cdp_url` means "where
+                                # it already is", and gets that.
+                                choose_start=start is None and cdp_url is None,
                                 output_schema=output_schema,
                                 inputs=inputs,
                                 attachments=attachments,
