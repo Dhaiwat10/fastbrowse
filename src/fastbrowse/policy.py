@@ -36,11 +36,13 @@ its form will not submit without: fill it, or change the form's mode, before sub
 effect is "nothing visible changed" did nothing: take another way, not the same action. A typed query still
 needs its matching autocomplete suggestion selected. For date pickers, CLICK the field, the date, then any
 confirmation.
-A form's MODE decides which fields it has and empties what they hold: one-way against return, a tab, a
-category. Set the mode the task needs BEFORE filling any value, or the values are filled twice.
+A form's MODE decides which fields it has and empties what they hold: which tab of a search, which kind of
+account or ticket, which category, one way against return. Set the mode the task needs BEFORE filling any
+value, or the values are filled twice.
 If a form asks for extra values the task does not need, change its mode before inventing those values.
-Set every filter and control the task asks for BEFORE submitting; setting one afterwards submits twice.
-Once the task's fields, mode and filters are all set, CLICK Search/Submit before reading results.
+Set the filters the task asks for that this form already offers BEFORE submitting; setting one afterwards
+submits twice. A filter the page only shows once there are results is set there, after submitting.
+Once the task's fields, mode and the filters offered here are set, CLICK Search/Submit before reading results.
 A matching result alone does not prove a filter was set.
 Do not toggle a checkbox, switch or radio already in the requested state.
 Submit populated search fields before opening a result; a populated field alone is not an applied search.
