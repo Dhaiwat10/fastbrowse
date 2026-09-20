@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import json
 import re
 import subprocess
 import sys
@@ -290,7 +291,7 @@ async def test_cloud_teardown_preserves_original_error_and_cost(stop_fails: bool
     original = RuntimeError("original")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         with pytest.raises(RuntimeError) as raised:
-            async with _browser("key", LocalChrome(), http, cost):
+            async with _browser("key", LocalChrome(), http, cost, None):
                 raise original
         assert raised.value is original
         assert cost[0].dollars == (0.25 if stop_fails else 0.50)
@@ -400,3 +401,33 @@ def test_chrome_discovery_finds_a_windows_install_off_path(monkeypatch: pytest.M
 
     monkeypatch.setattr(chrome_adapter.shutil, "which", which)
     assert find_chrome(None) == installed
+
+
+async def test_a_cloud_profile_starts_the_browser_signed_in_as_that_profile() -> None:
+    """The run inherits the profile's cookies, so nothing has to type the credentials behind them."""
+    bodies: list[object] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"id": "created", "cdpUrl": "https://cdp.test", "webSocketDebuggerUrl": "ws://cdp.test"},
+        )
+
+    cost: list[CostLine] = []
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http,
+        _browser("key", LocalChrome(), http, cost, "profile-42") as connection,
+    ):
+        assert connection.remote
+    assert bodies == [{"timeout": 15, "proxyCountryCode": "us", "profileId": "profile-42"}]
+
+
+async def test_a_cloud_profile_without_a_cloud_browser_is_refused() -> None:
+    """Local Chrome keeps its profile in a directory; a cloud profile id means nothing to it."""
+    cost: list[CostLine] = []
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(BrowserError, match="needs a cloud browser"):
+            async with _browser(None, LocalChrome(), http, cost, "profile-42"):
+                pass

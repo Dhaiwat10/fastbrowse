@@ -9,6 +9,7 @@
 
 Jev chooses each action, an LLM plans and reads, and code owns verification, safety and secrets.
 
+[![pypi](https://img.shields.io/pypi/v/fastbrowse?style=flat-square&color=6366F1)](https://pypi.org/project/fastbrowse/)
 ![python](https://img.shields.io/badge/python-3.14-475569?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-475569?style=flat-square)
 ![status](https://img.shields.io/badge/status-pre--alpha-6366F1?style=flat-square)
@@ -56,31 +57,6 @@ passed all 21 tasks, answer tasks included (14/14, 21.5s median, $0.013).
 - **Scripts:** there are no selectors to maintain. The same agent handles a date picker, a checkout and
   a search box it has never seen.
 
-## How it works
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
-  <img src="assets/architecture.svg" alt="The task is planned and the start page opened in parallel; each step indexes the page, Jev picks an operation and target, code gates it and acts; reads keep verbatim quotes, and the answer cites every claim.">
-</picture>
-
-The LLM plans, reads and writes. Code owns the gates: irreversible actions stop without
-`--authorize`, secrets reach models by name only, and cookie banners are refused before they paint.
-More in [docs/design.md](docs/design.md).
-
-## How it compares
-
-| | hosted Browser Use | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | fastbrowse |
-|:--|:--|:--|:--|
-| Choosing an action | LLM generates from a screenshot | Jev picks from indexed controls | Jev picks from indexed controls |
-| Returns | an answer | `DONE` or `BLOCKED` | an answer with quotes, or why it stopped |
-| Reads pages | yes | no | yes, every claim cited |
-| Signing in | yes | password fields excluded | `--secret` or a Bitwarden vault item; models see names only |
-| Irreversible actions | not gated | not gated | stop unless `--authorize` |
-| Browser | cloud | local Chrome, your profile | local Chrome or cloud |
-
-jev-ultrafast is Browser Use's navigation agent (a measured 7.1s Google Flights run); fastbrowse
-shares its core techniques. Its column describes `main` as of 2026-09-18.
-
 ## Try it
 
 Needs [uv](https://docs.astral.sh/uv/) and Chrome (not needed with `--cloud`); uv fetches Python 3.14 itself.
@@ -119,6 +95,7 @@ answer, and cost by component.
 | `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`); far less likely to be bot-challenged. Prints a URL to watch it live |
 | `--headed` | show the local Chrome window |
 | `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in |
+| `--cloud-profile ID` | run on a Browser Use Cloud profile, signed in as whoever set it up (needs `--cloud`) |
 | `--authorize` | allow submit, pay, delete and send; without it the run stops at `needs_confirmation` first |
 | `--secret NAME=ENV_VAR` | let the agent type `$ENV_VAR` on the start origin; models only see `NAME` |
 | `--bitwarden ITEM` | let the agent type that vault login's `username` and `password`, only where the item's saved URIs and their match detection allow |
@@ -141,6 +118,15 @@ Sign in once by hand in a profile of its own, then point runs at it:
 google-chrome --user-data-dir="$HOME/.fastbrowse/amazon" https://www.amazon.com/   # sign in, then close Chrome
 uv run fastbrowse "Add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
   --start https://www.amazon.com/ --profile ~/.fastbrowse/amazon --headed
+```
+
+On a cloud browser the profile lives on the [Browser Use Cloud](https://cloud.browser-use.com) account
+rather than on disk, and `--cloud-profile ID` runs as it. Whoever signed that profile in did so once, in a
+browser of their own; the run inherits the cookies and no model is shown a credential:
+
+```sh
+uv run fastbrowse "Add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
+  --start https://www.amazon.com/ --cloud --cloud-profile prof_1234
 ```
 
 Or from your vault, with the [Bitwarden CLI](https://bitwarden.com/help/cli/) unlocked. Values are typed
@@ -175,6 +161,31 @@ The exit code is 0 only for `complete`.
 | `budget_exceeded` | a step, call, time or dollar limit was reached |
 | `observation_limit` | the page has more controls than Jev can take in |
 | `error` | a model or browser failure |
+
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
+  <img src="assets/architecture.svg" alt="The task is planned and the start page opened in parallel; each step indexes the page, Jev picks an operation and target, code gates it and acts; reads keep verbatim quotes, and the answer cites every claim.">
+</picture>
+
+The LLM plans, reads and writes. Code owns the gates: irreversible actions stop without
+`--authorize`, secrets reach models by name only, and cookie banners are refused before they paint.
+More in [docs/design.md](docs/design.md).
+
+## How it compares
+
+| | hosted Browser Use | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | fastbrowse |
+|:--|:--|:--|:--|
+| Choosing an action | LLM generates from a screenshot | Jev picks from indexed controls | Jev picks from indexed controls |
+| Returns | an answer | `DONE` or `BLOCKED` | an answer with quotes, or why it stopped |
+| Reads pages | yes | no | yes, every claim cited |
+| Signing in | yes | password fields excluded | `--secret` or a Bitwarden vault item; models see names only |
+| Irreversible actions | not gated | not gated | stop unless `--authorize` |
+| Browser | cloud | local Chrome, your profile | local Chrome or cloud |
+
+jev-ultrafast is Browser Use's navigation agent (a measured 7.1s Google Flights run); fastbrowse
+shares its core techniques. Its column describes `main` as of 2026-09-18.
 
 ## Embed it
 
@@ -250,6 +261,7 @@ The server's flags decide what a calling model may do; a call can ask for less, 
 | Flag | Effect |
 |:--|:--|
 | `--cloud`, `--headed`, `--profile DIR`, `--downloads DIR` | as for the CLI, fixed for every call |
+| `--cloud-profile ID` | every call runs signed in as that cloud profile; a calling model cannot choose it |
 | `--allow-authorize` | let a call pass `authorize` to go through irreversible actions; without it they always stop at `needs_confirmation` |
 | `--secret NAME=ENV_VAR@ORIGIN` | typed when a call's start page is on `ORIGIN`; the model sees `NAME` only |
 | `--bitwarden ITEM` | a vault login a call may name in `bitwarden` |

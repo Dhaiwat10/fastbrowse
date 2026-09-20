@@ -35,13 +35,24 @@ class BrowserUseCloudError(RuntimeError):
 
 class BrowserUseCloudBrowser:
     def __init__(
-        self, api_key: str, *, http: httpx.AsyncClient, proxy_country: str | None = "us", timeout_minutes: int = 15
+        self,
+        api_key: str,
+        *,
+        http: httpx.AsyncClient,
+        proxy_country: str | None = "us",
+        timeout_minutes: int = 15,
+        profile: str | None = None,
     ) -> None:
         self._http = http
         self._headers = {"X-Browser-Use-API-Key": api_key}
         self._body: dict[str, str | int] = {"timeout": timeout_minutes}
         if proxy_country is not None:
             self._body["proxyCountryCode"] = proxy_country
+        # A cloud profile is the remote counterpart of `LocalChrome.profile`: the browser starts with the
+        # cookies the profile already holds, so a site signed into once stays signed in. Whoever runs the
+        # task never sees those cookies, which is the point of naming a profile rather than typing a secret.
+        if profile is not None:
+            self._body["profileId"] = profile
         self._browser_id: str | None = None
         self._connection: BrowserConnection | None = None
         self.cost: tuple[CostLine, ...] = ()

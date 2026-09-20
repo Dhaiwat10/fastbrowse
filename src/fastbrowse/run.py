@@ -44,14 +44,16 @@ from fastbrowse.page import BrowserError
 
 @asynccontextmanager
 async def _browser(
-    key: str | None, chrome: LocalChrome, http: httpx.AsyncClient, cost: list[CostLine]
+    key: str | None, chrome: LocalChrome, http: httpx.AsyncClient, cost: list[CostLine], profile: str | None
 ) -> AsyncGenerator[BrowserConnection]:
     """A cloud browser when a key is given, otherwise local Chrome."""
     if key is None:
+        if profile is not None:
+            raise BrowserError("cloud_profile names a Browser Use Cloud profile, which needs a cloud browser")
         async with async_local_chrome(chrome) as connection:
             yield connection
         return
-    remote = BrowserUseCloudBrowser(key, http=http)
+    remote = BrowserUseCloudBrowser(key, http=http, profile=profile)
     try:
         async with remote:
             yield remote.connection
@@ -66,6 +68,7 @@ async def run_task(
     start: str,
     browser_api_key: str | None = None,
     chrome: LocalChrome | None = None,
+    cloud_profile: str | None = None,
     jev: JevClient | None = None,
     llm: LLMClient | None = None,
     output_schema: type[BaseModel] | None = None,
@@ -84,7 +87,9 @@ async def run_task(
     """Open `start`, pursue `task`, and return what the run could prove.
 
     `browser_api_key` picks the browser: a Browser Use Cloud key runs there, and None runs local
-    Chrome as `chrome` describes (default: from `Settings`, headless with a throwaway profile). `jev` and
+    Chrome as `chrome` describes (default: from `Settings`, headless with a throwaway profile).
+    `cloud_profile` names a profile on that cloud account, so a site someone signed into once in that
+    profile is still signed in here; it is the remote counterpart of `LocalChrome.profile`. `jev` and
     `llm` default to clients built from `Settings` (the environment, then `.env`), so an embedder that
     resolves its own credentials, or serves Jev from somewhere else, passes them instead.
 
@@ -103,7 +108,7 @@ async def run_task(
             result: RunResult | None = None
             try:
                 async with _browser(
-                    browser_api_key, chrome or settings.local_chrome(), client, browser_cost
+                    browser_api_key, chrome or settings.local_chrome(), client, browser_cost, cloud_profile
                 ) as connection:
                     if on_event is not None:
                         await on_event(BrowserEvent(live_url=connection.live_url))
