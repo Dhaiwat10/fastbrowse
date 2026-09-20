@@ -251,7 +251,8 @@ async def read(
         for r in requirements
         if r.id in requirement_ids and r.kind is RequirementKind.INFORMATION and r.id not in continuing
     ]
-    if jev is not None and wanted:
+    # A pager notice is a caveat on what this page can answer, and the choice model picks quotes without weighing one.
+    if jev is not None and wanted and not notice:
         chosen, choice_costs = await _read_choices(jev, capture, wanted, notes, ledger=ledger, notice=notice)
         costs.extend(choice_costs)
         for fact in chosen:

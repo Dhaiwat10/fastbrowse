@@ -336,10 +336,10 @@ class Agent:
                 decision, uncertain, decided_by = directed, False, Decider.LLM
             if decision.operation is Operation.CLICK and decision.target is not None and pages_forward(decision.target):
                 plan = await state.await_plan()
-                if not state.notes.unresolved(plan):
-                    # Everything asked for is evidenced, so another page is wandering: Jev, offered the pager, kept
-                    # turning pages through a whole catalogue after the two the task named had been read. DONE is
-                    # judged again by `_finish`, which carries on if it does not hold.
+                if _answered(plan, state.notes):
+                    # Everything asked to be found is evidenced, so another page is wandering: Jev, offered the pager,
+                    # kept turning pages through a whole catalogue after the two the task named had been read. DONE
+                    # is judged again by `_finish`, which carries on if it does not hold.
                     decision, uncertain, decided_by = _code_decision(Operation.DONE, None), False, Decider.CODE
                 elif not state.read_here and _unread(plan, state.notes):
                     # Turning the page of a list nobody has read loses that page: with the pager in view Jev opened
@@ -1010,7 +1010,9 @@ class Agent:
             )
         # The capture is text: a "Next" link reads the same as any other word unless the page's controls say so.
         notice = (
-            f"This page has a next-page control ({following.label!r}): a list on it may continue."
+            f"This page has a next-page control ({following.label!r}): a list on it may continue. A requirement "
+            "about the page that control opens is not answered by this page, whatever this page holds: leave it "
+            "unanswered until that page is read."
             if following is not None
             else ""
         )
@@ -1218,6 +1220,10 @@ class Agent:
             else compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
         )
         held = await self._holds(state, composed.data)
+        if held is None and (facts := draft_answer(state.plan, state.notes)) is not None:
+            # A list of forty records came back as one claim citing one quote, which no claim check should pass. The
+            # reader's own facts each carry the quote that shows them, so they are offered to the same check.
+            held = await self._holds(state, facts)
         return self._redactor.redact((held or composed.data).answer), held is not None
 
     async def _holds(self, state: _RunState, answer: ComposedAnswer) -> ComposedAnswer | None:
@@ -1317,6 +1323,16 @@ def _unread(plan: Plan, notes: Notes) -> bool:
     # owes an answer with nothing read would hand the composer empty notes: one did, and ended complete on "".
     unresolved = any(r.kind is RequirementKind.INFORMATION for r in notes.unresolved(plan))
     return unresolved or (plan.answer_expected and not notes.facts)
+
+
+def _answered(plan: Plan, notes: Notes) -> bool:
+    """Whether the plan asks to find something and every such requirement is evidenced.
+
+    Not the same as nothing being left unresolved: a plan can file "open the next page" as an action, which no note
+    evidences, and a task whose whole point is to turn pages has nothing to find, so it is never answered.
+    """
+    asked = [r for r in plan.requirements if r.kind is RequirementKind.INFORMATION]
+    return bool(asked) and all(notes.evidenced(r.id) for r in asked)
 
 
 def _answers_input(state: _RunState, observation: Observation) -> bool:
