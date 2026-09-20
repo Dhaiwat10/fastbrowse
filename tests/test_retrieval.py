@@ -728,3 +728,100 @@ async def test_pruning_the_only_claim_for_a_requirement_is_an_omission() -> None
     )
     composed = ComposedAnswer(answer="unused", claims=claims, requirements=requirements)
     assert await check_claims(Jev(), composed, notes, Thresholds()) is None
+
+
+async def test_a_winner_from_part_of_a_list_is_kept_but_does_not_answer() -> None:
+    page = capture((BlockKind.PARAGRAPH, "Sharp Objects £47.82"), (BlockKind.PARAGRAPH, "Page 1 of 2"))
+    notes = Notes()
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {"requirement_id": "r1", "text": "cheapest", "source_id": "s0", "quote": "Sharp Objects £47.82"}
+                ],
+                "answered": True,
+                "continues": ["r1", "not-asked"],
+            }
+        ]
+    )
+    outcome = await read(llm, page, "Cheapest mystery?", ["r1"], notes, notice="This page has a next-page control.")
+    assert outcome.continues == ("r1",)
+    assert len(notes.facts) == 1 and not notes.evidenced("r1")
+    assert "This page has a next-page control." in llm.calls[0][1][-1].content
+
+
+async def test_the_choice_shortcut_is_told_the_list_continues() -> None:
+    from tests.test_policy import ScriptedJev
+
+    page = capture((BlockKind.PARAGRAPH, "Sharp Objects £47.82"))
+    jev = ScriptedJev({"r1": "none"})
+    requirement = Requirement(id="r1", text="The cheapest book", kind=RequirementKind.INFORMATION)
+    llm = ScriptedLLM([{"claims": [], "answered": False, "continues": ["r1"]}])
+    await read(
+        llm,
+        page,
+        "Cheapest?",
+        ["r1"],
+        Notes(),
+        jev=jev,
+        requirements=[requirement],
+        notice="This page has a next-page control ('next').",
+    )
+    asked = jev.requests[0]["r1"]
+    assert isinstance(asked, ChoiceQuestion)
+    assert "next-page control" in asked.instructions
+
+
+async def test_a_later_chunk_saying_the_list_goes_on_reopens_an_earlier_chunks_claim() -> None:
+    # The pager sits at the foot of a long listing, so the chunk that names it is read after the winner.
+    page = capture(
+        (BlockKind.PARAGRAPH, "Sharp Objects £47.82"),
+        (BlockKind.PARAGRAPH, "a" * 13000),
+        (BlockKind.PARAGRAPH, "Page 1 of 2"),
+    )
+    notes = Notes()
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {"requirement_id": "r1", "text": "cheapest", "source_id": "s0", "quote": "Sharp Objects £47.82"}
+                ],
+                "answered": True,
+            },
+            {"claims": [], "answered": False, "continues": ["r1"]},
+            {"claims": [], "answered": False, "continues": ["r1"]},
+        ]
+    )
+    outcome = await read(llm, page, "Cheapest?", ["r1"], notes, notice="This page has a next-page control.")
+    assert len(llm.calls) > 1, "a chunk claiming to have answered cannot end a read of a list that goes on"
+    assert outcome.continues == ("r1",)
+    assert len(notes.facts) == 1 and not notes.evidenced("r1")
+
+
+async def test_a_later_chunk_is_read_against_what_earlier_chunks_of_the_page_found() -> None:
+    """The notes are written once the page is read, so the read carries its own findings between chunks."""
+    page = capture(
+        (BlockKind.PARAGRAPH, "Einstein: the world as we have created it"),
+        (BlockKind.PARAGRAPH, "b" * 13000),
+        (BlockKind.PARAGRAPH, "Einstein: there are two ways to live"),
+    )
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {
+                        "requirement_id": None,
+                        "text": "an Einstein quote",
+                        "source_id": "s0",
+                        "quote": "Einstein: the world as we have created it",
+                    }
+                ],
+                "answered": False,
+            },
+            {"claims": [], "answered": False},
+            {"claims": [], "answered": False},
+        ]
+    )
+    await read(llm, page, "How many Einstein quotes?", ["r1"], Notes())
+    later = llm.calls[1][1][-1].content
+    assert "the world as we have created it" in later, "chunk two cannot count what chunk one found unseen"
