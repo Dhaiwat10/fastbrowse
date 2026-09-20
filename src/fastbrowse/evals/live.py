@@ -496,6 +496,13 @@ async def main(argv: list[str]) -> int:
     parser.add_argument(
         "--max-seconds", type=float, default=MAX_SECONDS, help=f"per-run time cap (default {MAX_SECONDS})"
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="runs in flight at once (default 1). Only sound for an arm whose work happens elsewhere: a local "
+        "arm would be timing itself against its own neighbours. A row from a parallel run says so.",
+    )
     args = parser.parse_args(argv)
     limits = Limits(max_steps=MAX_STEPS, max_dollars=args.max_dollars or None, max_seconds=args.max_seconds or None)
     tasks = [
@@ -507,27 +514,43 @@ async def main(argv: list[str]) -> int:
     if "ultrafast" in args.arms:
         await prepare_ultrafast()
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    if args.concurrency > 1 and not set(args.arms) <= {"hosted"}:
+        # An arm that runs its own loop here reports how long it took, and neighbours on one machine make that
+        # longer. The number is then that arm's worst case rather than its time, which is worth having only
+        # when the other arm was measured the same way: a comparison has to put both under the same load.
+        print(
+            f"note: {args.concurrency} runs at once, so a locally driven arm is timing itself under load",
+            file=sys.stderr,
+        )
     rows: list[dict[str, object]] = []
+    gate = asyncio.Semaphore(args.concurrency)
     with tempfile.TemporaryDirectory() as downloads, args.out.open("a", encoding="utf-8") as out:
         async with httpx.AsyncClient(timeout=60) as http:
-            for _ in range(args.repeat):
-                for task in tasks:
-                    for arm in args.arms:
-                        if arm not in task.arms:
-                            continue
-                        record = None if args.record is None else video_path(args.record, arm, task)
-                        row = await run_arm(
-                            arm, task, http, Path(downloads), bitwarden=args.bitwarden, record=record, limits=limits
-                        )
-                        rows.append(row)
-                        out.write(json.dumps(row, default=str) + "\n")
-                        out.flush()
-                        mark = "PASS" if row["passed"] else "FAIL"
-                        print(
-                            f"{mark} {arm:9} {task.id:20} {row.get('seconds')!s:>6}s ${row.get('dollars')!s:<8}",
-                            row["failure"] or "",
-                            flush=True,
-                        )
+
+            async def one(arm: str, task: LiveTask, record: Path | None) -> dict[str, object]:
+                async with gate:
+                    row = await run_arm(
+                        arm, task, http, Path(downloads), bitwarden=args.bitwarden, record=record, limits=limits
+                    )
+                row["concurrency"] = args.concurrency
+                out.write(json.dumps(row, default=str) + "\n")
+                out.flush()
+                mark = "PASS" if row["passed"] else "FAIL"
+                print(
+                    f"{mark} {arm:9} {task.id:20} {row.get('seconds')!s:>6}s ${row.get('dollars')!s:<8}",
+                    row["failure"] or "",
+                    flush=True,
+                )
+                return row
+
+            planned = [
+                (arm, task, None if args.record is None else video_path(args.record, arm, task))
+                for _ in range(args.repeat)
+                for task in tasks
+                for arm in args.arms
+                if arm in task.arms
+            ]
+            rows = list(await asyncio.gather(*(one(arm, task, record) for arm, task, record in planned)))
     summarize(rows, args.arms)
     return 0
 

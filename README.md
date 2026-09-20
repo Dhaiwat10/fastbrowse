@@ -31,31 +31,55 @@ something that was never on the page. Every claim in an answer cites a verbatim 
 
 ### Against Browser Use
 
-The same 14 answer tasks (lookups, sign-ins, checkout, Google Flights), three passes each, on the same kind
-of cloud browser. What a task costs is the difference that does not depend on how either arm was configured:
+The same 14 answer tasks (lookups, sign-ins, checkout, Google Flights), three passes each, on the same kind of
+cloud browser, run the same day with **no cost cap on either side**, so a run stops when the agent is done
+rather than when a budget runs out. Neither arm hit a limit.
 
-| | cost per task | median time |
-|:--|:--|:--|
-| **fastbrowse** | **$0.011** | **17.0s** |
-| Browser Use (hosted), on the runs it completed | $0.63 | 103.5s |
+| | passed | cost per task | median time |
+|:--|:--|:--|:--|
+| **fastbrowse** | 41/42 | **$0.0057** (median), $0.0084 mean | **21.0s** |
+| Browser Use (hosted) | 42/42 | $0.41 (median), $0.53 mean | 24.8s |
+| | | **71x cheaper** | 1.2x faster |
 
-A lookup costs $0.004 to $0.007 here against $0.21 to $0.31 there, and on the simplest of them the two take
-about the same time (`hn-top` 12.1s against 12.0s). The time difference is a whole-suite figure, not a
-promise about any one task.
+The whole suite cost $0.35 here and $22.28 there.
 
-**We are not claiming a reliability multiple.** Both arms were first given the same $0.25 cap, where
-Browser Use exceeded it on 28 of 42 runs, spending $0.37 to $0.92 before stopping. That is a budget ceiling
-we chose, not a capability ceiling: re-run at $0.60 it passed 6 of the 8 tasks it was given. Reporting that
-as "2.9x the passes" would have been us measuring our own cap. A run of fastbrowse on current `main` passed
-all 21 tasks, answer tasks included (14/14, 21.5s median, $0.013).
+**Reliability is a tie, and the earlier claim was wrong.** An earlier version of this table read "2.9x the
+passes", from a run where both arms were given a $0.25 cap. Browser Use exceeded that cap on 28 of 42 runs and
+each was scored a failure. Uncapped it passes every one: 36 of its 42 runs cost more than $0.25, so the cap was
+measuring our budget, not its ability. We have no reliability advantage to claim on this suite, and the one
+failure in the table is ours (`saucedemo-locked-out`, one pass of three).
 
-[Tasks, method and per-category results](docs/evals.md#head-to-head).
+**Where the cost difference comes from.** It grows with how much a task does: 63x on a lookup, 88x on the
+checkout, 182x on the sign-ins. Jev picks each action from the controls already on the page, so a step costs a
+classification rather than a generation, and a task that takes thirty steps still costs cents.
+
+**Where it is fast, it is fast because it stops guessing.** The gap opens on the tasks with the most steps in
+them, which are the ones a person actually waits on:
+
+| task | fastbrowse | Browser Use (hosted) | |
+|:--|:--|:--|:--|
+| `saucedemo-checkout` two items, a shipping form and Finish | **36.3s** | 173.9s | **4.8x faster** |
+| `saucedemo-cart` sign in, find a product, add it | **25.8s** | 119.8s | **4.6x faster** |
+| `saucedemo-locked-out` report the site's error rather than claim success | **25.4s** | 115.8s | **4.6x faster** |
+| `internet-login` sign in and confirm the signed-in page | **18.3s** | 71.7s | **3.9x faster** |
+| `practice-login` the same on another practice site | **21.2s** | 36.3s | 1.7x faster |
+
+A plain lookup finishes in eleven to fourteen seconds (`pypi-version` 11.1s, `hn-top` 12.0s, `github-license`
+12.7s), where the two arms are within a second or two of each other and theirs is sometimes ahead. And on
+Google Flights - a date picker and a results widget, the hardest thing in the suite - theirs is nearly twice
+as fast (38.5s against 71.7s), and it is the one task whose grade here wobbles run to run.
+
+Treat the whole-suite median as the summary and the rows as the shape: the more a task does, the further
+ahead this gets.
+
+[Tasks, method and per-task results](docs/evals.md#head-to-head).
 
 ### Why fastbrowse, against each kind of agent
 
 - **LLM agents that generate actions** (Browser Use and similar): Jev picks each action from the controls
-  that are on the page, so there is no invented selector to retry. A task costs a fraction as much (a
-  lookup, $0.004 to $0.007 against $0.21 to $0.31), and every claim in the answer cites a verbatim quote.
+  that are on the page, so there is no invented selector to retry. A task costs a fraction as much (a lookup,
+  $0.005 against $0.33, uncapped and measured the same day), and every claim in the answer cites a verbatim
+  quote. Reliability is about the same; the cost is the difference.
 - **Choice-model navigators** ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast)): the same
   core technique, plus everything a real task needs. fastbrowse reads pages and returns cited answers,
   signs in without showing a model the password, and stops before anything irreversible. On the six

@@ -109,13 +109,81 @@ Run on 2026-09-18. Every arm used a Browser Use Cloud browser and the same limit
 
 Each arm meets the others only on the tasks both can be graded on (see `arms` above), so there are two headline tables, not one. `wasted actions per run` counts escalations, actions that failed or changed nothing, and an action repeated on the same target from the same page, from each run's step log (the target alone for rows from before the step log, such as this run) (`scripts/h2h_report.py`); hosted Browser Use returns no trace to count.
 
-**On reading the pass rates below.** Both arms were given the same $0.25 cap, and every one of hosted
-Browser Use's 28 failures is that cap being reached ($0.37 to $0.92 spent), not a task it could not do. A
-pass rate measured against a cap one arm routinely exceeds says more about the cap than about the arm, so
-the comparison worth quoting is cost per task, and time on the tasks both completed. The $0.60 re-run below
-is the closest thing here to a fair reliability figure, and it is only 8 tasks.
+### Uncapped, 2026-09-20
 
-**Answer tasks** (lookups, sign-ins, checkout and Flights), fastbrowse against hosted Browser Use:
+The answer tasks re-run with **no cost cap on either arm** and a 600s ceiling neither reached, both on the
+same day, both at eight runs in flight. This replaces a capped comparison whose pass rates said more about
+the cap than about either arm: hosted Browser Use exceeded the shared $0.25 cap on 28 of 42 runs there, and
+each was scored a failure. Uncapped it passes every one, and 36 of its 42 runs cost more than $0.25.
+
+| | passed | correct answer | median time | mean time | median cost | mean cost | suite total |
+|:--|:--|:--|:--|:--|:--|:--|:--|
+| fastbrowse (0.4.1) | 41/42 | 41/42 | 21.0s | 25.4s | $0.0057 | $0.0084 | $0.35 |
+| hosted Browser Use | 42/42 | 42/42 | 24.8s | 58.9s | $0.4070 | $0.5304 | $22.28 |
+
+Per task, median of three passes:
+
+| task | fastbrowse | hosted Browser Use | cost ratio |
+|:--|:--|:--|:--|
+| `hn-top` | 3/3, 12.0s, $0.0047 | 3/3, 8.5s, $0.2139 | 46x |
+| `github-license` | 3/3, 12.7s, $0.0052 | 3/3, 8.9s, $0.2552 | 49x |
+| `pypi-version` | 3/3, 11.1s, $0.0015 | 3/3, 15.1s, $0.3308 | 221x |
+| `arxiv-title` | 3/3, 13.7s, $0.0045 | 3/3, 10.9s, $0.3042 | 68x |
+| `pypi-structured` | 3/3, 15.5s, $0.0077 | 3/3, 19.2s, $0.3352 | 44x |
+| `wiki-godel` | 3/3, 25.7s, $0.0111 | 3/3, 21.8s, $0.7799 | 70x |
+| `pypi-newer` | 3/3, 35.4s, $0.0160 | 3/3, 22.2s, $0.4803 | 30x |
+| `internet-login` | 3/3, 18.3s, $0.0019 | 3/3, 71.7s, $0.4623 | 243x |
+| `expandtesting-login` | 3/3, 22.1s, $0.0032 | 3/3, 32.0s, $0.2655 | 83x |
+| `practice-login` | 3/3, 21.2s, $0.0036 | 3/3, 36.3s, $0.2704 | 75x |
+| `google-flights` | 3/3, 71.7s, $0.0279 | 3/3, 38.5s, $0.4119 | 15x |
+| `saucedemo-cart` | 3/3, 25.8s, $0.0059 | 3/3, 119.8s, $0.7233 | 123x |
+| `saucedemo-checkout` | 3/3, 36.3s, $0.0131 | 3/3, 173.9s, $1.1561 | 88x |
+| `saucedemo-locked-out` | 2/3, 35.5s, $0.0088 | 3/3, 115.8s, $0.6773 | 77x |
+
+Per category, median cost and time:
+
+| category | fastbrowse | hosted Browser Use | cost ratio |
+|:--|:--|:--|:--|
+| lookup | 21/21, 13.8s, $0.0052 | 21/21, 15.1s, $0.3308 | 63x |
+| login | 14/15, 22.1s, $0.0036 | 15/15, 113.5s, $0.6571 | 182x |
+| checkout | 3/3, 36.3s, $0.0131 | 3/3, 173.9s, $1.1561 | 88x |
+| widget | 3/3, 71.7s, $0.0279 | 3/3, 38.5s, $0.4119 | 15x |
+
+**Reading it.** Reliability is a tie: 41/42 against 42/42, and the one failure is ours. The cost difference
+is the finding, and it widens with how much a task does, because Jev picks each action from the controls
+already on the page - a step is a classification, not a generation. Time is close on the whole suite and goes
+both ways per task: the sign-ins and the checkout are three to five times faster here, a simple lookup is a
+second or two apart, and Google Flights is nearly twice as fast there.
+
+**Our one failure.** `saucedemo-locked-out`, one pass of three, ended `stuck` without reporting the site's
+locked-out message. The task grades on saying the account is locked rather than claiming success, so a stuck
+run fails it, which is the intended behaviour of the check.
+
+**Both arms ran eight at a time**, which is worth stating because only one of them could be affected by it:
+hosted Browser Use is its own fleet and this process was polling it, while fastbrowse runs its loop here. Its
+model calls did slow under that load (Jev 2.6s to 3.5s, the LLM read 3.0s to 5.0s), so the same 42 runs were
+repeated one at a time to see what it cost. It cost nothing: 24.1s median run time alone against 20.8s in
+parallel, and per task the two are a coin flip, seven faster each way. A run waits on pages, not on us.
+
+**Run-to-run variance is real.** That serial repeat scored 38/42 on the same build and the same day: `hn-top`
+failed twice having taken no steps at all, the site unreachable from here, and `google-flights` failed twice
+on the grader reading an empty form from a search it had correctly run. Re-running the three tasks that
+failed in either pass, three times each, separates them: `hn-top` 3/3 and `saucedemo-locked-out` 3/3, so both
+were transient, and `google-flights` 2/3, which is the one that is genuinely unreliable here ([#12]). Treat a
+single 42-run pass rate as having a couple of points of noise in it, in either direction.
+
+**What is not in this run.** Only the tasks both arms are graded on, so the navigation tasks and the safety
+task are absent - they have no hosted counterpart. The figures below are from the earlier capped run and are
+kept for the jev-ultrafast comparison and the per-arm detail.
+
+### The earlier capped run
+
+**On reading the pass rates below.** Both arms were given the same $0.25 cap, and every one of hosted
+Browser Use's 28 failures is that cap being reached ($0.37 to $0.92 spent), not a task it could not do. The
+uncapped run above is what settles that; these tables are kept for the arms it does not cover.
+
+**Answer tasks** (lookups, sign-ins, checkout and Flights), fastbrowse against hosted Browser Use, under the
+$0.25 cap. The pass column is what the uncapped run above corrects:
 
 | | passed | correct answer | median time | mean time | cost per task | wasted actions per run |
 |:--|:--|:--|:--|:--|:--|:--|
