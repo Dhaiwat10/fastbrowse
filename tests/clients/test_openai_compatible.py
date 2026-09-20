@@ -247,3 +247,79 @@ async def test_an_error_status_retry_does_not_add_llm_cost() -> None:
     assert ledger.llm_calls == 2
     assert result.cost.basis is CostBasis.METERED and result.cost.dollars == 0.01
     assert not ledger.breakdown().has_unknown
+
+
+def _truncated(content: str) -> dict[str, JsonValue]:
+    return {
+        "choices": [{"message": {"content": content}, "finish_reason": "length"}],
+        "usage": {"completion_tokens": 9},
+    }
+
+
+async def test_a_truncated_response_is_retried_with_a_larger_output_cap() -> None:
+    caps: list[JsonValue] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        caps.append(TypeAdapter(dict[str, JsonValue]).validate_json(request.content)["max_tokens"])
+        if len(caps) == 1:
+            return httpx.Response(200, json=_truncated('{"count":"cut off mid-str'))
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"count":5}'}, "finish_reason": "stop"}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await OpenAICompatibleLLM(
+            "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
+        ).generate(LLMPurpose.READ, [], Result, max_output_tokens=100)
+    assert result.data.count == 5
+    assert caps == [100, 400]
+    assert result.cost.output_tokens == 9
+
+
+async def test_a_response_truncated_twice_is_reported_as_truncation_not_as_a_schema_failure() -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=_truncated('{"count":"'))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(LLMError, match="truncated at the 400 token output cap") as error:
+            await OpenAICompatibleLLM(
+                "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
+            ).generate(LLMPurpose.READ, [], Result, max_output_tokens=100)
+    assert calls == 2 and "schema" not in str(error.value)
+
+
+async def test_a_response_that_ran_out_of_tokens_before_any_text_is_truncation() -> None:
+    """A reasoning model can spend the whole cap before it writes; that is not an empty or refused completion."""
+    payload: dict[str, JsonValue] = {"choices": [{"message": {"content": None}, "finish_reason": "length"}]}
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(LLMError, match="truncated"):
+            await OpenAICompatibleLLM(
+                "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
+            ).generate(LLMPurpose.READ, [], Result)
+    assert calls == 2
+
+
+async def test_json_that_ends_mid_value_is_truncation_even_when_the_provider_says_it_stopped() -> None:
+    contents = ['{"count":"cut off mid-str', '{"count":2}']
+    caps: list[JsonValue] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        caps.append(TypeAdapter(dict[str, JsonValue]).validate_json(request.content)["max_tokens"])
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": contents[len(caps) - 1]}, "finish_reason": "stop"}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await OpenAICompatibleLLM(
+            "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
+        ).generate(LLMPurpose.READ, [], Result, max_output_tokens=100)
+    assert result.data.count == 2 and caps == [100, 400]

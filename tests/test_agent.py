@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import Mapping
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -10,6 +11,7 @@ from pydantic import JsonValue
 from fastbrowse import agent as agent_module
 from fastbrowse.agent import (
     Agent,
+    _answered,
     _follow_recovery,
     _history,
     _RunState,
@@ -20,8 +22,9 @@ from fastbrowse.agent import (
     _verified,
 )
 from fastbrowse.config import Config, ObservationLimits
+from fastbrowse.jev import Answer, Evaluation, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation
-from fastbrowse.memory import Fact, Notes
+from fastbrowse.memory import Fact, Notes, evidence_id
 from fastbrowse.models import (
     Authorization,
     BrowserEvent,
@@ -37,6 +40,7 @@ from fastbrowse.models import (
 from fastbrowse.page import ActResult, BlockKind, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.policy import HistoryEntry, decide
+from fastbrowse.safety import ScopedSecrets
 from fastbrowse.telemetry import Ledger
 from fastbrowse.verification import LLMVerdict
 from tests.test_memory import evidence
@@ -689,3 +693,83 @@ async def test_a_secret_the_step_itself_put_on_the_page_suppresses_its_frame() -
     await _click(agent, state, observation((save,)), "Save")
     assert [event.frame for event in events] == [None]
     page.screenshot.assert_not_awaited()
+
+
+def test_a_plan_is_answered_when_what_it_asks_to_find_is_evidenced_whatever_actions_it_lists() -> None:
+    plan = Plan(
+        requirements=(
+            Requirement(id="r1", text="Count the books on the first page", kind=RequirementKind.INFORMATION),
+            Requirement(id="r2", text="Open the next page", kind=RequirementKind.ACTION),
+            Requirement(id="r3", text="Count the books on the next page", kind=RequirementKind.INFORMATION),
+        ),
+        answer_expected=True,
+    )
+    notes = Notes()
+    assert not _answered(plan, notes)
+    notes.add(Fact(requirement_id="r1", text="20 books", evidence=evidence(start=0, end=4)))
+    assert not _answered(plan, notes)
+    notes.add(Fact(requirement_id="r3", text="20 books", evidence=evidence(start=10, end=14)))
+    assert _answered(plan, notes)
+
+
+def test_a_task_of_only_actions_is_never_answered() -> None:
+    plan = Plan(
+        requirements=(Requirement(id="r1", text="Open page 3 of the results", kind=RequirementKind.ACTION),),
+        answer_expected=False,
+    )
+    assert not _answered(plan, Notes())
+
+
+class DoubtingJev(ScriptedJev):
+    """Doubts any claim that mentions the whole list, and accepts a claim about one record."""
+
+    async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        answers: dict[str, Answer] = {
+            key: NoulAnswer(probability=0.9 if "WHOLE LIST" in question.instructions else 0.05)
+            for key, question in questions.items()
+            if isinstance(question, NoulQuestion)
+        }
+        return Evaluation(model="test", answers=answers, input_tokens=10, cost=FREE)
+
+
+async def test_a_composed_answer_that_fails_its_check_falls_back_to_the_readers_quoted_facts() -> None:
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="List the books", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    first, second = evidence(start=0, end=4), evidence(start=10, end=14)
+    state.notes.add(Fact(requirement_id="r1", text="Book A is listed", evidence=first))
+    state.notes.add(Fact(requirement_id="r1", text="Book B is listed", evidence=second))
+    whole: JsonValue = {"claims": [{"text": "WHOLE LIST: Book A and Book B", "evidence_ids": [evidence_id(first)]}]}
+    agent = Agent(Mock(spec=Page), DoubtingJev({}), ScriptedLLM([whole]))
+
+    answer, verified = await agent._answer(state, None)
+
+    assert verified
+    assert "WHOLE LIST" not in answer and "Book A is listed" in answer and "Book B is listed" in answer
+
+
+async def test_a_bot_check_stops_the_run_even_where_a_secret_is_held_for_the_site() -> None:
+    """A credential makes a sign-in wall work to do; no credential passes a CAPTCHA, so the check still runs."""
+    captcha = _at("https://shop.test/login", _button("Verify you are human"))
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=captcha)
+    page.artifacts = ()
+    jev = ScriptedJev({}, noul=0.9)
+    agent = Agent(
+        page,
+        jev,
+        ScriptedLLM([{"requirements": [], "answer_expected": False}]),
+        secrets=ScopedSecrets({"PASSWORD": "hunter2"}, "https://shop.test"),
+    )
+    agent._outwait = AsyncMock(return_value=False)
+
+    result = await agent.run("Sign in and open my orders", limits=Limits(max_steps=2))
+
+    assert result.status is Status.BLOCKED
+    assert result.error is not None and "bot check" in result.error
+    asked = jev.requests[0]
+    assert "bot_check" in asked
+    # The sign-in question is the one a held credential answers, so it is not asked.
+    assert "login_required" not in asked

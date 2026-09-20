@@ -163,6 +163,12 @@ def next_step(status: Status, *, allow_authorize: bool) -> str | None:
                 "The site needs a sign-in no configured secret covers. The server's operator can add one with "
                 "--secret or --bitwarden, or sign in once in the server's --profile."
             )
+        case Status.BLOCKED:
+            return (
+                "The site showed a bot check (a CAPTCHA) that did not clear. It is not a sign-in and no secret passes "
+                "it. Try a start URL past the check, or ask the user to run it headed and solve the check once in the "
+                "server's --profile."
+            )
         case Status.NEEDS_INPUT:
             return "A field needs a value the task did not give. Put the value in the task and call again."
         case Status.BUDGET_EXCEEDED:
@@ -246,7 +252,7 @@ def _description(config: ServerConfig) -> str:
         "value stops the run at needs_input rather than being made up. Pass `fields` to get typed data back "
         "as well as the answer.",
         "",
-        "Statuses: complete (every claim quoted from a page), unverified, needs_confirmation, needs_login, "
+        "Statuses: complete (every claim quoted from a page), unverified, needs_confirmation, needs_login, blocked, "
         "needs_input, stuck, budget_exceeded, observation_limit, error. A result other than complete carries "
         "next_step.",
     ]

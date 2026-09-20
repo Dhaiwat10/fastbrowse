@@ -4,6 +4,7 @@ The browser layer produces `Observation` (bounded, for Jev's action choice) and 
 and executes `Action`s. Nothing above this seam touches CDP.
 """
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
@@ -40,6 +41,35 @@ class Control(Frozen):
     """A field its form will not submit without: required and still empty, or marked invalid by the page."""
     next_page: bool | None = None
     """A link the page marks `rel="next"`: the next page of the list it belongs to."""
+
+
+_ARROWS = "›»→>"  # noqa: RUF001 - the chevrons pagers draw, not a typo for ">"
+_NEXT_PAGE = re.compile(
+    rf"(?:next(?: page)?|more results|older(?: posts)?)\s*[{_ARROWS}]*|[{_ARROWS}]{{1,2}}", re.IGNORECASE
+)
+
+
+def pages_forward(control: Control) -> bool:
+    """Whether a link is a pager's way to the next page of a list: marked `rel="next"`, or labelled like one.
+
+    "next", "Next" and an arrow, "Next page", a lone chevron. The page's own mark says so in any language and behind
+    an icon, so the label is only the fallback.
+    """
+    return bool(control.next_page) or _NEXT_PAGE.fullmatch(" ".join(control.label.split())) is not None
+
+
+def pager_link(control: Control) -> bool:
+    """Whether this control is one the loop could actually walk a list with: a link, to an address.
+
+    A carousel's arrow and a wizard's button read exactly like a pager, and a busy page draws many of them. Only a
+    link to somewhere else is ever followed, so anything else by that name earns no special treatment.
+    """
+    return (
+        control.role == "link"
+        and Operation.CLICK in control.operations
+        and bool(control.href)
+        and pages_forward(control)
+    )
 
 
 class Tab(Frozen):

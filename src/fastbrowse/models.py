@@ -22,6 +22,9 @@ class Status(StrEnum):
     """Stopped before an irreversible action the caller has not authorized, having committed nothing."""
     NEEDS_LOGIN = "needs_login"
     """Authentication is required and no authorized credential covers this origin."""
+    BLOCKED = "blocked"
+    """A bot check (a CAPTCHA, or a browser verification that never clears) stands in the way. Not a sign-in:
+    no credential passes it, and a person is needed only if they choose to solve it."""
     NEEDS_INPUT = "needs_input"
     """A field needs a value the caller did not supply and the LLM must not invent."""
     STUCK = "stuck"

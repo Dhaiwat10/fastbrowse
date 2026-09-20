@@ -750,14 +750,16 @@ async def test_a_winner_from_part_of_a_list_is_kept_but_does_not_answer() -> Non
     assert "This page has a next-page control." in llm.calls[0][1][-1].content
 
 
-async def test_the_choice_shortcut_is_told_the_list_continues() -> None:
+async def test_the_choice_shortcut_is_skipped_when_a_next_page_control_qualifies_the_read() -> None:
+    # The choice model picks quotes without weighing a caveat, and answered "the first book on the page the link
+    # opens" from the page the link was on. The reader follows the notice, so the notice goes to it alone.
     from tests.test_policy import ScriptedJev
 
     page = capture((BlockKind.PARAGRAPH, "Sharp Objects £47.82"))
     jev = ScriptedJev({"r1": "none"})
     requirement = Requirement(id="r1", text="The cheapest book", kind=RequirementKind.INFORMATION)
     llm = ScriptedLLM([{"claims": [], "answered": False, "continues": ["r1"]}])
-    await read(
+    outcome = await read(
         llm,
         page,
         "Cheapest?",
@@ -767,9 +769,9 @@ async def test_the_choice_shortcut_is_told_the_list_continues() -> None:
         requirements=[requirement],
         notice="This page has a next-page control ('next').",
     )
-    asked = jev.requests[0]["r1"]
-    assert isinstance(asked, ChoiceQuestion)
-    assert "next-page control" in asked.instructions
+    assert jev.requests == []
+    assert outcome.continues == ("r1",)
+    assert "next-page control" in llm.calls[0][1][-1].content
 
 
 async def test_a_later_chunk_saying_the_list_goes_on_reopens_an_earlier_chunks_claim() -> None:

@@ -90,6 +90,7 @@ def context(**changes: object) -> StepContext:
         notes="",
         history=(),
         check_login=False,
+        check_bot=False,
         has_attachments=False,
         secrets=(),
     )
@@ -156,3 +157,26 @@ async def test_duplicate_labels_reach_the_chooser_with_their_context() -> None:
 def test_a_field_the_form_will_not_submit_without_is_marked_for_jev() -> None:
     assert _element(button(1).model_copy(update={"blocking": True}))["blocking"] is True
     assert "blocking" not in _element(button(2))
+
+
+async def test_a_page_checked_for_a_wall_is_also_asked_whether_it_is_a_bot_check() -> None:
+    jev = ScriptedJev({}, noul=0.9)
+    decision = await decide(jev, observation((button(1),)), context(check_login=True, check_bot=True), Config())
+    assert {"login_required", "bot_check"} <= set(jev.requests[0])
+    assert decision.login_required == decision.bot_check == 0.9
+
+
+async def test_a_page_not_checked_for_a_wall_is_not_asked_about_bot_checks() -> None:
+    jev = ScriptedJev({})
+    decision = await decide(jev, observation((button(1),)), context(), Config())
+    assert "bot_check" not in jev.requests[0]
+    assert decision.bot_check is None
+
+
+async def test_a_bot_check_is_asked_on_its_own_where_a_credential_answers_the_sign_in_question() -> None:
+    # Held credentials make a sign-in wall a step to take rather than a stop; they pass no CAPTCHA.
+    jev = ScriptedJev({}, noul=0.9)
+    decision = await decide(jev, observation((button(1),)), context(check_bot=True), Config())
+    assert "login_required" not in jev.requests[0]
+    assert decision.login_required is None
+    assert decision.bot_check == 0.9

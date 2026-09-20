@@ -8,7 +8,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -40,7 +39,17 @@ from fastbrowse.models import (
     StepResult,
     UntilCheck,
 )
-from fastbrowse.page import Action, ActResult, BrowserError, Capture, Control, Observation, Page
+from fastbrowse.page import (
+    Action,
+    ActResult,
+    BrowserError,
+    Capture,
+    Control,
+    Observation,
+    Page,
+    pager_link,
+    pages_forward,
+)
 from fastbrowse.planner import Plan, RequirementKind, make_plan
 from fastbrowse.policy import Decision, HistoryEntry, ObservationTooLarge, Reduction, StepContext, decide
 from fastbrowse.retrieval import ComposedAnswer, compose, draft_answer, read
@@ -89,11 +98,6 @@ _LEAVING = frozenset({Operation.CLICK, Operation.ENTER, Operation.BACK})
 _IDLE_CHECKED = frozenset({Operation.CLICK, Operation.ENTER})
 """Operations not taken twice from a page state where they changed nothing. A hover can reveal content through CSS
 alone, which leaves the DOM as it was, so it is not judged by the DOM."""
-_ARROWS = "›»→>"  # noqa: RUF001 - the chevrons pagers draw, not a typo for ">"
-_NEXT_PAGE = re.compile(
-    rf"(?:next(?: page)?|more results|older(?: posts)?)\s*[{_ARROWS}]*|[{_ARROWS}]{{1,2}}", re.IGNORECASE
-)
-"""Labels of a control that opens the next page of a list: "next", "Next" and an arrow, "Next page", a lone chevron."""
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +202,8 @@ class _RunState:
     """The page state a next-page click left, so the page it opens is read without a decision."""
     pages: int = 0
     """Next pages opened by code this run."""
+    first_url: str | None = None
+    """The first page the run looked at, which is what a task's "this page" means once the run has moved on."""
     continuing: set[str] = field(default_factory=set[str])
     """Requirements the reader said range over a list that goes on past the page it read. A scalar choice cannot
     answer one of those, so it is not asked about them again on the next page."""
@@ -299,6 +305,7 @@ class Agent:
         while True:
             state.ledger.check()
             observation = await self._observe()
+            state.first_url = state.first_url or observation.url
             self._note_effect(state, observation)
             if (stalled := self._settle(state, observation)) is not None:
                 await self._recover(state, observation, stalled)
@@ -317,20 +324,41 @@ class Agent:
             if state.planning.done():
                 await state.await_plan()
             secrets = self._secret_names(origin)
-            context = self._context(state, secrets, check_login=page != state.last_page and not secrets)
+            # A held secret makes a sign-in wall work to do rather than a stop, but passes no CAPTCHA, so the
+            # bot check is asked on every page a secret covers too.
+            fresh = page != state.last_page
+            context = self._context(state, secrets, check_login=fresh and not secrets, check_bot=fresh)
             state.last_page = page
             decision = await decide(self._jev, observation, context, self._config, ledger=state.ledger)
-            if (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
+            bot_check = (decision.bot_check or 0.0) > self._config.thresholds.bot_check_above
+            if bot_check or (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
                 # A wall offering nothing to act on cannot be signed into. It is a bot check such as PyPI's
                 # "Client Challenge", which clears itself once its script runs, and stopping on it failed
                 # five runs in six of a task hosted agents finish by waiting.
-                if not raw.controls and await self._outwait(raw):
+                # A bot check that draws a CAPTCHA has controls, and may still clear itself before it does.
+                if (bot_check or not raw.controls) and await self._outwait(raw):
                     continue
+                if bot_check:
+                    raise _Stop(
+                        Status.BLOCKED, f"bot check at {origin}; it is not a sign-in and no credential passes it"
+                    )
                 raise _Stop(Status.NEEDS_LOGIN, f"sign-in required at {origin}")
             uncertain = decision.confidence < self._config.thresholds.recover_below
             decided_by = Decider.JEV
             if (directed := _follow_recovery(state, observation, decision, uncertain=uncertain)) is not None:
                 decision, uncertain, decided_by = directed, False, Decider.LLM
+            if decision.operation is Operation.CLICK and decision.target is not None and pages_forward(decision.target):
+                plan = await state.await_plan()
+                if _answered(plan, state.notes):
+                    # Everything asked to be found is evidenced, so another page is wandering: Jev, offered the pager,
+                    # kept turning pages through a whole catalogue after the two the task named had been read. DONE
+                    # is judged again by `_finish`, which carries on if it does not hold.
+                    decision, uncertain, decided_by = _code_decision(Operation.DONE, None), False, Decider.CODE
+                elif not state.read_here and _unread(plan, state.notes):
+                    # Turning the page of a list nobody has read loses that page: with the pager in view Jev opened
+                    # the next page from the first, and a task over "this page and the next" was answered from the
+                    # second and third. Read here first, which also tells code whether the list goes on.
+                    decision, uncertain, decided_by = _code_decision(Operation.READ, None), False, Decider.CODE
             if uncertain and not raw.controls and await self._outwait(raw):
                 # Nothing to act on and no idea what to do is a page still rendering: a script-built app settles
                 # before it draws, and recovery on it saw an empty login form and spent 5 to 13s saying so.
@@ -985,9 +1013,19 @@ class Agent:
         # Unresolved requirements may refer to an earlier one; keep the task's constraints in every read.
         question = state.task + "\n\nRequirements still to evidence:\n" + "\n".join(f"- {r.text}" for r in wanted)
         following = _next_page_control(observation) if observation is not None else None
+        if state.first_url is not None and (following is not None or state.pages):
+            # "This page and the next" was written on the page the run started on. Read from the second, it would
+            # otherwise mean the second and the third, or never say the list ends.
+            question += (
+                f'\n\nThe task\'s "this page" is {self._redactor.redact(state.first_url)}, where the run began, '
+                'and "the next page" is the one after it. A task that names how many pages it covers ends at the '
+                "last one it names."
+            )
         # The capture is text: a "Next" link reads the same as any other word unless the page's controls say so.
         notice = (
-            f"This page has a next-page control ({following.label!r}): a list on it may continue."
+            f"This page has a next-page control ({following.label!r}): a list on it may continue. A requirement "
+            "about the page that control opens is not answered by this page, whatever this page holds: leave it "
+            "unanswered until that page is read."
             if following is not None
             else ""
         )
@@ -1195,6 +1233,10 @@ class Agent:
             else compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
         )
         held = await self._holds(state, composed.data)
+        if held is None and (facts := draft_answer(state.plan, state.notes)) is not None:
+            # A list of forty records came back as one claim citing one quote, which no claim check should pass. The
+            # reader's own facts each carry the quote that shows them, so they are offered to the same check.
+            held = await self._holds(state, facts)
         return self._redactor.redact((held or composed.data).answer), held is not None
 
     async def _holds(self, state: _RunState, answer: ComposedAnswer) -> ComposedAnswer | None:
@@ -1253,7 +1295,9 @@ class Agent:
             cited.setdefault((item.url, item.quote), item)
         return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(cited.values()))
 
-    def _context(self, state: _RunState, secrets: tuple[str, ...], *, check_login: bool) -> StepContext:
+    def _context(
+        self, state: _RunState, secrets: tuple[str, ...], *, check_login: bool, check_bot: bool
+    ) -> StepContext:
         return StepContext(
             task=state.task,
             subgoal=state.hint,
@@ -1261,6 +1305,7 @@ class Agent:
             notes=state.notes.render(4000),
             history=_history(state.history, self._config.observation),
             check_login=check_login,
+            check_bot=check_bot,
             has_attachments=bool(state.attachments),
             secrets=secrets,
         )
@@ -1294,6 +1339,16 @@ def _unread(plan: Plan, notes: Notes) -> bool:
     # owes an answer with nothing read would hand the composer empty notes: one did, and ended complete on "".
     unresolved = any(r.kind is RequirementKind.INFORMATION for r in notes.unresolved(plan))
     return unresolved or (plan.answer_expected and not notes.facts)
+
+
+def _answered(plan: Plan, notes: Notes) -> bool:
+    """Whether the plan asks to find something and every such requirement is evidenced.
+
+    Not the same as nothing being left unresolved: a plan can file "open the next page" as an action, which no note
+    evidences, and a task whose whole point is to turn pages has nothing to find, so it is never answered.
+    """
+    asked = [r for r in plan.requirements if r.kind is RequirementKind.INFORMATION]
+    return bool(asked) and all(notes.evidenced(r.id) for r in asked)
 
 
 def _answers_input(state: _RunState, observation: Observation) -> bool:
@@ -1366,10 +1421,7 @@ def _next_page_control(observation: Observation) -> Control | None:
     here = urlsplit(observation.url)
     found: dict[str, Control] = {}
     for control in observation.controls:
-        if control.role != "link" or Operation.CLICK not in control.operations or not control.href:
-            continue
-        # The page's own rel="next" says so in any language and behind an icon; the label is the fallback.
-        if not control.next_page and not _NEXT_PAGE.fullmatch(" ".join(control.label.split())):
+        if not pager_link(control) or control.href is None:
             continue
         # The snapshot gives a same-site link as its path and query, and another site's as host and path.
         if control.href.startswith("/"):
