@@ -88,6 +88,9 @@ class ServerConfig:
 
     browser_api_key: str | None = None
     chrome: LocalChrome = field(default_factory=LocalChrome)
+    cloud_profile: str | None = None
+    """A profile on the operator's cloud account whose sign-ins every call runs with. A calling model
+    cannot choose it: which accounts the browser is signed into is the operator's decision, not the task's."""
     ceilings: Limits = field(default_factory=Limits)
     allow_authorize: bool = False
     secrets: tuple[DeclaredSecret, ...] = ()
@@ -361,6 +364,7 @@ def build_server(
                         start=start,
                         browser_api_key=config.browser_api_key,
                         chrome=config.chrome,
+                        cloud_profile=config.cloud_profile,
                         output_schema=schema,
                         limits=limits,
                         authorization=Authorization(irreversible_actions=authorize),
@@ -457,6 +461,9 @@ def parse(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--cloud", action="store_true", help="run on Browser Use Cloud browsers")
     parser.add_argument("--headed", action="store_true", help="show the local Chrome window")
     parser.add_argument("--profile", type=Path, default=None, help="Chrome profile directory kept between runs")
+    parser.add_argument(
+        "--cloud-profile", metavar="ID", default=None, help="a Browser Use Cloud profile to run signed in as"
+    )
     parser.add_argument("--allow-authorize", action="store_true", help="let a call pass authorize")
     parser.add_argument(
         "--secret", action="append", default=[], type=_secret, metavar="NAME=ENV_VAR@ORIGIN", help="repeatable"
@@ -501,6 +508,7 @@ async def configure(args: argparse.Namespace, settings: Settings, environ: Mappi
     return ServerConfig(
         browser_api_key=options.browser_key(settings, args.cloud),
         chrome=chrome,
+        cloud_profile=args.cloud_profile,
         ceilings=Limits(max_steps=args.max_steps, max_dollars=args.max_dollars, max_seconds=args.max_seconds),
         allow_authorize=args.allow_authorize,
         secrets=secrets,

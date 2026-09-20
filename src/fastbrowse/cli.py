@@ -4,7 +4,8 @@
     fastbrowse "Send the form" --start https://example.com/contact --authorize --cloud --json
 
 A local headless Chrome by default; `--headed` shows it, and `--profile DIR` keeps its profile so a site
-signed into there once stays signed in. `--cloud` runs on a Browser Use Cloud browser (BROWSER_USE_API_KEY)
+signed into there once stays signed in. `--cloud-profile ID` is the same idea on a cloud browser: the run
+starts with the cookies that profile holds. `--cloud` runs on a Browser Use Cloud browser (BROWSER_USE_API_KEY)
 and prints where to watch it live.
 Secrets come from `--secret NAME=ENV_VAR`, read from that variable, or `--bitwarden ITEM`, a vault login's
 `username` and `password`. Either is usable only on the start origin.
@@ -49,6 +50,9 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--cloud", action="store_true", help="use a Browser Use Cloud browser")
     parser.add_argument("--headed", action="store_true", help="show the local Chrome window")
     parser.add_argument("--profile", type=Path, default=None, help="Chrome profile directory kept between runs")
+    parser.add_argument(
+        "--cloud-profile", metavar="ID", default=None, help="a Browser Use Cloud profile to run signed in as"
+    )
     parser.add_argument("--authorize", action="store_true", help="allow submit/pay/delete/send without pausing")
     parser.add_argument("--secret", action="append", default=[], type=options.env_secret, metavar="NAME=ENV_VAR")
     parser.add_argument(
@@ -81,6 +85,7 @@ async def run(args: argparse.Namespace) -> int:
         start=args.start,
         browser_api_key=options.browser_key(load_settings(), args.cloud),
         chrome=options.chrome(load_settings(), args.headed, args.profile),
+        cloud_profile=args.cloud_profile,
         secrets=_secrets(args.secret, args.bitwarden, args.start),
         limits=Limits(max_steps=args.max_steps, max_dollars=args.max_dollars),
         authorization=Authorization(irreversible_actions=args.authorize),
