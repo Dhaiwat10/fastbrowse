@@ -32,6 +32,22 @@ types. Each of these came from wiring it into a product that already had one.
 - **`proxy_country` and `viewport`** reach a cloud browser the run starts, instead of being fixed at what
   the library guessed.
 
+Fixed in the same release, from tasks that failed in the field:
+
+- **A list longer than one page is answered from the whole of it.** A task over a paginated catalogue read the
+  first page, answered from it and called that done. The run now follows the pager until what was asked for is
+  evidenced or the page cap is reached, the reader is told when the page it is reading continues, and a claim
+  about a whole list is not accepted from one page of it.
+- **A bot check is reported as one.** `Status.BLOCKED` is new: a CAPTCHA is not a sign-in and no credential
+  passes it, so a run that meets one says so rather than ending as `stuck`. A challenge that clears itself once
+  its script runs is still waited out first, and the check is made whether or not a secret is held for the site.
+- **A reply cut short is asked for again.** A read whose answer hit the output limit was parsed as though it
+  were whole, so facts after the cut were lost without a word.
+- **`--json` keeps its contract on a bad limit.** `--max-steps 0` printed a traceback and nothing parseable; it
+  is now refused like any other bad flag, with the error on stdout as JSON.
+- **A limit reads as what it is** in the message that reports it: a dollar limit as money, a duration as a
+  duration.
+
 ## [0.3.4] - 2026-09-20
 
 - **A step frame can no longer carry a secret the step itself revealed.** `Config(step_frames=True)` checked
