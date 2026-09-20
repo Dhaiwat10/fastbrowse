@@ -14,7 +14,7 @@ import pytest
 from fastbrowse.browser.page import CdpPage
 from fastbrowse.browser.session import BrowserSession
 from fastbrowse.config import Config, ObservationLimits
-from fastbrowse.models import Attachment, Operation, StepOutcome
+from fastbrowse.models import Attachment, BrowserConnection, Operation, StepOutcome
 from fastbrowse.page import Action, BrowserError, Control, Observation
 from tests.browser.conftest import RecordingArtifactSink
 
@@ -496,3 +496,19 @@ async def test_a_fill_follows_focus_to_the_editor_its_click_opened(page: CdpPage
     assert result.outcome == StepOutcome.EXECUTED
     after = await page.observe()
     assert [c.label for c in after.controls if c.role == "option"] == ["London", "Londonderry"]
+
+
+async def test_a_browser_handed_over_by_cdp_url_drives_and_survives_the_run(
+    chrome_connection: BrowserConnection, artifact_sink: RecordingArtifactSink, main_site: str
+) -> None:
+    """The whole point of `cdp_url`: drive a browser someone else started, and leave it running."""
+    async with BrowserSession(
+        BrowserConnection(cdp_url=chrome_connection.cdp_url, live_url=None, remote=True), artifact_sink
+    ) as session:
+        page = CdpPage(session, Config())
+        await page.navigate(main_site)
+        observation = await page.observe()
+        assert observation.controls, "a browser reached over cdp_url must index like any other"
+    # The session closed its own tab; the browser it was handed is still answering.
+    async with BrowserSession(chrome_connection, artifact_sink) as after:
+        assert await CdpPage(after, Config()).observe() is not None

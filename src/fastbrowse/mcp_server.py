@@ -226,7 +226,16 @@ def _start_origin(start: str) -> str:
     return origin_of(start)
 
 
-async def _secrets(config: ServerConfig, origin: str, bitwarden: str | None) -> ScopedSecrets | None:
+async def _secrets(config: ServerConfig, origin: str | None, bitwarden: str | None) -> ScopedSecrets | None:
+    """The secrets this call may use, each scoped to the origin it was declared for.
+
+    With no start page there is no origin to scope against, so nothing is offered: a value declared for one
+    site must not be typed into whatever a run works its way to.
+    """
+    if origin is None:
+        if bitwarden is not None:
+            raise ToolError("bitwarden needs a start page: the vault item is matched against its origin")
+        return None
     values = {secret.name: secret.value for secret in config.secrets if secret.origin == origin}
     if bitwarden is not None:
         if bitwarden not in config.bitwarden:
@@ -316,7 +325,15 @@ def build_server(
         task: Annotated[
             str, Field(min_length=1, max_length=4000, description="What to do, with every value it needs.")
         ],
-        start: Annotated[str, Field(description="The http or https URL to open first.")],
+        start: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "The http or https URL to open first. Omit it and the first address is worked out from "
+                    "the task; a secret is then not offered, because there is no origin to scope it to."
+                )
+            ),
+        ] = None,
         fields: Annotated[
             dict[str, OutputField] | None,
             Field(description="Typed values to return in `data`, by name, each copied verbatim from a page."),
@@ -332,7 +349,7 @@ def build_server(
         max_seconds: Annotated[float | None, Field(gt=0, description="Stop past this wall time.")] = None,
         ctx: Context[Any, Any, Any] | None = None,
     ) -> BrowseResult:
-        origin = _start_origin(start)
+        origin = _start_origin(start) if start is not None else None
         if authorize and not config.allow_authorize:
             raise ToolError("authorize: this server was started without --allow-authorize")
         schema = output_model(fields)

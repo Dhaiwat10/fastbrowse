@@ -21,9 +21,10 @@ from pydantic import ValidationError
 
 from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser, BrowserUseCloudError
 from fastbrowse.adapters.local_chrome import async_local_chrome, find_chrome, local_chrome
+from fastbrowse.agent import Agent
 from fastbrowse.browser import BrowserSession, CdpPage
 from fastbrowse.config import Config
-from fastbrowse.models import BrowserConnection, CostLine, LocalChrome, Status
+from fastbrowse.models import BrowserConnection, CostBreakdown, CostLine, LocalChrome, RunResult, Status
 from fastbrowse.page import BrowserError
 from fastbrowse.run import _browser, run_task
 from tests.browser.conftest import RecordingArtifactSink
@@ -291,7 +292,7 @@ async def test_cloud_teardown_preserves_original_error_and_cost(stop_fails: bool
     original = RuntimeError("original")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         with pytest.raises(RuntimeError) as raised:
-            async with _browser("key", LocalChrome(), http, cost, None):
+            async with _browser("key", LocalChrome(), http, cost):
                 raise original
         assert raised.value is original
         assert cost[0].dollars == (0.25 if stop_fails else 0.50)
@@ -418,7 +419,7 @@ async def test_a_cloud_profile_starts_the_browser_signed_in_as_that_profile() ->
     cost: list[CostLine] = []
     async with (
         httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http,
-        _browser("key", LocalChrome(), http, cost, "profile-42") as connection,
+        _browser("key", LocalChrome(), http, cost, profile="profile-42") as connection,
     ):
         assert connection.remote
     assert bodies == [{"timeout": 15, "proxyCountryCode": "us", "profileId": "profile-42"}]
@@ -429,5 +430,68 @@ async def test_a_cloud_profile_without_a_cloud_browser_is_refused() -> None:
     cost: list[CostLine] = []
     async with httpx.AsyncClient() as http:
         with pytest.raises(BrowserError, match="needs a cloud browser"):
-            async with _browser(None, LocalChrome(), http, cost, "profile-42"):
+            async with _browser(None, LocalChrome(), http, cost, profile="profile-42"):
                 pass
+
+
+async def test_a_browser_handed_over_is_attached_to_and_left_running() -> None:
+    """A caller's browser outlives the run: nothing is started for it and nothing is stopped."""
+    calls: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        return httpx.Response(200, json={})
+
+    cost: list[CostLine] = []
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http,
+        _browser(None, LocalChrome(), http, cost, cdp_url="ws://given.test/devtools") as connection,
+    ):
+        assert connection.cdp_url == "ws://given.test/devtools"
+        assert connection.remote
+    assert calls == [], "attaching to a browser must not call the cloud API"
+    assert cost == []
+
+
+@pytest.mark.parametrize(
+    ("key", "profile", "message"),
+    [("key", None, "would start a second one"), (None, "profile-42", "not to one it is handed")],
+)
+async def test_a_browser_handed_over_refuses_what_belongs_to_one_we_start(
+    key: str | None, profile: str | None, message: str
+) -> None:
+    cost: list[CostLine] = []
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(BrowserError, match=message):
+            async with _browser(key, LocalChrome(), http, cost, profile=profile, cdp_url="ws://given.test/devtools"):
+                pass
+
+
+async def test_a_browser_handed_over_with_no_page_named_still_works_one_out_from_the_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run opens a tab of its own, so an attached browser is never already on the page the task wants."""
+    CdpTransport(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    async def capture(_self: Agent, task: str, **kwargs: Any) -> RunResult:
+        captured.update(kwargs)
+        return RunResult(
+            status=Status.COMPLETE,
+            answer=task,
+            data=None,
+            evidence=(),
+            steps=(),
+            cost=CostBreakdown(lines=()),
+            artifacts=(),
+        )
+
+    monkeypatch.setattr(Agent, "run", capture)
+    await run_task(
+        "What is the top story on Hacker News?",
+        cdp_url="ws://given.test/devtools",
+        jev=ScriptedJev({}),
+        llm=ScriptedLLM([]),
+    )
+    assert captured["start"] is None
+    assert captured["choose_start"], "with no page named the first address comes from the task"

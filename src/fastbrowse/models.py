@@ -197,6 +197,9 @@ class BrowserConnection(Frozen):
     cdp_url: str
     """Browser-level DevTools WebSocket URL (`ws://` or `wss://`)."""
     live_url: str | None = None
+    browser_id: str | None = None
+    """The cloud browser's id, when a cloud browser was started for this run. A caller that has to stop it
+    out of band (a user pressing cancel, a subscription ending) cannot do so without this."""
     remote: bool
     """True when the browser runs on another host: tabs must be foregrounded and files move as bytes."""
 
@@ -263,6 +266,9 @@ class BrowserEvent(Frozen):
     type: Literal["browser"] = "browser"
     live_url: str | None
     """Where a cloud browser can be watched live; None for local Chrome."""
+    browser_id: str | None = None
+    """The cloud browser's id, for a caller that may have to stop it out of band. None when the run did not
+    start a browser of its own (local Chrome, or one handed over through `cdp_url`)."""
 
 
 type EventHandler = Callable[[StepEvent | BrowserEvent], Awaitable[None]]

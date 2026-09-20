@@ -8,7 +8,8 @@ signed into there once stays signed in. `--cloud-profile ID` is the same idea on
 starts with the cookies that profile holds. `--cloud` runs on a Browser Use Cloud browser (BROWSER_USE_API_KEY)
 and prints where to watch it live.
 Secrets come from `--secret NAME=ENV_VAR`, read from that variable, or `--bitwarden ITEM`, a vault login's
-`username` and `password`. Either is usable only on the start origin.
+`username` and `password`. Either is usable only on the start origin, so both need `--start`: with no page
+named there is no origin to scope a secret to, and one is never offered to whatever the run happens to open.
 """
 
 import argparse
@@ -28,8 +29,16 @@ from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
 
 
-def _secrets(pairs: list[tuple[str, str]], bitwarden: str | None, start: str) -> ScopedSecrets | None:
-    """Values read now, so a missing one fails before a browser is opened."""
+def _secrets(pairs: list[tuple[str, str]], bitwarden: str | None, start: str | None) -> ScopedSecrets | None:
+    """Values read now, so a missing one fails before a browser is opened.
+
+    A secret is usable only on the start origin, so asking for one without `--start` is refused rather than
+    quietly dropped: a caller who named a credential means the run to use it.
+    """
+    if start is None:
+        if pairs or bitwarden is not None:
+            raise ConfigurationError("--secret and --bitwarden need --start: a secret is scoped to its origin")
+        return None
     if missing := options.unset_variables(pairs):
         raise ConfigurationError(f"--secret names unset variables: {', '.join(missing)}")
     values = {name: os.environ[variable] for name, variable in pairs}
@@ -48,7 +57,9 @@ def _secrets(pairs: list[tuple[str, str]], bitwarden: str | None, start: str) ->
 def _parse(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="fastbrowse", description="Run one browser task.")
     parser.add_argument("task")
-    parser.add_argument("--start", required=True, help="URL to open before the task starts")
+    parser.add_argument(
+        "--start", default=None, help="URL to open before the task starts; worked out from the task if omitted"
+    )
     parser.add_argument("--cloud", action="store_true", help="use a Browser Use Cloud browser")
     parser.add_argument("--headed", action="store_true", help="show the local Chrome window")
     parser.add_argument("--profile", type=Path, default=None, help="Chrome profile directory kept between runs")

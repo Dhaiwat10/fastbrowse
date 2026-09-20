@@ -13,6 +13,42 @@ Older entries are kept verbatim rather than rewritten as the product moves.
 
 Nothing yet.
 
+## [0.4.0] - 2026-09-20
+
+Everything an application needs to run fastbrowse as its browser engine rather than as a command someone
+types. Each of these came from wiring it into a product that already had one.
+
+- **Drive a browser you already have.** `cdp_url` attaches to any browser over the DevTools protocol,
+  wherever it runs: a container, a VM, a machine you own. The run opens one tab and closes that tab, so a
+  browser handed over is left exactly as it was found, and nothing is billed to a cloud account. This is the
+  option to reach for when the browser should live next to the user rather than in someone else's cloud.
+- **Start from the task alone.** `start` is optional now. A caller whose own interface takes a goal and no
+  URL had nowhere to get one; the first address is worked out from the task, as a person would. `--start`
+  is optional in the CLI and `start` is optional on the MCP server's `browse` tool, where `task` is now the
+  only thing a call must carry, and it holds for an attached browser too, which the run opens its own tab on.
+  A secret is only ever typed on the start origin, so asking for one without a start page is refused rather
+  than quietly dropped.
+- **Stop a cloud browser you did not start.** The browser event carries the cloud browser's id, so an
+  application that has to end a run out of band (a user pressing cancel, a subscription ending) can.
+- **`proxy_country` and `viewport`** reach a cloud browser the run starts, instead of being fixed at what
+  the library guessed.
+
+Fixed in the same release, from tasks that failed in the field:
+
+- **A list longer than one page is answered from the whole of it.** A task over a paginated catalogue read the
+  first page, answered from it and called that done. The run now follows the pager until what was asked for is
+  evidenced or the page cap is reached, the reader is told when the page it is reading continues, and a claim
+  about a whole list is not accepted from one page of it.
+- **A bot check is reported as one.** `Status.BLOCKED` is new: a CAPTCHA is not a sign-in and no credential
+  passes it, so a run that meets one says so rather than ending as `stuck`. A challenge that clears itself once
+  its script runs is still waited out first, and the check is made whether or not a secret is held for the site.
+- **A reply cut short is asked for again.** A read whose answer hit the output limit was parsed as though it
+  were whole, so facts after the cut were lost without a word.
+- **`--json` keeps its contract on a bad limit.** `--max-steps 0` printed a traceback and nothing parseable; it
+  is now refused like any other bad flag, with the error on stdout as JSON.
+- **A limit reads as what it is** in the message that reports it: a dollar limit as money, a duration as a
+  duration.
+
 ## [0.3.4] - 2026-09-20
 
 - **A step frame can no longer carry a secret the step itself revealed.** `Config(step_frames=True)` checked
@@ -74,7 +110,8 @@ Nothing yet.
 - First release: a browser agent that picks its next action from the controls the page actually has, with an
   LLM to plan and read, and code owning verification, safety and secrets.
 
-[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.3.4...HEAD
+[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.0
 [0.3.4]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.4
 [0.3.3]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.3
 [0.3.2]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.2

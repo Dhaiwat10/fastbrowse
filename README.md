@@ -31,25 +31,31 @@ something that was never on the page. Every claim in an answer cites a verbatim 
 
 ### Against Browser Use
 
-The same 14 answer tasks (lookups, sign-ins, checkout, Google Flights), three passes each, on the same
-cloud browser with the same limits (30 steps, $0.25, 300s):
+The same 14 answer tasks (lookups, sign-ins, checkout, Google Flights), three passes each, on the same kind
+of cloud browser. What a task costs is the difference that does not depend on how either arm was configured:
 
-| | passed | median time | cost per task |
-|:--|:--|:--|:--|
-| **fastbrowse** | **40/42** | **17.0s** | **$0.011** |
-| Browser Use (hosted) | 14/42 | 27.5s | $0.40 |
-| | **2.9× the passes** | **1.6× faster** | **35× cheaper** |
+| | cost per task | median time |
+|:--|:--|:--|
+| **fastbrowse** | **$0.011** | **17.0s** |
+| Browser Use (hosted), on the runs it completed | $0.63 | 103.5s |
 
-Every one of Browser Use's 28 failures ran past the $0.25 cap. In an earlier run with a $0.60 cap, it
-passed 6 of 8 such tasks at about 100s and $0.63 each. A later single pass of fastbrowse on current `main`
-passed all 21 tasks, answer tasks included (14/14, 21.5s median, $0.013).
+A lookup costs $0.004 to $0.007 here against $0.21 to $0.31 there, and on the simplest of them the two take
+about the same time (`hn-top` 12.1s against 12.0s). The time difference is a whole-suite figure, not a
+promise about any one task.
+
+**We are not claiming a reliability multiple.** Both arms were first given the same $0.25 cap, where
+Browser Use exceeded it on 28 of 42 runs, spending $0.37 to $0.92 before stopping. That is a budget ceiling
+we chose, not a capability ceiling: re-run at $0.60 it passed 6 of the 8 tasks it was given. Reporting that
+as "2.9x the passes" would have been us measuring our own cap. A run of fastbrowse on current `main` passed
+all 21 tasks, answer tasks included (14/14, 21.5s median, $0.013).
+
 [Tasks, method and per-category results](docs/evals.md#head-to-head).
 
 ### Why fastbrowse, against each kind of agent
 
 - **LLM agents that generate actions** (Browser Use and similar): Jev picks each action from the controls
-  that are on the page, so there is no invented selector to retry. A task costs a thirty-fifth as much,
-  and every claim in the answer cites a verbatim quote.
+  that are on the page, so there is no invented selector to retry. A task costs a fraction as much (a
+  lookup, $0.004 to $0.007 against $0.21 to $0.31), and every claim in the answer cites a verbatim quote.
 - **Choice-model navigators** ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast)): the same
   core technique, plus everything a real task needs. fastbrowse reads pages and returns cited answers,
   signs in without showing a model the password, and stops before anything irreversible. On the six
@@ -91,7 +97,7 @@ answer, and cost by component.
 
 | Flag | Effect |
 |:--|:--|
-| `--start URL` | required: the page to open first |
+| `--start URL` | the page to open first; worked out from the task when omitted |
 | `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`); far less likely to be bot-challenged. Prints a URL to watch it live |
 | `--headed` | show the local Chrome window |
 | `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in |
@@ -226,6 +232,10 @@ complete {'package': 'httpx', 'version': '0.28.1'} $0.0114
   "httpx 0.28.1" from https://pypi.org/project/httpx/
   "pip install httpx" from https://pypi.org/project/httpx/
 ```
+
+`run_task(cdp_url=...)` drives a browser that is already running, wherever it is, instead of starting one:
+the run opens a tab and closes that tab, and the browser is left as it was found. With neither that nor a
+cloud key, it runs local Chrome.
 
 To show a run as it happens, pass `on_event=`: a `BrowserEvent` arrives first with the live-view URL of a
 cloud browser, then a `StepEvent` per step. `Config(step_frames=True)` adds a PNG of the page each step acted

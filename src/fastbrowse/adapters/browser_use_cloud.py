@@ -42,6 +42,7 @@ class BrowserUseCloudBrowser:
         proxy_country: str | None = "us",
         timeout_minutes: int = 15,
         profile: str | None = None,
+        viewport: tuple[int, int] | None = None,
     ) -> None:
         self._http = http
         self._headers = {"X-Browser-Use-API-Key": api_key}
@@ -53,6 +54,10 @@ class BrowserUseCloudBrowser:
         # task never sees those cookies, which is the point of naming a profile rather than typing a secret.
         if profile is not None:
             self._body["profileId"] = profile
+        # Headless defaults are small enough that a responsive site collapses its header into a toggle and
+        # the control the run needs is not in the page at all, which is why local Chrome sets a size too.
+        if viewport is not None:
+            self._body["browserScreenWidth"], self._body["browserScreenHeight"] = viewport
         self._browser_id: str | None = None
         self._connection: BrowserConnection | None = None
         self.cost: tuple[CostLine, ...] = ()
@@ -73,7 +78,9 @@ class BrowserUseCloudBrowser:
             version = await self._http.get(f"{browser.cdp_url}/json/version")
             version.raise_for_status()
             ws_url = str(version.json()["webSocketDebuggerUrl"])
-            self._connection = BrowserConnection(cdp_url=ws_url, live_url=browser.live_url, remote=True)
+            self._connection = BrowserConnection(
+                cdp_url=ws_url, live_url=browser.live_url, browser_id=browser.id, remote=True
+            )
         except BaseException:
             await asyncio.gather(creation, return_exceptions=True)
             with suppress(BaseException):

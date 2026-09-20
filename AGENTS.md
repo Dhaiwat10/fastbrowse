@@ -65,9 +65,10 @@ exactly like regressions, so re-read a red run before believing it.
 
 The run loop is `src/fastbrowse/agent.py`, and everything else is a seam it calls.
 
-- **`run.py`** opens the browser (local Chrome, or a Browser Use Cloud browser when a key is given) and builds
-  the Jev and LLM clients from `Settings`, then hands control to the loop. This is the embedding API:
-  `run_task(...)`.
+- **`run.py`** opens the browser and builds the Jev and LLM clients from `Settings`, then hands control to
+  the loop. This is the embedding API: `run_task(...)`. The browser is one of three, in this order: one the
+  caller hands over (`cdp_url`, neither started nor stopped here), a Browser Use Cloud browser (a key), or
+  local Chrome. `start` is optional; without one the first address is proposed from the task.
 - **`page.py` / `browser/`** index the page. `browser/snapshot.js` runs in the page and returns the controls
   with what tells them apart (role, label, the card or row that disambiguates twins, whether a field blocks
   its form); `browser/capture.js` returns the text with stable spans so a quote can be located later.
@@ -125,9 +126,12 @@ Versions are patch-by-patch unless the maintainer says otherwise, and every one 
 2. `uv version <x.y.z>`, then open a `chore: <x.y.z>` PR. CI fails if the version has no entry.
 3. After it merges, `git tag v<x.y.z> && git push origin v<x.y.z>`.
 
-The tag builds, creates the GitHub release with **the changelog entry as its notes**, and publishes to PyPI by
-trusted publishing. `scripts/changelog.py` is what reads the entry, so the repository, the release and
-fastbrowse.ai never tell three stories about one version.
+The tag builds, creates the GitHub release with **the changelog entry as its notes**, publishes to PyPI by
+trusted publishing, and then asks fastbrowse.ai to rebuild, since its changelog page reads this file at build
+time. `scripts/changelog.py` is what reads the entry, so the repository, the release and the site never tell
+three stories about one version. The rebuild needs `SITE_DEPLOY_HOOK` (a Vercel deploy hook for
+`agent-labs-dev/fastbrowse-site`) in this repository's secrets; without it the release still succeeds and the
+site catches up on its own next deploy.
 
 PR titles are conventional commits (`feat:`, `fix:`, `perf:`, `docs:`, `build:`, `ci:`, `chore:`) and become
 the squash-merge subject. `main` requires the `check` status and resolved review threads.
