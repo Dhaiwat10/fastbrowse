@@ -109,6 +109,12 @@ Run on 2026-09-18. Every arm used a Browser Use Cloud browser and the same limit
 
 Each arm meets the others only on the tasks both can be graded on (see `arms` above), so there are two headline tables, not one. `wasted actions per run` counts escalations, actions that failed or changed nothing, and an action repeated on the same target from the same page, from each run's step log (the target alone for rows from before the step log, such as this run) (`scripts/h2h_report.py`); hosted Browser Use returns no trace to count.
 
+**On reading the pass rates below.** Both arms were given the same $0.25 cap, and every one of hosted
+Browser Use's 28 failures is that cap being reached ($0.37 to $0.92 spent), not a task it could not do. A
+pass rate measured against a cap one arm routinely exceeds says more about the cap than about the arm, so
+the comparison worth quoting is cost per task, and time on the tasks both completed. The $0.60 re-run below
+is the closest thing here to a fair reliability figure, and it is only 8 tasks.
+
 **Answer tasks** (lookups, sign-ins, checkout and Flights), fastbrowse against hosted Browser Use:
 
 | | passed | correct answer | median time | mean time | cost per task | wasted actions per run |
