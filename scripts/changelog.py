@@ -15,7 +15,9 @@ import sys
 from pathlib import Path
 
 CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
-_HEADING = re.compile(r"^## (?P<version>\d+\.\d+\.\d+) - (?P<date>\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
+# Keep a Changelog writes a version as a link reference (`## [0.3.3] - 2026-09-20`); the brackets are
+# optional here so an entry written either way is still found.
+_HEADING = re.compile(r"^## \[?(?P<version>\d+\.\d+\.\d+)\]? - (?P<date>\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
 
 
 class ChangelogError(RuntimeError):

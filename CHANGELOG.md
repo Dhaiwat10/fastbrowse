@@ -2,23 +2,31 @@
 
 What changed in each release, in the terms someone using fastbrowse would notice. Dates are UTC.
 
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). The entries are prose rather than bare
+Added/Fixed lists: what matters about a browser agent's release is why a behaviour changed.
+
 The version on PyPI is what these entries describe: `uvx fastbrowse@0.3.3` runs exactly the release below it.
 Older entries are kept verbatim rather than rewritten as the product moves.
 
-## 0.3.3 - 2026-09-20
+## [Unreleased]
+
+Nothing yet.
+
+## [0.3.3] - 2026-09-20
 
 - **Runs on Python 3.13.** The floor was 3.14, which an application pinned below that could not work around:
   `uv add fastbrowse` simply would not resolve. Nothing in the package needed 3.14. CI now runs the whole gate
   on 3.13 and 3.14, so the floor is exercised rather than claimed.
 
-## 0.3.2 - 2026-09-20
+## [0.3.2] - 2026-09-20
 
 - **A picture of each step, for an interface that shows a run as it happens.** `Config(step_frames=True)` puts
   a PNG of the page a step acted on onto every step event. It is off by default, because it costs a screenshot
   round trip per step. A step whose page is showing a resolved secret sends no frame: pixels cannot be masked
   the way text is.
 
-## 0.3.1 - 2026-09-20
+## [0.3.1] - 2026-09-20
 
 - **A cloud browser can run as a profile someone already signed in.** `--cloud-profile ID`,
   `run_task(cloud_profile=...)` and the MCP server's `--cloud-profile` start a Browser Use Cloud browser from
@@ -28,7 +36,7 @@ Older entries are kept verbatim rather than rewritten as the product moves.
 - **Install from PyPI.** The README opened with `git clone`, which was the only way to run fastbrowse before it
   was published and is now the contributor path. It opens with `uvx fastbrowse`.
 
-## 0.3.0 - 2026-09-20
+## [0.3.0] - 2026-09-20
 
 - **A list split across pages is read whole.** Counting or ranking over a paginated list had no path to the
   answer: a run either stopped at the step limit or finished early on page one. The reader can now say a list
@@ -46,13 +54,21 @@ Older entries are kept verbatim rather than rewritten as the product moves.
   rather than decided again, an empty page is drawn before it is read, a start page that never loads is tried
   again, and a finish stands when the verifier doubts only what the notes already cite.
 
-## 0.2.0 - 2026-09-18
+## [0.2.0] - 2026-09-18
 
 - **`--record FILE`** saves an MP4 of the tab, ending on the answer, its time and its cost.
 - **Sign in with a stored login the task never mentions.** `--secret NAME=ENV_VAR` and `--bitwarden ITEM` type a
   credential on the start origin without the value entering a model's context.
 
-## 0.1.0 - 2026-09-18
+## [0.1.0] - 2026-09-18
 
 - First release: a browser agent that picks its next action from the controls the page actually has, with an
   LLM to plan and read, and code owning verification, safety and secrets.
+
+[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.3
+[0.3.2]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.2
+[0.3.1]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.1
+[0.3.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.0
+[0.2.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.2.0
+[0.1.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.1.0
