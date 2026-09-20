@@ -387,7 +387,7 @@ class Agent:
         try:
             await self._page.navigate(start)
             proposal = await asyncio.wait_for(asyncio.shield(proposing), _SHORTCUT_GRACE_SECONDS)
-        except TimeoutError, LLMError:
+        except (TimeoutError, LLMError):
             return []
         finally:
             await _discard(proposing)

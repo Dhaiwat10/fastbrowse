@@ -18,11 +18,17 @@ jobs:
         run: gitleaks detect --source . --no-banner --redact
   check:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor and the latest. An embedder pinned to 3.13 (Nebula is) cannot install a package that
+        # only builds on 3.14, and a floor no job runs stops being true within a release.
+        python: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
-          python-version: "3.14"
+          python-version: "${{ matrix.python }}"
       # The hosted-arm eval imports browser_use_sdk and the MCP server imports mcp; without the extras, ty
       # sees a different tree than we do.
       - run: uv sync --locked --all-extras

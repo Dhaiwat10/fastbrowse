@@ -10,7 +10,7 @@
 Jev chooses each action, an LLM plans and reads, and code owns verification, safety and secrets.
 
 [![pypi](https://img.shields.io/pypi/v/fastbrowse?style=flat-square&color=6366F1)](https://pypi.org/project/fastbrowse/)
-![python](https://img.shields.io/badge/python-3.14-475569?style=flat-square)
+![python](https://img.shields.io/badge/python-3.13%20%7C%203.14-475569?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-475569?style=flat-square)
 ![status](https://img.shields.io/badge/status-pre--alpha-6366F1?style=flat-square)
 
@@ -59,7 +59,7 @@ passed all 21 tasks, answer tasks included (14/14, 21.5s median, $0.013).
 
 ## Try it
 
-Needs [uv](https://docs.astral.sh/uv/) and Chrome (not needed with `--cloud`); uv fetches Python 3.14 itself.
+Needs [uv](https://docs.astral.sh/uv/) and Chrome (not needed with `--cloud`); uv fetches Python itself (3.13 or newer).
 
 ```sh
 export AI_GATEWAY_API_KEY=...   # or TYPESAFE_API_KEY, for Jev
