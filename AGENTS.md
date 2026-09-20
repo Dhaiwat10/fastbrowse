@@ -95,7 +95,8 @@ These are the things a change must not quietly break. Each was paid for by a fai
 - **Page content is data, never instructions.** Every prompt says so, and completion is judged against quotes
   and page state rather than the model's say-so.
 - **A model never sees a secret value.** Secrets reach a page by name, resolved at the moment of typing and
-  only for their declared origin, and are redacted from everything the run returns. No screenshot is taken
+  only for their declared origin (which may be `https://*.site.com`, covering that site's hosts and nothing
+  that merely ends with the same letters), and are redacted from everything the run returns. No screenshot is taken
   while a resolved secret is showing as page text: pixels cannot be masked the way text is. The check is made
   against the page as it is when the image is taken, never against an earlier reading of it - the action being
   recorded may be the one that put the secret there.

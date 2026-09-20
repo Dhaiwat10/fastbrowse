@@ -60,3 +60,31 @@ def test_a_secret_declared_without_the_port_is_typed_on_the_url_that_carries_it(
     ref = SecretRef(name="password", origins=("https://shop.example.test",))
     assert secret_allowed(ref, origin_of("https://shop.example.test:443/login"))
     assert not secret_allowed(ref, origin_of("https://shop.example.test:8443/login"))
+
+
+@pytest.mark.parametrize(
+    ("origin", "allowed"),
+    [
+        ("https://www.example.test", True),
+        ("https://accounts.eu.example.test", True),
+        # One login across a site's hosts includes the bare domain: nobody writing the pattern means to exclude it.
+        ("https://example.test", True),
+        # The wildcard stands for whole labels, so a domain that merely ends with the same letters is another site.
+        ("https://example.test.evil.test", False),
+        ("https://notexample.test", False),
+        # Neither the scheme nor the port is ever wildcarded.
+        ("http://www.example.test", False),
+        ("https://www.example.test:8443", False),
+    ],
+)
+def test_a_secret_declared_for_a_site_covers_its_hosts_and_nothing_that_merely_looks_like_them(
+    origin: str, allowed: bool
+) -> None:
+    ref = SecretRef(name="password", origins=("https://*.example.test",))
+    assert secret_allowed(ref, origin_of(origin)) is allowed
+
+
+def test_a_wildcard_that_covers_nothing_is_not_a_wildcard_that_covers_everything() -> None:
+    # A pattern with no domain after it would otherwise match whatever the run opened.
+    for pattern in ("https://*.", "https://*"):
+        assert not secret_allowed(SecretRef(name="p", origins=(pattern,)), origin_of("https://evil.test"))

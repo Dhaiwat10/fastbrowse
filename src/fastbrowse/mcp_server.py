@@ -56,11 +56,12 @@ from fastbrowse.models import (
     Limits,
     LocalChrome,
     RunResult,
+    SecretRef,
     Status,
     StepEvent,
 )
 from fastbrowse.run import run_task
-from fastbrowse.safety import ScopedSecrets, origin_of
+from fastbrowse.safety import ScopedSecrets, origin_of, secret_allowed
 
 type Runner = Callable[..., Awaitable[RunResult]]
 """`run_task`'s shape; tests pass a fake so the tool can be driven without a browser or model keys."""
@@ -236,7 +237,11 @@ async def _secrets(config: ServerConfig, origin: str | None, bitwarden: str | No
         if bitwarden is not None:
             raise ToolError("bitwarden needs a start page: the vault item is matched against its origin")
         return None
-    values = {secret.name: secret.value for secret in config.secrets if secret.origin == origin}
+    values = {
+        secret.name: secret.value
+        for secret in config.secrets
+        if secret_allowed(SecretRef(name=secret.name, origins=(secret.origin,)), origin)
+    }
     if bitwarden is not None:
         if bitwarden not in config.bitwarden:
             allowed = ", ".join(config.bitwarden) or "none"

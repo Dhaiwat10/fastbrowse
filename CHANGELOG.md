@@ -13,6 +13,15 @@ Older entries are kept verbatim rather than rewritten as the product moves.
 
 Nothing yet.
 
+## [0.4.1] - 2026-09-20
+
+- **A secret can be declared for a site rather than for one of its hosts.** `https://*.example.com` covers
+  `www.example.com`, `accounts.example.com` and `example.com` itself, which is how a single sign-in usually
+  works: a login typed on the account host is the same login as the one the shop host asks for. The wildcard
+  stands for whole labels only, so it does not cover `example.com.evil.test`, and neither the scheme nor the
+  port is ever wildcarded. An exact origin behaves exactly as before. This reaches the MCP server too
+  (`--secret NAME=ENV_VAR@https://*.example.com`).
+
 ## [0.4.0] - 2026-09-20
 
 Everything an application needs to run fastbrowse as its browser engine rather than as a command someone
@@ -110,7 +119,8 @@ Fixed in the same release, from tasks that failed in the field:
 - First release: a browser agent that picks its next action from the controls the page actually has, with an
   LLM to plan and read, and code owning verification, safety and secrets.
 
-[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.4.0...HEAD
+[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.1
 [0.4.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.0
 [0.3.4]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.4
 [0.3.3]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.3

@@ -54,6 +54,8 @@ def irreversible_question(task: str, operation: Operation, control: Control) -> 
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+# A declared origin whose host starts with this covers that host and everything under it.
+_WILDCARD = "*."
 
 
 def origin_of(url: str) -> str:
@@ -78,7 +80,28 @@ def origin_of(url: str) -> str:
 
 
 def secret_allowed(ref: SecretRef, origin: str) -> bool:
-    return origin.lower() in {o.lower().rstrip("/") for o in ref.origins}
+    """Whether this secret may be typed on `origin`.
+
+    A declared origin is an exact one, or one whose host starts with `*.`, for a login that is the same login
+    across a site's hosts: `https://*.example.com` covers `www.example.com`, `accounts.example.com` and
+    `example.com` itself. The scheme and port must still match, and the wildcard only ever stands for whole
+    labels, so it does not cover `example.com.evil.test`, which merely ends with the same letters.
+    """
+    here = urlsplit(origin_of(origin))
+    host = here.hostname or ""
+    for declared in ref.origins:
+        pattern = urlsplit(origin_of(declared.rstrip("/")))
+        # The scheme and port are never wildcarded: a secret for https is not for http, whatever the host.
+        if (pattern.scheme, pattern.port) != (here.scheme, here.port):
+            continue
+        covered = pattern.hostname or ""
+        if covered == host:
+            return True
+        if not covered.startswith(_WILDCARD) or not (suffix := covered[len(_WILDCARD) :]):
+            continue
+        if host == suffix or host.endswith(f".{suffix}"):
+            return True
+    return False
 
 
 async def resolve_secret(resolver: SecretResolver, name: str, origin: str) -> str | None:
@@ -90,7 +113,11 @@ async def resolve_secret(resolver: SecretResolver, name: str, origin: str) -> st
 
 
 class ScopedSecrets:
-    """Secret values held in this process, each usable only on one origin: the `SecretResolver` for a run."""
+    """Secret values held in this process, each usable only on one origin: the `SecretResolver` for a run.
+
+    The origin may be a `*.` pattern, and the same rule decides here as everywhere: a resolver that answered
+    on a wider origin than it declared would put the gate in two places with two answers.
+    """
 
     def __init__(self, values: Mapping[str, str], origin: str) -> None:
         self._values = dict(values)
@@ -100,7 +127,9 @@ class ScopedSecrets:
         return tuple(SecretRef(name=name, origins=(self._origin,)) for name in self._values)
 
     async def resolve(self, name: str, origin: str) -> str | None:
-        return self._values.get(name) if origin == self._origin else None
+        if name not in self._values or not secret_allowed(SecretRef(name=name, origins=(self._origin,)), origin):
+            return None
+        return self._values[name]
 
 
 class Redactor:
