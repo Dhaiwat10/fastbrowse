@@ -126,9 +126,12 @@ Versions are patch-by-patch unless the maintainer says otherwise, and every one 
 2. `uv version <x.y.z>`, then open a `chore: <x.y.z>` PR. CI fails if the version has no entry.
 3. After it merges, `git tag v<x.y.z> && git push origin v<x.y.z>`.
 
-The tag builds, creates the GitHub release with **the changelog entry as its notes**, and publishes to PyPI by
-trusted publishing. `scripts/changelog.py` is what reads the entry, so the repository, the release and
-fastbrowse.ai never tell three stories about one version.
+The tag builds, creates the GitHub release with **the changelog entry as its notes**, publishes to PyPI by
+trusted publishing, and then asks fastbrowse.ai to rebuild, since its changelog page reads this file at build
+time. `scripts/changelog.py` is what reads the entry, so the repository, the release and the site never tell
+three stories about one version. The rebuild needs `SITE_DEPLOY_HOOK` (a Vercel deploy hook for
+`agent-labs-dev/fastbrowse-site`) in this repository's secrets; without it the release still succeeds and the
+site catches up on its own next deploy.
 
 PR titles are conventional commits (`feat:`, `fix:`, `perf:`, `docs:`, `build:`, `ci:`, `chore:`) and become
 the squash-merge subject. `main` requires the `check` status and resolved review threads.
