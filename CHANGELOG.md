@@ -13,6 +13,15 @@ Older entries are kept verbatim rather than rewritten as the product moves.
 
 Nothing yet.
 
+## [0.3.4] - 2026-09-20
+
+- **A step frame can no longer carry a secret the step itself revealed.** `Config(step_frames=True)` checked
+  whether a resolved secret was on screen using the reading of the page the step was decided from, which is
+  the page *before* the action ran. A fill that a page mirrors into ordinary text put the secret on the page
+  after that check, so the frame sent to the caller could contain it as pixels. The check now reads the page
+  as it is when the image is taken. Affects 0.3.2 and 0.3.3 with step frames enabled; no other surface sent
+  an image.
+
 ## [0.3.3] - 2026-09-20
 
 - **Runs on Python 3.13.** The floor was 3.14, which an application pinned below that could not work around:
@@ -65,7 +74,8 @@ Nothing yet.
 - First release: a browser agent that picks its next action from the controls the page actually has, with an
   LLM to plan and read, and code owning verification, safety and secrets.
 
-[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.3.3...HEAD
+[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.4
 [0.3.3]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.3
 [0.3.2]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.2
 [0.3.1]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.3.1

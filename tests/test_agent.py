@@ -647,12 +647,8 @@ def test_a_pager_the_page_marks_rel_next_is_followed_whatever_its_label() -> Non
     assert found is not None and found.id == "n"
 
 
-@pytest.mark.parametrize(
-    ("frames", "secret_on_screen", "sent"), [(True, False, b"png"), (True, True, None), (False, False, None)]
-)
-async def test_a_step_carries_the_page_it_acted_on_when_frames_are_asked_for(
-    frames: bool, secret_on_screen: bool, sent: bytes | None
-) -> None:
+@pytest.mark.parametrize(("frames", "sent"), [(True, b"png"), (False, None)])
+async def test_a_step_carries_the_page_it_acted_on_when_frames_are_asked_for(frames: bool, sent: bytes | None) -> None:
     events: list[StepEvent] = []
 
     async def collect(event: StepEvent | BrowserEvent) -> None:
@@ -660,12 +656,36 @@ async def test_a_step_carries_the_page_it_acted_on_when_frames_are_asked_for(
             events.append(event)
 
     page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=observation((_button("Done"),)))
     page.screenshot = AsyncMock(return_value=b"png")
     page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
     agent = Agent(page, ScriptedJev({}), ScriptedLLM([]), config=Config(step_frames=frames), on_event=collect)
-    # A secret showing as page text cannot be masked in pixels, so no frame is sent at all.
-    agent._secret_on_screen = secret_on_screen
     state = await run_state()
     state.authorization = Authorization(irreversible_actions=True)
     await _click(agent, state, observation((_button("Done"),)), "Done")
     assert [event.frame for event in events] == [sent]
+
+
+async def test_a_secret_the_step_itself_put_on_the_page_suppresses_its_frame() -> None:
+    """The page before the action is not evidence about the page after it: the fill may be what revealed it."""
+    events: list[StepEvent] = []
+
+    async def collect(event: StepEvent | BrowserEvent) -> None:
+        if isinstance(event, StepEvent):
+            events.append(event)
+
+    save = _button("Save")
+    # The page mirrors what was typed into ordinary text, which only the observation AFTER the step shows.
+    mirrored = observation((save,)).model_copy(update={"viewport_text": "signed in as hunter2"})
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=mirrored)
+    page.screenshot = AsyncMock(return_value=b"png")
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]), config=Config(step_frames=True), on_event=collect)
+    agent._redactor.register("password", "hunter2")
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+
+    await _click(agent, state, observation((save,)), "Save")
+    assert [event.frame for event in events] == [None]
+    page.screenshot.assert_not_awaited()

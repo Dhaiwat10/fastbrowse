@@ -661,8 +661,19 @@ class Agent:
         if self._on_event is None:
             return
         # Taken from the page the step acted on, before the next observation moves it on.
-        frames = await self._screenshots() if self._config.step_frames else ()
-        await self._on_event(StepEvent(step=step, frame=frames[0] if frames else None))
+        await self._on_event(StepEvent(step=step, frame=await self._frame() if self._config.step_frames else None))
+
+    async def _frame(self) -> bytes | None:
+        """A PNG of the page as it is now, or None while a resolved secret is showing on it.
+
+        The check is made against a fresh reading of the page rather than `_secret_on_screen`, which was
+        computed by the observation this step was decided from: that is the page BEFORE the action ran, and the
+        action may be the one that put the secret there. A field a page mirrors into ordinary text would
+        otherwise reach the caller as pixels, which is the one thing a frame must never carry.
+        """
+        if self._redactor.reveals((await self._page.observe()).model_dump_json()):
+            return None
+        return await self._page.screenshot()
 
     async def _action(self, state: _RunState, observation: Observation, decision: Decision) -> Action:
         target = decision.target

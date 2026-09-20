@@ -28,7 +28,7 @@ uv run ruff check . && uv run ruff format --check .
 uv run ty check                                     # ty, not pyright
 uv run python scripts/changelog.py --check "$(uv version --short)"
 uv run python scripts/no_slop.py
-uv run vale sync && uv run vale README.md CHANGELOG.md docs src scripts tests
+uv run vale sync && uv run vale README.md CHANGELOG.md AGENTS.md docs src scripts tests
 uv run pytest -q
 ```
 
@@ -95,7 +95,9 @@ These are the things a change must not quietly break. Each was paid for by a fai
   and page state rather than the model's say-so.
 - **A model never sees a secret value.** Secrets reach a page by name, resolved at the moment of typing and
   only for their declared origin, and are redacted from everything the run returns. No screenshot is taken
-  while a resolved secret is showing as page text: pixels cannot be masked the way text is.
+  while a resolved secret is showing as page text: pixels cannot be masked the way text is. The check is made
+  against the page as it is when the image is taken, never against an earlier reading of it - the action being
+  recorded may be the one that put the secret there.
 - **Code owns the gates.** An irreversible action stops the run without authorization; a model cannot grant
   itself that.
 - **An action that changed nothing is not progress**, and is not taken again from the same page state.
