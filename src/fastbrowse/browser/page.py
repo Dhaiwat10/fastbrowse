@@ -36,6 +36,7 @@ from fastbrowse.page import (
     Dialog,
     Observation,
     Page,
+    pages_forward,
 )
 
 _PAGE_JS = (Path(__file__).with_name("snapshot.js")).read_text(encoding="utf-8")
@@ -162,6 +163,21 @@ class _ObservedState:
         self.controls = controls
 
 
+def _capped(controls: list[Control], limit: int) -> list[Control]:
+    """The first `limit` controls, and past that every pager link too.
+
+    A listing's pager sits at the foot, after everything the cap keeps: a catalogue of twenty books a page ran
+    past the off-screen limit, so its "next" link was never offered and a task over two pages never left the first.
+    """
+    if len(controls) <= limit:
+        return controls
+    pagers = [c for c in controls if pages_forward(c)]
+    keep = {c.id for c in pagers}
+    room = max(0, limit - len(keep))
+    keep.update(c.id for c in [c for c in controls if c.id not in keep][:room])
+    return [c for c in controls if c.id in keep]
+
+
 class CdpPage(Page):
     def __init__(self, session: BrowserSession, config: Config) -> None:
         self._session = session
@@ -195,10 +211,10 @@ class CdpPage(Page):
 
         limits = self._config.observation
         onscreen = [c for c in controls if not c.offscreen]
-        offscreen = [c for c in controls if c.offscreen][: limits.max_offscreen_controls]
+        offscreen = _capped([c for c in controls if c.offscreen], limits.max_offscreen_controls)
         omitted = len(controls) - len(onscreen) - len(offscreen)
-        kept = (onscreen + offscreen)[: limits.max_controls]
-        omitted += max(0, len(onscreen) + len(offscreen) - limits.max_controls)
+        kept = _capped(onscreen + offscreen, limits.max_controls)
+        omitted += len(onscreen) + len(offscreen) - len(kept)
         control_state = {c.id: control_state[c.id] for c in kept}
 
         page_key = _combine_page_keys([f.raw["page_key"] for f in frames.values()])

@@ -1,0 +1,62 @@
+"""What the agent calls a wall it cannot pass, and the pager a long listing must still offer, through real Chrome."""
+
+from collections.abc import Mapping
+
+import pytest
+from pydantic import JsonValue
+
+from fastbrowse import agent as agent_module
+from fastbrowse.agent import Agent
+from fastbrowse.browser import CdpPage
+from fastbrowse.jev import Answer, Evaluation, NoulAnswer, NoulQuestion, Question
+from fastbrowse.models import Status
+from tests.browser.test_browser import observe_until
+from tests.test_policy import FREE, ScriptedJev
+from tests.test_retrieval import ScriptedLLM
+
+PLAN: JsonValue = {"requirements": [], "answer_expected": False}
+
+
+class WallJev(ScriptedJev):
+    """Judges every page a wall, and says whether the wall is a bot check."""
+
+    def __init__(self, *, bot_check: float) -> None:
+        super().__init__({}, noul=0.95)
+        self.bot_check = bot_check
+
+    async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        evaluation = await super().evaluate(state, questions)
+        answers: dict[str, Answer] = dict(evaluation.answers)
+        if isinstance(questions.get("bot_check"), NoulQuestion):
+            answers["bot_check"] = NoulAnswer(probability=self.bot_check)
+        return Evaluation(model="test", answers=answers, input_tokens=10, cost=FREE)
+
+
+@pytest.fixture(autouse=True)
+def _short_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_module, "_INTERSTITIAL_SECONDS", 0.6)
+
+
+async def test_a_captcha_that_never_clears_is_blocked_not_a_sign_in(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/challenge.html")
+    result = await Agent(page, WallJev(bot_check=0.9), ScriptedLLM([PLAN])).run("Find the release date")
+    assert result.status is Status.BLOCKED
+    assert result.error is not None and "bot check" in result.error and "sign-in required" not in result.error
+
+
+async def test_a_sign_in_form_is_still_a_sign_in(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/signin.html")
+    result = await Agent(page, WallJev(bot_check=0.05), ScriptedLLM([PLAN])).run("Find the release date")
+    assert result.status is Status.NEEDS_LOGIN
+    assert result.error is not None and "sign-in required" in result.error
+
+
+async def test_the_pager_at_the_foot_of_a_long_listing_is_still_offered(page: CdpPage, main_site: str) -> None:
+    await page.navigate(f"{main_site}/long-list.html")
+    observation = await observe_until(page, "Book 1")
+    labels = [control.label for control in observation.controls]
+    assert observation.omitted_controls > 0, "the page must be long enough to hit the cap"
+    assert "next" in labels
+    assert len(labels) <= page._config.observation.max_offscreen_controls + len(
+        [c for c in observation.controls if not c.offscreen]
+    )

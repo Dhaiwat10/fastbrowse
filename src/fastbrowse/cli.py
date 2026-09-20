@@ -21,7 +21,7 @@ from pathlib import Path
 from fastbrowse import options
 from fastbrowse.adapters.bitwarden import BitwardenError, bitwarden_login
 from fastbrowse.clients.environment import ConfigurationError, load_settings
-from fastbrowse.models import Authorization, BrowserEvent, Limits, StepEvent
+from fastbrowse.models import Authorization, BrowserEvent, CostBreakdown, Limits, RunResult, Status, StepEvent
 from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
 
@@ -103,9 +103,25 @@ async def run(args: argparse.Namespace) -> int:
     return 0 if result.succeeded else 1
 
 
+def _refused(error: str) -> RunResult:
+    """A run that never started, in the shape of one that did, so a caller parsing `--json` can branch on `status`."""
+    return RunResult(
+        status=Status.ERROR,
+        answer=None,
+        data=None,
+        evidence=(),
+        steps=(),
+        cost=CostBreakdown(lines=()),
+        artifacts=(),
+        error=error,
+    )
+
+
 def main() -> None:
     args = _parse(sys.argv[1:])
     try:
         sys.exit(asyncio.run(run(args)))
     except ConfigurationError as exc:
+        if args.json:
+            print(_refused(str(exc)).model_dump_json(indent=2))
         sys.exit(f"fastbrowse: {exc}")

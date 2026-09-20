@@ -120,6 +120,7 @@ class Decision(Frozen):
     reduction: Reduction
     cost: tuple[CostLine, ...]
     input_tokens: int
+    bot_check: float | None = None
 
     @property
     def confidence(self) -> float:
@@ -237,6 +238,12 @@ def build_request(
             "A sign-in, verification or access wall blocks the task and the task gives no way through it.",
             "The task can progress without signing in, or the task supplies the credentials to sign in.",
         )
+        questions["bot_check"] = _noul(
+            "Is this page a CAPTCHA or an automated-traffic check that asks to prove the visitor is human or to "
+            "verify the browser, rather than a sign-in form?",
+            "The page is a CAPTCHA, a browser verification or a similar bot check.",
+            "The page is a sign-in form or an ordinary page.",
+        )
     return _Request(_state(observation, controls, context), questions, targets, groups)
 
 
@@ -302,6 +309,7 @@ async def _evaluate(
         operation_confidence=operation_answer.confidence,
         target_confidence=target_confidence,
         login_required=_noul_probability(evaluation, "login_required"),
+        bot_check=_noul_probability(evaluation, "bot_check"),
         offered_controls=len(controls),
         reduction=reduction,
         cost=tuple(cost),

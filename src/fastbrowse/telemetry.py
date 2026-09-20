@@ -2,9 +2,15 @@
 
 import logging
 from dataclasses import dataclass, field
+from decimal import Decimal
 from time import monotonic
 
 from fastbrowse.models import CostBreakdown, CostComponent, CostLine, Limits, Status
+
+
+def _dollars(amount: float) -> str:
+    """A limit as someone typed it: fixed-point, where `str` would print 1e-05 for a small one."""
+    return format(Decimal(repr(amount)), "f")
 
 
 class BudgetExceeded(RuntimeError):
@@ -35,7 +41,7 @@ class Ledger:
                 pass
         self.check(estimate_dollars)
         if self.limits.max_dollars is not None and self.breakdown().known_dollars >= self.limits.max_dollars:
-            raise BudgetExceeded(f"spend limit ${self.limits.max_dollars} reached")
+            raise BudgetExceeded(f"spend limit ${_dollars(self.limits.max_dollars)} reached")
         # Failed requests still consume a call, including retries after an input-size rejection.
         if component is CostComponent.JEV:
             self.jev_calls += 1
@@ -50,9 +56,11 @@ class Ledger:
             spent = self.breakdown()
             # An unpriced call could have spent anything, so a dollar cap cannot be enforced past it.
             if spent.has_unknown:
-                raise BudgetExceeded(f"spend limit ${limits.max_dollars} cannot be enforced: a call reported no cost")
+                raise BudgetExceeded(
+                    f"spend limit ${_dollars(limits.max_dollars)} cannot be enforced: a call reported no cost"
+                )
             if spent.known_dollars + extra_dollars > limits.max_dollars:
-                raise BudgetExceeded(f"spend limit ${limits.max_dollars} reached")
+                raise BudgetExceeded(f"spend limit ${_dollars(limits.max_dollars)} reached")
         if self.steps >= limits.max_steps:
             raise BudgetExceeded(f"step limit {limits.max_steps} reached")
 

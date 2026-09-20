@@ -24,6 +24,9 @@ from fastbrowse.llm import Generation, LLMError, Message
 from fastbrowse.models import CostBasis, CostComponent, CostLine, LLMPurpose
 from fastbrowse.telemetry import BudgetExceeded, Ledger
 
+_TRUNCATION_RETRY_FACTOR = 4
+"""How much larger the output cap is on the one retry after a response ran into it."""
+
 
 def _image_url(content: bytes) -> str:
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -52,6 +55,33 @@ def _content(payload: dict[str, JsonValue]) -> str:
     if not isinstance(content, str):
         raise ValueError("missing completion text (possibly a refusal)")
     return content
+
+
+def _truncated(payload: dict[str, JsonValue]) -> bool:
+    """The model ran out of output tokens: what it wrote is cut off mid-value and says nothing of its schema."""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    return object_value(choices[0]).get("finish_reason") == "length"
+
+
+def _cut_off(error: ValidationError) -> bool:
+    """A parse that ran out of input: some providers report a response that hit the cap as an ordinary stop."""
+    return any(
+        detail["type"] == "json_invalid" and str(detail.get("ctx", {}).get("error", "")).startswith("EOF")
+        for detail in error.errors(include_url=False)
+    )
+
+
+def _grow_cap(body: dict[str, JsonValue], attempt: int, cap: int) -> None:
+    """Make room for a response that ran into the output cap, or report it as truncated when it did so again.
+
+    Repairing the JSON would send the same prompt under the same cap and be cut off again, so the one retry is
+    spent on more room instead, and a second truncation is reported as what it is.
+    """
+    if attempt == 1:
+        raise LLMError(f"LLM response truncated at the {body['max_tokens']} token output cap")
+    body["max_tokens"] = cap * _TRUNCATION_RETRY_FACTOR
 
 
 def _cost(payload: dict[str, JsonValue], purpose: LLMPurpose) -> CostLine:
@@ -176,6 +206,9 @@ class OpenAICompatibleLLM:
                 # carried the same prompt, so it is charged as the answer was; charging it as unknown instead
                 # made every run with one slow call stop at its dollar cap.
                 costs.append(with_discarded(_cost(payload, purpose), usage))
+                if _truncated(payload):
+                    _grow_cap(body, attempt, max_output_tokens)
+                    continue
                 try:
                     content = _content(payload)
                 except (ValueError, TypeError, OverflowError) as error:
@@ -188,6 +221,9 @@ class OpenAICompatibleLLM:
                 except ValidationError as error:
                     # Avoid echoing rejected values: validation paths and reasons are enough to repair the schema.
                     detail = error.json(include_input=False, include_url=False)
+                    if _cut_off(error):
+                        _grow_cap(body, attempt, max_output_tokens)
+                        continue
                     if attempt == 1:
                         raise LLMError(f"LLM schema validation failed after one retry: {detail[:1000]}") from None
                     wire_messages.extend(

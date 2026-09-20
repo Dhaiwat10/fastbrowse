@@ -156,6 +156,7 @@ The exit code is 0 only for `complete`.
 | `unverified` | it believes it finished but could not back every claim |
 | `needs_confirmation` | stopped before an irreversible action; re-run with `--authorize` |
 | `needs_login` | a sign-in wall that no `--secret` covers |
+| `blocked` | a bot check (a CAPTCHA) that did not clear; not a sign-in, so no secret passes it |
 | `needs_input` | a field needs a value you did not give, which is never invented |
 | `stuck` | recovery ran out without reaching a page state the run had not seen |
 | `budget_exceeded` | a step, call, time or dollar limit was reached |

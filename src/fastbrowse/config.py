@@ -11,6 +11,8 @@ class Thresholds(Frozen):
     sensitive_act_from: float = 0.90
     """Minimum confidence for an action code has classified as irreversible (authorization also required)."""
     login_required_above: float = 0.70
+    bot_check_above: float = 0.70
+    """Jev's agreement, on a page it also judged a wall, that the wall is a bot check and not a sign-in."""
     irreversible_above: float = 0.50
     done_accept_from: float = 0.85
     done_confirmed_from: float = 0.50
