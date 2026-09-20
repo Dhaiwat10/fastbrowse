@@ -16,7 +16,7 @@ jobs:
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: Scan for secrets
         run: gitleaks detect --source . --no-banner --redact
-  check:
+  gate:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -40,3 +40,12 @@ jobs:
       - run: uv run vale sync
       - run: uv run vale README.md docs src scripts tests
       - run: uv run pytest -q
+
+  # `check` is the required status check, so its name must not move when the matrix gains a version.
+  # It passes only when every leg of the matrix did.
+  check:
+    runs-on: ubuntu-latest
+    needs: [gate]
+    if: always()
+    steps:
+      - run: test "${{ needs.gate.result }}" = "success"
