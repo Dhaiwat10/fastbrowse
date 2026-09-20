@@ -29,3 +29,19 @@ def test_a_preflight_error_without_json_writes_nothing_to_stdout(
     with pytest.raises(SystemExit):
         cli.main()
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "named"), [("--max-steps", "0", "--max-steps"), ("--max-dollars", "-1", "--max-dollars")]
+)
+def test_a_limit_argparse_accepts_but_the_run_cannot_use_is_refused_as_a_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], flag: str, value: str, named: str
+) -> None:
+    # `argparse` types these but does not bound them, and the model that does raises a validation error, which
+    # would have reached the terminal as a traceback with nothing on stdout for a caller parsing `--json`.
+    monkeypatch.setattr("sys.argv", ["fastbrowse", "t", "--start", "https://example.com", "--json", flag, value])
+    with pytest.raises(SystemExit) as exit_:
+        cli.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "error" and result["steps"] == []
+    assert named in result["error"] and named in str(exit_.value.code)

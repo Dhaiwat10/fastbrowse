@@ -18,6 +18,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from fastbrowse import options
 from fastbrowse.adapters.bitwarden import BitwardenError, bitwarden_login
 from fastbrowse.clients.environment import ConfigurationError, load_settings
@@ -77,9 +79,23 @@ async def _print_step(event: StepEvent | BrowserEvent) -> None:
     print(f"  {step.index:>2} {options.step_label(step)} -> {step.outcome.value}", file=sys.stderr)
 
 
+def _limits(args: argparse.Namespace) -> Limits:
+    """The run's limits, with a rejected one refused the way every other bad flag is.
+
+    `argparse` accepts `--max-steps 0`, and the model that rejects it raises a validation error rather than a
+    configuration one, which would have escaped as a traceback and left `--json` with nothing on stdout.
+    """
+    try:
+        return Limits(max_steps=args.max_steps, max_dollars=args.max_dollars)
+    except ValidationError as exc:
+        bad = ", ".join(f"--{str(error['loc'][0]).replace('_', '-')}" for error in exc.errors() if error["loc"])
+        raise ConfigurationError(f"{bad or 'a limit'} must be greater than zero") from None
+
+
 async def run(args: argparse.Namespace) -> int:
     if args.record is not None and shutil.which("ffmpeg") is None:
         raise ConfigurationError("--record needs ffmpeg on PATH")
+    limits = _limits(args)
     result = await run_task(
         args.task,
         start=args.start,
@@ -87,7 +103,7 @@ async def run(args: argparse.Namespace) -> int:
         chrome=options.chrome(load_settings(), args.headed, args.profile),
         cloud_profile=args.cloud_profile,
         secrets=_secrets(args.secret, args.bitwarden, args.start),
-        limits=Limits(max_steps=args.max_steps, max_dollars=args.max_dollars),
+        limits=limits,
         authorization=Authorization(irreversible_actions=args.authorize),
         downloads=args.downloads,
         on_event=_print_step,

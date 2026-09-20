@@ -104,6 +104,9 @@ class StepContext(Frozen):
     notes: str
     history: tuple[HistoryEntry, ...]
     check_login: bool
+    check_bot: bool
+    """Asked apart from `check_login`: credentials mean a sign-in wall is work to do, but nothing a caller can
+    supply passes a CAPTCHA, so a page is worth checking for one whether or not a secret is held for it."""
     has_attachments: bool
     secrets: tuple[str, ...]
     """Names of stored secrets the current origin may receive; a fill can type one without Jev seeing it."""
@@ -238,6 +241,7 @@ def build_request(
             "A sign-in, verification or access wall blocks the task and the task gives no way through it.",
             "The task can progress without signing in, or the task supplies the credentials to sign in.",
         )
+    if context.check_bot:
         questions["bot_check"] = _noul(
             "Is this page a CAPTCHA or an automated-traffic check that asks to prove the visitor is human or to "
             "verify the browser, rather than a sign-in form?",

@@ -39,7 +39,17 @@ from fastbrowse.models import (
     StepResult,
     UntilCheck,
 )
-from fastbrowse.page import Action, ActResult, BrowserError, Capture, Control, Observation, Page, pages_forward
+from fastbrowse.page import (
+    Action,
+    ActResult,
+    BrowserError,
+    Capture,
+    Control,
+    Observation,
+    Page,
+    pager_link,
+    pages_forward,
+)
 from fastbrowse.planner import Plan, RequirementKind, make_plan
 from fastbrowse.policy import Decision, HistoryEntry, ObservationTooLarge, Reduction, StepContext, decide
 from fastbrowse.retrieval import ComposedAnswer, compose, draft_answer, read
@@ -314,14 +324,17 @@ class Agent:
             if state.planning.done():
                 await state.await_plan()
             secrets = self._secret_names(origin)
-            context = self._context(state, secrets, check_login=page != state.last_page and not secrets)
+            # A held secret makes a sign-in wall work to do rather than a stop, but passes no CAPTCHA, so the
+            # bot check is asked on every page a secret covers too.
+            fresh = page != state.last_page
+            context = self._context(state, secrets, check_login=fresh and not secrets, check_bot=fresh)
             state.last_page = page
             decision = await decide(self._jev, observation, context, self._config, ledger=state.ledger)
-            if (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
+            bot_check = (decision.bot_check or 0.0) > self._config.thresholds.bot_check_above
+            if bot_check or (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
                 # A wall offering nothing to act on cannot be signed into. It is a bot check such as PyPI's
                 # "Client Challenge", which clears itself once its script runs, and stopping on it failed
                 # five runs in six of a task hosted agents finish by waiting.
-                bot_check = (decision.bot_check or 0.0) > self._config.thresholds.bot_check_above
                 # A bot check that draws a CAPTCHA has controls, and may still clear itself before it does.
                 if (bot_check or not raw.controls) and await self._outwait(raw):
                     continue
@@ -1282,7 +1295,9 @@ class Agent:
             cited.setdefault((item.url, item.quote), item)
         return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(cited.values()))
 
-    def _context(self, state: _RunState, secrets: tuple[str, ...], *, check_login: bool) -> StepContext:
+    def _context(
+        self, state: _RunState, secrets: tuple[str, ...], *, check_login: bool, check_bot: bool
+    ) -> StepContext:
         return StepContext(
             task=state.task,
             subgoal=state.hint,
@@ -1290,6 +1305,7 @@ class Agent:
             notes=state.notes.render(4000),
             history=_history(state.history, self._config.observation),
             check_login=check_login,
+            check_bot=check_bot,
             has_attachments=bool(state.attachments),
             secrets=secrets,
         )
@@ -1405,9 +1421,7 @@ def _next_page_control(observation: Observation) -> Control | None:
     here = urlsplit(observation.url)
     found: dict[str, Control] = {}
     for control in observation.controls:
-        if control.role != "link" or Operation.CLICK not in control.operations or not control.href:
-            continue
-        if not pages_forward(control):
+        if not pager_link(control) or control.href is None:
             continue
         # The snapshot gives a same-site link as its path and query, and another site's as host and path.
         if control.href.startswith("/"):

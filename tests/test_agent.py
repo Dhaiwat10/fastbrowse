@@ -40,6 +40,7 @@ from fastbrowse.models import (
 from fastbrowse.page import ActResult, BlockKind, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.policy import HistoryEntry, decide
+from fastbrowse.safety import ScopedSecrets
 from fastbrowse.telemetry import Ledger
 from fastbrowse.verification import LLMVerdict
 from tests.test_memory import evidence
@@ -747,3 +748,28 @@ async def test_a_composed_answer_that_fails_its_check_falls_back_to_the_readers_
 
     assert verified
     assert "WHOLE LIST" not in answer and "Book A is listed" in answer and "Book B is listed" in answer
+
+
+async def test_a_bot_check_stops_the_run_even_where_a_secret_is_held_for_the_site() -> None:
+    """A credential makes a sign-in wall work to do; no credential passes a CAPTCHA, so the check still runs."""
+    captcha = _at("https://shop.test/login", _button("Verify you are human"))
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=captcha)
+    page.artifacts = ()
+    jev = ScriptedJev({}, noul=0.9)
+    agent = Agent(
+        page,
+        jev,
+        ScriptedLLM([{"requirements": [], "answer_expected": False}]),
+        secrets=ScopedSecrets({"PASSWORD": "hunter2"}, "https://shop.test"),
+    )
+    agent._outwait = AsyncMock(return_value=False)
+
+    result = await agent.run("Sign in and open my orders", limits=Limits(max_steps=2))
+
+    assert result.status is Status.BLOCKED
+    assert result.error is not None and "bot check" in result.error
+    asked = jev.requests[0]
+    assert "bot_check" in asked
+    # The sign-in question is the one a held credential answers, so it is not asked.
+    assert "login_required" not in asked

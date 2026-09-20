@@ -58,6 +58,20 @@ def pages_forward(control: Control) -> bool:
     return bool(control.next_page) or _NEXT_PAGE.fullmatch(" ".join(control.label.split())) is not None
 
 
+def pager_link(control: Control) -> bool:
+    """Whether this control is one the loop could actually walk a list with: a link, to an address.
+
+    A carousel's arrow and a wizard's button read exactly like a pager, and a busy page draws many of them. Only a
+    link to somewhere else is ever followed, so anything else by that name earns no special treatment.
+    """
+    return (
+        control.role == "link"
+        and Operation.CLICK in control.operations
+        and bool(control.href)
+        and pages_forward(control)
+    )
+
+
 class Tab(Frozen):
     id: str
     url: str

@@ -36,7 +36,7 @@ from fastbrowse.page import (
     Dialog,
     Observation,
     Page,
-    pages_forward,
+    pager_link,
 )
 
 _PAGE_JS = (Path(__file__).with_name("snapshot.js")).read_text(encoding="utf-8")
@@ -164,14 +164,16 @@ class _ObservedState:
 
 
 def _capped(controls: list[Control], limit: int) -> list[Control]:
-    """The first `limit` controls, and past that every pager link too.
+    """The first `limit` controls, and past that the pager links too.
 
     A listing's pager sits at the foot, after everything the cap keeps: a catalogue of twenty books a page ran
     past the off-screen limit, so its "next" link was never offered and a task over two pages never left the first.
+    The exemption stays inside the cap: a page drawing more pager links than the cap allows would otherwise return
+    more controls than were asked for.
     """
     if len(controls) <= limit:
         return controls
-    pagers = [c for c in controls if pages_forward(c)]
+    pagers = [c for c in controls if pager_link(c)][:limit]
     keep = {c.id for c in pagers}
     room = max(0, limit - len(keep))
     keep.update(c.id for c in [c for c in controls if c.id not in keep][:room])

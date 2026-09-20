@@ -13,7 +13,9 @@ from tests.test_policy import ScriptedJev
 from tests.test_retrieval import ScriptedLLM
 
 PLAN: JsonValue = {"requirements": [], "answer_expected": False}
-CONFIG = Config(thresholds=Thresholds(login_required_above=1))
+# The scripted Jev agrees with every yes/no question, so both wall questions are put out of reach: these
+# fixture pages are neither a sign-in nor a bot check, and `tests/browser/test_walls.py` covers those.
+CONFIG = Config(thresholds=Thresholds(login_required_above=1, bot_check_above=1))
 
 
 class Secrets:
