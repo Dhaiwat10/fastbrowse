@@ -211,6 +211,15 @@ class _ReadClaim(Frozen):
     requirement_id: str | None = None
 
 
+def _offered(capture: Capture, part: Chunk) -> list[Block]:
+    """The blocks the reader is shown for this chunk, in page order: the only ones a cite may name."""
+    return [
+        block
+        for block in capture.blocks
+        if block.source_id in part.block_ids and block.start < part.end and block.end > part.start
+    ]
+
+
 def _cited(capture: Capture, part: Chunk, cite: _Cite) -> Evidence | None:
     """The text a run of blocks showed the reader, when both ends were offered in this chunk, in order, in one frame.
 
@@ -218,11 +227,7 @@ def _cited(capture: Capture, part: Chunk, cite: _Cite) -> Evidence | None:
     reads it, and a table's escaped pipe, a record split over two quotes or a placeholder for a count followed.
     A run is given by its ends because a model listing a run's blocks wrote only its first and last.
     """
-    offered = [
-        block
-        for block in capture.blocks
-        if block.source_id in part.block_ids and block.start < part.end and block.end > part.start
-    ]
+    offered = _offered(capture, part)
     positions = {block.source_id: index for index, block in enumerate(offered)}
     if cite.first not in positions or cite.last not in positions or positions[cite.first] > positions[cite.last]:
         return None
@@ -297,11 +302,7 @@ def _read_message(
     requirement_ids: Sequence[str],
     evidence: str = "",
 ) -> Message:
-    offered = [
-        block
-        for block in capture.blocks
-        if block.source_id in part.block_ids and block.start < part.end and block.end > part.start
-    ]
+    offered = _offered(capture, part)
     # A table cut mid-rows is shown under its header, which lies before the chunk, so its columns keep their names.
     sources = "\n".join(
         f"[{block.source_id}] "

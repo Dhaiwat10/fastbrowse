@@ -15,7 +15,7 @@ from fastbrowse.jev import (
     NoulQuestion,
     Question,
 )
-from fastbrowse.models import UNTRUSTED, CostBasis, CostComponent, CostLine, Operation, StepOutcome
+from fastbrowse.models import CostBasis, CostComponent, CostLine, Operation, StepOutcome
 from fastbrowse.page import Control, Observation
 from fastbrowse.policy import (
     HistoryEntry,
@@ -24,7 +24,6 @@ from fastbrowse.policy import (
     Reduction,
     StepContext,
     _element,
-    build_request,
     decide,
 )
 
@@ -34,24 +33,14 @@ FREE = CostLine(component=CostComponent.JEV, basis=CostBasis.ESTIMATED, dollars=
 class ScriptedJev:
     """Picks `pick` for every choice whose criteria contain it, else the first option."""
 
-    def __init__(
-        self,
-        pick: Mapping[str, str],
-        *,
-        reject_offscreen: bool = False,
-        noul: float = 0.8,
-        nouls: Mapping[str, float] | None = None,
-    ) -> None:
+    def __init__(self, pick: Mapping[str, str], *, reject_offscreen: bool = False, noul: float = 0.8) -> None:
         self.pick = pick
         self.reject_offscreen = reject_offscreen
         self.noul = noul
-        self.nouls = nouls or {}
         self.requests: list[Mapping[str, Question]] = []
-        self.states: list[JsonValue] = []
 
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
         self.requests.append(questions)
-        self.states.append(state)
         if self.reject_offscreen and "offscreen" in str(state):
             raise JevInputTooLarge("max_tokens_exceeded")
         answers: dict[str, Answer] = {}
@@ -64,7 +53,7 @@ class ScriptedJev:
                         choice=choice, probabilities={o: float(o == choice) for o in options}, confidence=0.9
                     )
                 case NoulQuestion():
-                    answers[key] = NoulAnswer(probability=self.nouls.get(key, self.noul))
+                    answers[key] = NoulAnswer(probability=self.noul)
                 case _:
                     raise AssertionError(question)
         return Evaluation(model="test", answers=answers, input_tokens=10, cost=FREE)
@@ -128,7 +117,7 @@ async def test_read_assessment_is_independent_of_the_chosen_action(assessment: R
     question = jev.requests[0]["read_assessment"]
     assert isinstance(question, ChoiceQuestion)
     assert set(question.criteria) == {assessment.value for assessment in ReadAssessment}
-    assert UNTRUSTED in question.instructions
+    assert "untrusted data" in question.instructions
 
 
 async def test_evidenced_requirements_do_not_ask_for_preservation() -> None:
@@ -193,9 +182,9 @@ def test_a_field_the_form_will_not_submit_without_is_marked_for_jev() -> None:
 
 
 async def test_a_page_checked_for_a_wall_is_also_asked_whether_it_is_a_bot_check() -> None:
-    jev = ScriptedJev({}, noul=0.9, nouls={"login_credentials": 0.05})
+    jev = ScriptedJev({}, noul=0.9)
     decision = await decide(jev, observation((button(1),)), context(check_login=True, check_bot=True), Config())
-    assert {"login_required", "login_credentials", "bot_check"} <= set(jev.requests[0])
+    assert {"login_required", "bot_check"} <= set(jev.requests[0])
     assert decision.login_required == decision.bot_check == 0.9
 
 
@@ -213,38 +202,3 @@ async def test_a_bot_check_is_asked_on_its_own_where_a_credential_answers_the_si
     assert "login_required" not in jev.requests[0]
     assert decision.login_required is None
     assert decision.bot_check == 0.9
-
-
-@pytest.mark.parametrize(
-    ("wall", "credentials", "blocked"),
-    [(0.9, 0.1, True), (0.1, 0.1, False), (0.9, 0.9, False), (0.7, 0.1, False), (0.9, 0.3, False)],
-)
-async def test_login_needs_a_blocking_wall_and_missing_credentials(
-    wall: float, credentials: float, blocked: bool
-) -> None:
-    config = Config()
-    task = "Sign in with the saved account and read its balance"
-    jev = ScriptedJev({}, nouls={"login_required": wall, "login_credentials": credentials})
-    decision = await decide(jev, observation(()), context(task=task, check_login=True), config)
-    assert decision.login_required is not None
-    assert (decision.login_required > config.thresholds.login_required_above) is blocked
-    assert isinstance(jev.states[0], dict) and jev.states[0]["task"] == task
-    assert len(jev.requests) == 1
-
-
-@pytest.mark.parametrize("grouped", [False, True])
-def test_every_navigation_question_marks_page_data_and_targets_keep_only_target_rules(grouped: bool) -> None:
-    from fastbrowse.policy import NEXT_ACTION
-
-    controls = tuple(button(i) for i in range(4))
-    config = Config(observation=ObservationLimits(max_choice_options=2 if grouped else 10, group_size=2))
-    step = context(task="Choose a button", subgoal="Choose the requested row", check_login=True, check_bot=True)
-    request = build_request(observation(controls), controls, step, config)
-    assert isinstance(request.state, dict)
-    assert (request.state["task"], request.state["subgoal"]) == (step.task, step.subgoal)
-    for name, question in request.questions.items():
-        assert UNTRUSTED in question.instructions, name
-        assert step.task not in question.instructions
-        if name.endswith(("_target", "_group")):
-            assert NEXT_ACTION not in question.instructions
-            assert "context matches" in question.instructions

@@ -137,24 +137,22 @@ async def check_done(
     unmet = sorted(unevidenced)
     for requirement in plan.requirements:
         if requirement.kind is RequirementKind.ACTION:
-            questions[f"satisfied_{requirement.id}"] = NoulQuestion(
-                instructions=(
-                    f"{UNTRUSTED}\nDoes the page visibly confirm this requirement is satisfied?\n\n{requirement.text}"
-                ),
-                true="The page visibly confirms the requirement is satisfied.",
-                false="The page does not visibly confirm the requirement is satisfied.",
+            questions[f"unmet_{requirement.id}"] = NoulQuestion(
+                instructions=f"{UNTRUSTED}\nIs this requirement not visibly satisfied?\n\n{requirement.text}",
+                true="It is not satisfied, or there is no visible confirmation.",
+                false="The page visibly confirms it is satisfied.",
             )
     if draft is not None:
         # Asked here rather than on its own because this call is already being paid for: judging the
         # draft costs one more answer in a request the run makes anyway, where a composer costs seconds.
-        questions[_DRAFT_READY] = NoulQuestion(
+        questions["draft_needs_writing"] = NoulQuestion(
             instructions=(
-                f"{UNTRUSTED}\nDoes the draft in state answer the task as written? It does when it covers every "
-                "part asked for, with any requested comparison, count or calculation done, without repeating "
-                "or contradicting itself or adding facts the task did not ask for."
+                f"{UNTRUSTED}\nDoes the draft in state need rewriting before it answers the task? It does if it "
+                "misses part of what was asked, repeats or contradicts itself, includes facts the task did not ask "
+                "for, or leaves a comparison, count or calculation undone."
             ),
-            true="Yes, the draft answers the task as written.",
-            false="No, the draft needs rewriting before it answers the task.",
+            true="Yes, it needs rewriting before it answers the task.",
+            false="No, it answers the task as written.",
         )
     context: dict[str, JsonValue] = {"task": task}
     if draft is not None:
@@ -166,19 +164,15 @@ async def check_done(
         questions,
     )
     for requirement in plan.requirements:
-        answer = evaluation.answers.get(f"satisfied_{requirement.id}")
-        if isinstance(answer, NoulAnswer) and 1 - answer.probability > thresholds.claim_problem_above:
+        if _probability(evaluation.answers, f"unmet_{requirement.id}") > thresholds.claim_problem_above:
             unmet.append(requirement.id)
     complete = _probability(evaluation.answers, "complete")
     # Every action requirement confirmed one by one is stronger evidence than the strict holistic question alone,
     # which asks about the whole task at once and doubts a right page as often as it confirms it.
     # An answer Jev did not give confirms nothing, and a task with nothing to do keeps the verifier.
-    confirmations = [
-        evaluation.answers.get(f"satisfied_{r.id}") for r in plan.requirements if r.kind is RequirementKind.ACTION
-    ]
-    confirmed = bool(confirmations) and all(
-        isinstance(answer, NoulAnswer) and 1 - answer.probability < thresholds.requirement_confirmed_below
-        for answer in confirmations
+    doubts = [evaluation.answers.get(f"unmet_{r.id}") for r in plan.requirements if r.kind is RequirementKind.ACTION]
+    confirmed = bool(doubts) and all(
+        isinstance(doubt, NoulAnswer) and doubt.probability < thresholds.requirement_confirmed_below for doubt in doubts
     )
     # Jev reliably confirms a visible result but is too strict to reject one on its own, so apart from
     # information nobody has read, doubt goes to the verifier rather than straight back to work.
@@ -190,9 +184,9 @@ async def check_done(
         verdict = DoneVerdict.ACCEPT
     else:
         verdict = DoneVerdict.VERIFY
-    # An answer Jev did not give is not a yes: only a present, confident "answers the task" skips the composer.
-    answer = evaluation.answers.get(_DRAFT_READY)
-    ready = isinstance(answer, NoulAnswer) and 1 - answer.probability < thresholds.rewrite_from
+    # An answer Jev did not give is not a yes: only a present, confident "no rewrite needed" skips the composer.
+    doubt = evaluation.answers.get("draft_needs_writing")
+    ready = isinstance(doubt, NoulAnswer) and doubt.probability < thresholds.rewrite_from
     return DoneCheck(
         verdict=verdict,
         complete=complete,
@@ -200,9 +194,6 @@ async def check_done(
         answer=draft if ready else None,
         cost=evaluation.cost,
     )
-
-
-_DRAFT_READY = "draft_ready"
 
 
 async def llm_verify(

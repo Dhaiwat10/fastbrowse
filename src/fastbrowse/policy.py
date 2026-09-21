@@ -274,14 +274,10 @@ def build_request(
         )
     if context.check_login:
         questions["login_required"] = _noul(
-            "Does a sign-in or verification wall block progress on the task in state?",
-            "A sign-in, verification or access wall blocks the task.",
-            "The task can progress without passing an access wall.",
-        )
-        questions["login_credentials"] = _noul(
-            "Does the task in state supply credentials to pass the page's access wall?",
-            "The task supplies credentials that allow the agent to pass the wall.",
-            "The task supplies no credentials that pass the wall.",
+            "Does a sign-in or verification wall block the task in state, with no credentials given in the task to "
+            "pass it?",
+            "A sign-in, verification or access wall blocks the task and the task gives no way through it.",
+            "The task can progress without signing in, or the task supplies the credentials to sign in.",
         )
     if context.check_bot:
         questions["bot_check"] = _noul(
@@ -346,16 +342,13 @@ async def _evaluate(
         target_answer = _choice(evaluation, "switch_tab_target")
         tab_id = target_answer.choice
         target_confidence = target_answer.confidence
-    wall = _noul_probability(evaluation, "login_required")
-    credentials = _noul_probability(evaluation, "login_credentials")
-    # A wall is a stop only when both its presence and the lack of credentials clear the same threshold.
     return Decision(
         operation=operation,
         target=target,
         tab_id=tab_id,
         operation_confidence=operation_answer.confidence,
         target_confidence=target_confidence,
-        login_required=min(wall, 1 - credentials) if wall is not None and credentials is not None else None,
+        login_required=_noul_probability(evaluation, "login_required"),
         bot_check=_noul_probability(evaluation, "bot_check"),
         read_assessment=(
             ReadAssessment(_choice(evaluation, "read_assessment").choice)
