@@ -91,12 +91,17 @@ def page_state(
         try:
             state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
         except NotesTooLarge:
-            stateful = [c for c in observation.controls if (c.value, c.checked, c.selected) != (None, None, None)]
+            stateful = _stateful(observation.controls)
             state["controls"] = _controls(stateful)
             state["controls_omitted"] = len(observation.controls) - len(stateful)
             state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
         page["text"] = cut_text(observation.viewport_text, room(), json_encoded=True)
     return state
+
+
+def _stateful(controls: Iterable[Control]) -> list[Control]:
+    """The controls holding a value, a check or a selection: the state page text does not show."""
+    return [c for c in controls if (c.value, c.checked, c.selected) != (None, None, None)]
 
 
 def _controls(controls: Iterable[Control]) -> list[JsonValue]:
@@ -234,7 +239,7 @@ async def llm_verify(
     )
     # A filter's checked state is absent from page text, and a screenshot shows it only when it is in view: a flights
     # search the verifier passed had matching rows and no nonstop filter applied.
-    stateful = [c for c in observation.controls if (c.value, c.checked, c.selected) != (None, None, None)]
+    stateful = _stateful(observation.controls)
     instruction = (
         "\n\n## Verdict\nDecide from the screenshot, set controls, page text and notes whether the task is finished. "
         "Be strict and name every requirement id that is not visibly satisfied. A requirement to "

@@ -77,7 +77,6 @@ class Recording:
         self._ffmpeg = await asyncio.create_subprocess_exec(
             ffmpeg,
             *("-loglevel", "error", "-y", "-f", "image2pipe", "-framerate", str(_FPS), "-i", "-"),
-            # H.264 needs even dimensions, and yuv420p is what phones and social sites play.
             # Lossless, so the captioning pass is the only lossy encode; 4:4:4 also takes the odd sizes a tab has.
             *("-c:v", "libx264", "-qp", "0", "-preset", "ultrafast", "-pix_fmt", "yuv444p", str(self._uncaptioned)),
             stdin=asyncio.subprocess.PIPE,
@@ -96,6 +95,12 @@ class Recording:
             await asyncio.gather(self._ticker, return_exceptions=True)
         if self._session._on_frame is not None:
             self._session.client.register.Page.screencastFrame(self._session._on_screencast_frame)
+        try:
+            await self._close()
+        finally:
+            self._scratch.cleanup()
+
+    async def _close(self) -> None:
         if self._ffmpeg is None or self._ffmpeg.stdin is None:
             return
         if not self._written:
@@ -122,46 +127,41 @@ class Recording:
 
     async def _finish(self) -> None:
         """Encode the final video twice from the lossless pass: with step captions, and plain."""
-        with self._scratch as scratch:
-            subtitles = Path(scratch, "steps.srt")
-            end = self._card_at if self._card_at is not None else time.monotonic() - self._started
-            # A run that opens straight onto its answer takes no steps, and has no captions to end.
-            starts = [at for at, _ in self._captions]
-            ends = [*starts[1:], end][: len(starts)]
-            cues = [
-                f"{number}\n{_srt_time(at)} --> {_srt_time(until)}\n{text}\n"
-                for number, ((at, text), until) in enumerate(zip(self._captions, ends, strict=True), 1)
-                if until > at
-            ]
-            await asyncio.to_thread(subtitles.write_text, "\n".join(cues), encoding="utf-8")
-            # BorderStyle 3 draws a box behind the text, coloured by OutlineColour (alpha first, 00 opaque).
-            style = "Fontsize=10,BorderStyle=3,Outline=6,Shadow=0,OutlineColour=&H50000000,MarginV=16,Alignment=2"
-            # H.264 needs even dimensions, and yuv420p is what phones and social sites play.
-            # libass cannot open an empty subtitle file.
-            burn = f"subtitles={subtitles}:force_style='{style}'" if cues else "null"
-            graph = (
-                f"[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,split=2[plain][steps];[steps]{burn}[captioned]"
-            )
-            # Page text is the subject of a shared clip; x264's default quality blurs small type.
-            encode = ("-c:v", "libx264", "-crf", "18", "-preset", "slow", "-movflags", "+faststart")
-            process = await asyncio.create_subprocess_exec(
-                self._ffmpeg_path,
-                *("-loglevel", "error", "-y", "-i", str(self._uncaptioned), "-filter_complex", graph),
-                *("-map", "[captioned]", *encode, str(self._path)),
-                *("-map", "[plain]", *encode, str(self.plain_path)),
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await process.communicate()
-            outputs = (self._path, self.plain_path)
-            if process.returncode != 0:
-                logger.warning(
-                    "ffmpeg could not caption %s: %s", self._path, stderr.decode(errors="replace").strip()[:400]
-                )
-                # A partial file looks like a video until it is played.
-                for output in outputs:
-                    output.unlink(missing_ok=True)
-                return
-            self.outputs = outputs
+        subtitles = Path(self._scratch.name, "steps.srt")
+        end = self._card_at if self._card_at is not None else time.monotonic() - self._started
+        # A run that opens straight onto its answer takes no steps, and has no captions to end.
+        starts = [at for at, _ in self._captions]
+        ends = [*starts[1:], end][: len(starts)]
+        cues = [
+            f"{number}\n{_srt_time(at)} --> {_srt_time(until)}\n{text}\n"
+            for number, ((at, text), until) in enumerate(zip(self._captions, ends, strict=True), 1)
+            if until > at
+        ]
+        await asyncio.to_thread(subtitles.write_text, "\n".join(cues), encoding="utf-8")
+        # BorderStyle 3 draws a box behind the text, coloured by OutlineColour (alpha first, 00 opaque).
+        style = "Fontsize=10,BorderStyle=3,Outline=6,Shadow=0,OutlineColour=&H50000000,MarginV=16,Alignment=2"
+        # H.264 needs even dimensions, and yuv420p is what phones and social sites play.
+        # libass cannot open an empty subtitle file.
+        burn = f"subtitles={subtitles}:force_style='{style}'" if cues else "null"
+        graph = f"[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,split=2[plain][steps];[steps]{burn}[captioned]"
+        # Page text is the subject of a shared clip; x264's default quality blurs small type.
+        encode = ("-c:v", "libx264", "-crf", "18", "-preset", "slow", "-movflags", "+faststart")
+        process = await asyncio.create_subprocess_exec(
+            self._ffmpeg_path,
+            *("-loglevel", "error", "-y", "-i", str(self._uncaptioned), "-filter_complex", graph),
+            *("-map", "[captioned]", *encode, str(self._path)),
+            *("-map", "[plain]", *encode, str(self.plain_path)),
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        outputs = (self._path, self.plain_path)
+        if process.returncode != 0:
+            logger.warning("ffmpeg could not caption %s: %s", self._path, stderr.decode(errors="replace").strip()[:400])
+            # A partial file looks like a video until it is played.
+            for output in outputs:
+                output.unlink(missing_ok=True)
+            return
+        self.outputs = outputs
 
     async def show_result(self, task: str, result: RunResult) -> None:
         """End the video on the task and its outcome, in the tab being recorded."""
