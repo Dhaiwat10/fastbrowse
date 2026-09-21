@@ -178,6 +178,10 @@ class _RunState:
     """The operation and control id recovery named, taken when Jev is still unsure of the next step."""
     unchanged: int = 0
     recoveries: int = 0
+    recovered_at: int = 0
+    """`len(history)` when a tripwire last recovered the run. Evidence a recovery already acted on is
+    spent: `history` only grows, so a repetition count that reached the limit once would hold forever and
+    re-enter recovery on every later step, whatever the run did next."""
     plan_marks: list[str] = field(default_factory=list[str])
     """One fingerprint of the still-unevidenced requirements per step, for `stagnant_plan`."""
     written: set[tuple[Operation, str | None, str | None]] = field(
@@ -1161,7 +1165,14 @@ class Agent:
 
     async def _recover(self, state: _RunState, observation: Observation, reason: str) -> None:
         state.recoveries += 1
+        # Every tripwire's evidence is spent here, not just the unchanged-page count. The other two read
+        # monotone state -- `history` never shrinks, and `plan_marks` grows only on a step that got nowhere --
+        # so a threshold crossed once stays crossed, and an armed tripwire would recover on every subsequent
+        # step until `max_recoveries` returned STUCK. It also keeps the shadow rates honest: they are supposed
+        # to say how often arming WOULD have fired, not how many steps ran after the first crossing.
         state.unchanged = 0
+        state.recovered_at = len(state.history)
+        state.plan_marks.clear()
         if state.recoveries > self._config.stall.max_recoveries:
             raise _Stop(Status.STUCK, reason)
         steps = "\n".join(
@@ -1396,7 +1407,7 @@ class Agent:
         tripped: list[Tripped] = []
         if state.unchanged >= stall.unchanged_actions:
             tripped.append(Tripped(Tripwire.NO_PROGRESS, state.unchanged))
-        repeated = repeated_action(state.history, stall.repeated_actions)
+        repeated = repeated_action(state.history[state.recovered_at :], stall.repeated_actions)
         if repeated is not None:
             tripped.append(repeated)
         # An empty mark means the plan was not written yet, and every step before it would look identical.

@@ -42,6 +42,7 @@ from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.policy import HistoryEntry, decide
 from fastbrowse.safety import ScopedSecrets
 from fastbrowse.telemetry import Ledger
+from fastbrowse.tripwires import Tripwire
 from fastbrowse.verification import LLMVerdict
 from tests.test_memory import evidence
 from tests.test_policy import FREE, ScriptedJev, context, observation
@@ -848,3 +849,33 @@ async def test_a_guessed_page_that_is_still_drawing_is_waited_for_rather_than_ab
     await agent._front_page_if_blank("https://app.test/dashboard")
 
     page.navigate.assert_not_called()
+
+
+async def test_a_recovery_spends_the_evidence_every_tripwire_read() -> None:
+    """Armed, a tripwire must not re-fire on the crossing recovery already handled.
+
+    `history` never shrinks and `plan_marks` grows only on a step that got nowhere, so a threshold crossed
+    once holds for the rest of the run. Leaving it standing meant recovery re-entered on every later step,
+    however well the run then went, and `max_recoveries` returned STUCK three steps later.
+    """
+    page = Mock(spec=Page)
+    page.screenshot = AsyncMock(return_value=b"png")
+    recovery: dict[str, JsonValue] = {
+        "diagnosis": "going round",
+        "next_subgoal": "Click Search",
+        "give_up": False,
+        "control": None,
+    }
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([recovery]))
+    state = await run_state()
+    state.history = [
+        HistoryEntry(operation=Operation.FILL, target="Search", outcome=StepOutcome.EXECUTED, page_changed=True)
+        for _ in range(3)
+    ]
+    state.plan_marks = ["same"] * 4
+
+    tripped = {t.tripwire for t in agent._tripwires(state)}
+    assert Tripwire.ACTION_REPETITION in tripped and Tripwire.PLAN_STAGNATION in tripped
+
+    await agent._recover(state, observation(()), "action_repetition (3)")
+    assert agent._tripwires(state) == []
