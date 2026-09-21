@@ -109,6 +109,11 @@ async def test_cdp_errors_are_typed_with_safe_messages(monkeypatch: pytest.Monke
         assert "secret" not in str(raised.value)
 
 
+LOADED = {"result": {"value": "complete"}}
+SETTLED = {"result": {"value": [True, "fingerprint"]}}
+"""Navigation waits for a loaded document, then for its DOM to go quiet."""
+
+
 @pytest.mark.parametrize(
     ("errors", "raised"),
     [
@@ -122,7 +127,7 @@ async def test_a_failed_navigation_is_tried_again_once(
 ) -> None:
     transport = CdpTransport(monkeypatch)
     transport.results["Page.navigate"] = [{"errorText": error} for error in errors]
-    transport.results["Runtime.evaluate"] = [{"result": {"value": "complete"}}]
+    transport.results["Runtime.evaluate"] = [LOADED, SETTLED]
     monkeypatch.setattr(page_module, "_NAVIGATE_RETRY_SECONDS", 0)
     async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
         navigating = CdpPage(session, Config()).navigate("https://example.test")
@@ -140,7 +145,7 @@ async def test_a_page_that_never_loads_is_tried_again_once(monkeypatch: pytest.M
     async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
         with pytest.raises(BrowserError, match=re.escape("Page.navigate failed (TimeoutError)")):
             await CdpPage(session, Config()).navigate("https://example.test", load_timeout_seconds=0.1)
-        transport.results["Runtime.evaluate"] = [{"result": {"value": "complete"}}]
+        transport.results["Runtime.evaluate"] = [LOADED, SETTLED]
         await CdpPage(session, Config()).navigate("https://example.test", load_timeout_seconds=0.1)
     assert transport.calls.count("Page.navigate") == 3
 

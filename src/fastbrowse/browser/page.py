@@ -877,7 +877,10 @@ class CdpPage(Page):
         """Setup helper (tests, initial task URL): navigate the active tab and wait until its document is usable.
 
         Waiting for `complete` also waits on every image and tracker, which behind a proxy can outlast the page
-        becoming interactive; observation settles the rest.
+        becoming interactive, so the wait is for an interactive document whose DOM has gone quiet instead. An
+        interactive document can still be hydrating: Google Flights rewrote the text around its first control
+        after the first observation, so the run's first click was refused as stale, and a read of a results page
+        still "Loading results" had to be taken twice.
         """
         session_id = self._session.active_session_id
         # A cloud browser's proxy drops a first connection now and then, or leaves a document loading, and a run
@@ -892,6 +895,9 @@ class CdpPage(Page):
                 failure = error if _NET_ERROR.fullmatch(error) else "NavigationError"
                 continue
             if await self._ready(session_id, load_timeout_seconds):
+                # Unsettled by the deadline is still a usable page, and a redirect destroys the promise mid-wait.
+                with suppress(BrowserError):
+                    await self._settled_fingerprint(_SETTLE_SECONDS)
                 return
             failure = "TimeoutError"
         raise BrowserError(f"Page.navigate failed ({failure})")
