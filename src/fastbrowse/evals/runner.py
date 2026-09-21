@@ -8,9 +8,11 @@ Needs Jev and LLM keys; see fastbrowse.clients.environment.
 import argparse
 import asyncio
 import json
+import logging
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 import httpx
@@ -26,6 +28,23 @@ from fastbrowse.evals.tasks import TASKS, LocalTask
 from fastbrowse.models import BrowserConnection, Limits
 
 
+class ShadowCounter(logging.Handler):
+    """Count the tripwires that would have recovered a run, so a suite reports their rate on runs that passed.
+
+    That rate is the only evidence for arming one: a tripwire is worth its cost when it rarely fires on a run
+    that was going to succeed anyway. Reading it off a log record keeps the counting out of the agent.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.counts: Counter[str] = Counter()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        tripwire = getattr(record, "tripwire", None)
+        if isinstance(tripwire, str):
+            self.counts[tripwire] += 1
+
+
 async def run_task(
     task: LocalTask,
     base_url: str,
@@ -34,8 +53,10 @@ async def run_task(
     http: httpx.AsyncClient,
     sink: DirectorySink,
     settings: Settings,
+    shadow: ShadowCounter,
 ) -> dict[str, object]:
     recorder.clear()
+    shadow.counts.clear()
     config = Config()
     jev, llm = settings.jev(http), settings.llm(http)
     started = time.monotonic()
@@ -53,6 +74,7 @@ async def run_task(
     return {
         "task": task.id,
         "passed": failure is None,
+        "would_fire": dict(shadow.counts),
         "failure": failure,
         "status": result.status.value,
         "seconds": round(time.monotonic() - started, 1),
@@ -75,6 +97,9 @@ async def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     tasks = [t for t in TASKS if not args.only or t.id in args.only]
     settings = load_settings()
+    shadow = ShadowCounter()
+    logging.getLogger("fastbrowse").addHandler(shadow)
+    logging.getLogger("fastbrowse").setLevel(logging.INFO)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
     with (
@@ -87,7 +112,7 @@ async def main(argv: list[str]) -> int:
             for _ in range(args.repeat):
                 for task in tasks:
                     row = await run_task(
-                        task, base_url, recorder, connection, http, DirectorySink(Path(downloads)), settings
+                        task, base_url, recorder, connection, http, DirectorySink(Path(downloads)), settings, shadow
                     )
                     rows.append(row)
                     out.write(json.dumps(row) + "\n")

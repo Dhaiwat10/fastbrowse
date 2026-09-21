@@ -37,6 +37,7 @@ from fastbrowse.models import (
     StepEvent,
     StepOutcome,
     StepResult,
+    TripwireMode,
     UntilCheck,
 )
 from fastbrowse.page import (
@@ -63,6 +64,7 @@ from fastbrowse.safety import (
 )
 from fastbrowse.shortcut import Shortcut, accept, accept_start, propose_shortcut, propose_start
 from fastbrowse.telemetry import BudgetExceeded, Ledger, trace
+from fastbrowse.tripwires import Tripped, Tripwire, repeated_action, stagnant_plan
 from fastbrowse.verification import (
     DoneVerdict,
     Extraction,
@@ -176,6 +178,8 @@ class _RunState:
     """The operation and control id recovery named, taken when Jev is still unsure of the next step."""
     unchanged: int = 0
     recoveries: int = 0
+    plan_marks: list[str] = field(default_factory=list[str])
+    """One fingerprint of the still-unevidenced requirements per step, for `stagnant_plan`."""
     edited: set[tuple[Operation, str | None]] = field(default_factory=set[tuple[Operation, str | None]])
     attempts: dict[Signature, _Attempts] = field(default_factory=dict[Signature, "_Attempts"])
     """What became of each action taken from each page state, which is how a cycle is told from progress."""
@@ -579,8 +583,18 @@ class Agent:
             state.hint = None
         else:
             state.unchanged += 1
-        if state.unchanged >= self._config.stall.unchanged_actions:
-            await self._recover(state, observation, f"{state.unchanged} actions without visible progress")
+        state.plan_marks.append(self._plan_mark(state))
+        for tripped in self._tripwires(state):
+            if tripped.tripwire is Tripwire.NO_PROGRESS or self._config.stall.tripwires is TripwireMode.ARMED:
+                await self._recover(state, observation, str(tripped))
+                return
+            # Shadow: the run is unchanged, and the log is the evidence for whether arming this would help.
+            logger.info(
+                "tripwire %s would have recovered on step %d",
+                tripped,
+                len(state.steps),
+                extra={"tripwire": tripped.tripwire.value},
+            )
 
     async def _act_on_twin(self, action: Action, observation: Observation, target: Control) -> ActResult | None:
         """Act on the one control now standing where `target` stood, if the page redrew it since it was observed.
@@ -1341,6 +1355,29 @@ class Agent:
         for item in evidence:
             cited.setdefault((item.url, item.quote), item)
         return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(cited.values()))
+
+    def _plan_mark(self, state: _RunState) -> str:
+        """What the plan still wants. Requirement ids, not model prose: this asks whether the run resolved
+        anything, and a plan the agent cannot influence by rewording is the only honest way to ask it."""
+        if state.ready_plan is None:
+            return ""
+        return ",".join(sorted(r.id for r in state.notes.unresolved(state.ready_plan)))
+
+    def _tripwires(self, state: _RunState) -> list[Tripped]:
+        """Every grinding signal that holds right now, the long-standing unchanged-page count first."""
+        stall = self._config.stall
+        tripped: list[Tripped] = []
+        if state.unchanged >= stall.unchanged_actions:
+            tripped.append(Tripped(Tripwire.NO_PROGRESS, state.unchanged))
+        repeated = repeated_action(state.history, stall.repeated_actions)
+        if repeated is not None:
+            tripped.append(repeated)
+        # An empty mark means the plan was not written yet, and every step before it would look identical.
+        if state.ready_plan is not None:
+            stagnant = stagnant_plan([mark for mark in state.plan_marks if mark], stall.stagnant_plan_steps)
+            if stagnant is not None:
+                tripped.append(stagnant)
+        return tripped
 
     def _context(
         self, state: _RunState, secrets: tuple[str, ...], *, check_login: bool, check_bot: bool
