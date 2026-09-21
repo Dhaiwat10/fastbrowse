@@ -644,13 +644,23 @@ class Agent:
 
         A date picker redraws its days and its Done button as it animates, so a click chosen a moment earlier finds
         its element gone, and deciding again costs a full model call to pick the same control. A control that is
-        the only one matching the target in frame, role, label, context and link, on the same address, is taken to
-        be that control.
+        the only one retaining its guard and semantics in the same document can inherit that decision. A new
+        document at the same address, or a changed form, has not passed the original authorization gate.
         """
         fresh = await self._observe()
-        if fresh.url != observation.url:
+        if (
+            not observation.document_key
+            or not target.retarget_key
+            or fresh.document_key != observation.document_key
+            or fresh.url != observation.url
+            or fresh.title != observation.title
+        ):
             return None
-        twins = [control for control in fresh.controls if _identity(control) == _identity(target)]
+        twins = [
+            control
+            for control in fresh.controls
+            if control.model_copy(update={"id": target.id, "offscreen": target.offscreen}) == target
+        ]
         if len(twins) != 1:
             return None
         trace("retarget", target=self._redactor.redact(target.label))
@@ -1734,10 +1744,6 @@ async def _discard[T](task: asyncio.Task[T]) -> None:
     """
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
-
-
-def _identity(control: Control) -> tuple[str | None, str, str, str | None, str | None]:
-    return control.frame_id, control.role, control.label, control.context, control.href
 
 
 def _require(target: Control | None) -> Control:

@@ -19,6 +19,8 @@ class Control(Frozen):
     """Kept across observations for as long as the same DOM node survives."""
     frame_id: str | None
     frame_origin: str | None = None
+    retarget_key: str | None = Field(default=None, exclude=True)
+    """Browser guard without node ids, tying a replacement to the same semantics and receiving document."""
     role: str
     label: str
     context: str | None = None

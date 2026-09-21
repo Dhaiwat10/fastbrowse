@@ -672,10 +672,11 @@ async def test_a_read_waits_for_an_empty_page_to_draw_and_never_reads_nothing(
 async def test_a_click_on_a_redrawn_control_lands_on_its_one_twin_without_deciding_again(twins: int) -> None:
     state = await run_state()
     state.authorization = Authorization(irreversible_actions=True)
-    before = observation((_button("Done"),))
-    redrawn = tuple(_button("Done").model_copy(update={"id": f"done-{n}"}) for n in range(twins))
+    target = _button("Done").model_copy(update={"retarget_key": "same-document-and-guard"})
+    before = observation((target,)).model_copy(update={"document_key": "document"})
+    redrawn = tuple(target.model_copy(update={"id": f"done-{n}"}) for n in range(twins))
     page = Mock(spec=Page)
-    page.observe = AsyncMock(return_value=observation(redrawn))
+    page.observe = AsyncMock(return_value=before.model_copy(update={"controls": redrawn}))
     page.act = AsyncMock(
         side_effect=[
             ActResult(outcome=StepOutcome.STALE, page_changed=False, detail="target disconnected"),
@@ -686,6 +687,39 @@ async def test_a_click_on_a_redrawn_control_lands_on_its_one_twin_without_decidi
     targets = [call.args[0].target_id for call in page.act.await_args_list]
     assert targets == (["done", "done-0"] if twins == 1 else ["done"])
     assert state.steps[-1].outcome is (StepOutcome.EXECUTED if twins == 1 else StepOutcome.STALE)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    ["document_key", "title", "retarget_key", "frame_origin", "submit_semantics", "operations", "value"],
+)
+async def test_stale_retargeting_preserves_document_and_authorization_context(changed: str) -> None:
+    target = field().model_copy(update={"retarget_key": "guard"})
+    before = observation((target,)).model_copy(update={"document_key": "document"})
+    twin = target.model_copy(update={"id": "replacement"})
+    after = before.model_copy(update={"controls": (twin,)})
+    if changed in {"document_key", "title"}:
+        after = after.model_copy(update={changed: "changed"})
+    else:
+        twin = twin.model_copy(update={changed: frozenset({Operation.CLICK}) if changed == "operations" else "changed"})
+        after = after.model_copy(update={"controls": (twin,)})
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=after)
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
+    assert await agent._act_on_twin(Action(operation=Operation.ENTER, target_id=target.id), before, target) is None
+    page.act.assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", [StepOutcome.FAILED, StepOutcome.COVERED])
+async def test_only_stale_actions_can_be_retargeted(outcome: StepOutcome) -> None:
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    before = observation((_button("Done"),))
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=outcome, page_changed=False))
+    await _click(Agent(page, ScriptedJev({}), ScriptedLLM([])), state, before, "Done")
+    page.act.assert_awaited_once()
+    page.observe.assert_not_called()
 
 
 def _link(key: str, label: str, href: str) -> Control:
