@@ -174,7 +174,8 @@ that change cleanly. Across all three suites fastbrowse passed 114/114, median 1
 **Reading it.** Against 0.5.0, the pass rate held at 42/42 and the mean cost fell by a quarter. Google Flights
 took 69.8s against 109.3s, and checkout 38.4s against 53.6s. The Browser Use agent's one failure is Google
 Flights, where it fetched the page, found only the app shell and answered with no price. It is faster on
-three lookups (`hn-top`, `github-license`, `pypi-newer`).
+five of the seven lookups: by several seconds on `hn-top`, `github-license` and `pypi-newer`, and by under
+two on `pypi-version` and `pypi-structured`.
 
 ## External benchmarks
 
