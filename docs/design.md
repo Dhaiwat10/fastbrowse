@@ -2,9 +2,59 @@
 
 fastbrowse splits a browser agent into three owners:
 
-- **Jev picks.** Each step, one batched Jev request chooses the operation and a target for each operation from indexed page candidates, and asks whether the page needs a sign-in. Separate Jev calls ask whether a target code has flagged may be irreversible, whether the task is complete, and whether each answer claim is supported by its quote.
+- **Jev picks.** A batched request chooses an operation and its possible targets from indexed controls. It also judges whether unread evidence should be preserved before interaction, and checks sign-in and bot walls on fresh pages. Large target sets use a second choice within the selected group. Code can follow a list's next-page link without an action-choice call.
 - **An LLM reads and writes.** Proposing a direct address for the task while the start page loads, planning checkable requirements from the task alone, reading page content for answers when Jev cannot pick a short fact from quoted spans, writing non-secret field text, recovering when Jev is unsure, verifying completion in the uncertain band, composing the final answer.
 - **Code owns the gates.** Freshness and hit-tests before every input, no automatic retry of a mutation, authorization for irreversible actions, secret resolution and redaction, budgets, and the definition of success: only `COMPLETE`, which requires every requirement evidenced.
+
+## Authorization
+
+Jev judges every model-selected click, including links, plus Enter when it submits a form and acceptance of
+confirm, prompt and before-unload dialogs. Code-selected pagination is exempt. An authorized action whose
+confidence reaches `Thresholds.sensitive_act_from` proceeds without that classification.
+
+A refusal is recorded as a failed step with a reason. An unauthorized action with sufficient confidence
+stops at `needs_confirmation`; an uncertain action goes to recovery. The classifier can be wrong, so this
+gate is not a guarantee that every externally visible change is detected.
+
+## Reading and citations
+
+The policy's read assessment distinguishes useful evidence from editable query previews and irrelevant
+content. Evidence is read before another interaction can remove it. Reads are deduplicated by document,
+capture hash and unresolved information requirements, so changed content can be read again.
+
+For a bounded set of short quoted spans, Jev chooses a scalar fact, requests synthesis, or judges the
+requirement absent from the page. Uncertain choices, comparisons, partial evidence and paginated lists
+reach the LLM reader. `FactReader` records `jev_choice` or `llm`. Both readers must locate their quotes in
+the capture before a fact enters `Notes`.
+
+Answer claims use numbered Markdown links built from those notes. `RunResult.citations` exposes the cited
+facts and text-fragment deep links; unused facts have no citation. Unknown citation references drop the
+claim with a warning. Jev checks the answer's claims against their quotes before completion.
+
+## Prompt limits and progress
+
+`Config.observation` names the limits for viewport text, working notes and recent and earlier history.
+`Config.tokens` names the input budgets and reader/composer output limits. Working notes can omit facts
+with a count; verdict prompts retain all requirement evidence or stop at `observation_limit`. The Jev
+completion check reduces page text first to make room for that evidence. Cut page text carries a marker
+when there is room for one; an excerpt too small to carry the marker is empty.
+
+Only visible effects or added evidence count as progress. Rewriting the value already in the observed
+field cannot count, even when it opens an autocomplete popup. `StallRules` checks lack of progress,
+repeated interactions and consecutive unproductive steps with the same unresolved requirements.
+The latter two log in `shadow` mode by default; `armed` mode sends them to recovery. A productive step
+clears the plan-stagnation streak, and recovery resets the evidence used by all three checks.
+
+## Run events and images
+
+`on_event` receives a `BrowserEvent` followed by `StepEvent` objects. Each step includes added facts,
+their reader and source links in `StepResult.facts`, and any available explanation in `StepResult.note`.
+`Config(step_frames=True)` adds a PNG after each step unless a fresh observation shows a resolved secret.
+
+`on_frame` receives JPEG bytes from the active tab. Frames are acknowledged after the async handler returns;
+there is no fixed frame rate, and only the latest pending frame is retained. Delivery runs separately from
+the agent, and handler failures are logged. These live images and MP4 recordings show the rendered page;
+they do not use the secret check that suppresses PNG step frames.
 
 ## Browser capabilities over plain CDP
 
@@ -12,7 +62,7 @@ Verified with `cdp-use==1.4.5` against local headless Chrome and a Browser Use c
 
 | Capability | Mechanism | Local | Cloud |
 |---|---|---|---|
-| Own tab rendered | `Target.createTarget(background=not remote)` + `activateTarget` | pass | pass |
+| Own tab rendered | `Target.createTarget` + `Target.activateTarget` | pass | pass |
 | Upload caller bytes | in-page `DataTransfer` + `File` on the input, `input`/`change` events (no host path needed) | pass | pass |
 | Download bytes | `Fetch.enable` at Response stage for Document responses (download-attribute anchors included), `Fetch.getResponseBody` on `Content-Disposition: attachment` | pass | pass |
 | Cross-origin iframe | `Target.setAutoAttach(flatten)` on the page session, evaluate in the iframe session | pass | pass |
@@ -20,3 +70,8 @@ Verified with `cdp-use==1.4.5` against local headless Chrome and a Browser Use c
 | Dialogs | `Page.javascriptDialogOpening` + `Page.handleJavaScriptDialog` | pass | pass |
 
 The cloud browser ignores `Browser.setDownloadBehavior(deny)`, so bytes come from response interception, never from the remote filesystem. Host-path `DOM.setFileInputFiles` is only valid for a browser on the same machine.
+
+Before a pointer press, the browser waits for a stable target and rechecks its guard and hit-test. A
+replacement control must match the original semantics and receiving document; ambiguous matches are
+refused. Focus and the receiving field are checked before typing. Settling waits for an interactive
+document and a quiet DOM, with a bounded extra wait for visible loading indicators.

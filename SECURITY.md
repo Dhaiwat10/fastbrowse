@@ -28,12 +28,16 @@ fastbrowse is a browser agent. The most sensitive surface is how it handles the 
 user gives it: API keys, Bitwarden vault logins, and `--secret` values. A valid report is
 one where:
 
-- a secret value reaches the LLM, Jev, a log, a recording, or the returned result, or
+- a secret value reaches the LLM, Jev, a log, a recording, a live frame, or the returned result, or
 - a secret is sent to an origin it was not authorized for, or
 - an irreversible action (a payment, delete, or send) runs without `--authorize`.
 
 Out of scope: missing features, cosmetic problems, and the behavior of the sites the
 agent is told to browse.
+
+Live JPEG frames (`on_frame`) and MP4 recordings show the rendered page without secret suppression.
+PNG step frames use a separate secret check. An irreversible action is classified by Jev, so a missed
+classification is possible and belongs in a security report.
 
 ## Supported versions
 

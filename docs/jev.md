@@ -1,7 +1,7 @@
 # Jev: what Typesafe documents, and what fastbrowse assumes
 
-Every Jev assumption in fastbrowse, checked against Typesafe's own documentation (September 2026, Jev
-1.13). Anything the documentation does not state is marked **ours**: a fastbrowse choice, tuned on the
+The Jev contract used by fastbrowse, checked against Typesafe's documentation for Jev 1.13.
+Anything the documentation does not state is marked **ours**: a fastbrowse choice, tuned on the
 evals rather than taken from Typesafe.
 
 ## The contract
@@ -15,10 +15,10 @@ evals rather than taken from Typesafe.
 | Score | Ordered levels, returning a probability-weighted index ([Score](https://docs.typesafe.ai/primitives/score)) | Modelled in `jev.py`, not yet called |
 | Options | At most 255 per Choice ([Choice](https://docs.typesafe.ai/primitives/choice)) | `MAX_CHOICE_OPTIONS = 255`; the 240 cap and group-then-element selection are **ours** |
 | Tokens | 32k for state plus the largest question, 64k in total ([Models](https://docs.typesafe.ai/models)) | `TokenBudget` targets 24k and 48k; the headroom and `chars_per_token = 3.0` are **ours**, because tokens are estimated locally |
-| Rate limits | 1,200 requests a minute and 250k tokens a second on the direct API, subject to change ([Models](https://docs.typesafe.ai/models)); no extra gateway limit on paid tiers ([Gateway limits](https://vercel.com/docs/ai-gateway/rate-limits)) | A run makes a few requests a step, far below either |
+| Rate limits | 1,200 requests a minute and 250k tokens a second on the direct API, subject to change ([Models](https://docs.typesafe.ai/models)); no extra gateway limit on paid tiers ([Gateway limits](https://vercel.com/docs/ai-gateway/rate-limits)) | Retries handle 429 responses; concurrent runs share their provider's limits |
 | Errors | 400/401/403/404/422/429/5xx, with 529 for overload; retry with backoff, honouring server retry headers ([Exceptions](https://docs.typesafe.ai/sdk/python/api/exceptions)) | `post_with_retry` retries 408, 429, 500, 502, 503, 504 and 529 (not the 4xx request errors) and honours `retry-after-ms` and `retry-after`, capped at 10s |
 | Price | $0.042 per million input tokens; output is free ([Models](https://docs.typesafe.ai/models), [gateway catalog](https://ai-gateway.vercel.sh/v1/models)) | `CostComponent.JEV` on the ledger |
-| Latency | 70 to 500ms end to end, as advertised ([launch post](https://typesafe.ai/blog/introducing-system-one-models-and-jev)); no SLA is published | Measured through the gateway: 0.28s median and 0.62s worst over 25 policy-sized calls. The 1.5s hedge in `clients/validation.py` is **ours** |
+| Latency | Provider timings do not establish end-to-end run time | The 1.5s hedge in `clients/validation.py` is **ours**; published run timings are in [evals.md](evals.md) |
 | Streaming | Gateway evaluation does not stream ([AI SDK evaluation](https://ai-sdk.dev/docs/ai-sdk-core/evaluation)) | Not needed: answers are a few numbers |
 
 ## Provider failover
@@ -29,7 +29,7 @@ provider and stays there for the rest of the run. A second outage raises; provid
 Concurrent evaluations already in flight may finish on the first provider.
 
 Request and authentication errors, malformed answers, transport failures without a final retryable HTTP
-status, and cancellation do not switch providers. One key keeps the existing retry-and-raise behaviour.
+status, and cancellation do not switch providers. With one key, exhausted retries raise an error.
 `FASTBROWSE_JEV_BASE_URL` or a nondefault `FASTBROWSE_JEV_MODEL` disables automatic failover: a backup
 must not bypass a proxy or silently replace a pinned model. Default backups use their own public endpoint,
 key and model (`jev-1.13.0` direct, `typesafe-ai/jev` through the gateway).
@@ -61,15 +61,17 @@ and where fastbrowse follows it:
 - **Narrow, explicit judgments, with true/false descriptions that match the instruction.** Every Noul
   question in `verification.py` and `safety.py` carries both descriptions.
 - **Concrete option boundaries, plus an escape option when coverage is incomplete.** The short-fact read
-  offers "none of these", and the policy offers `escalate`.
+  offers `synthesis` for the LLM reader and `absent` for no relevant evidence. Scalar field extraction offers
+  `none`, and the policy offers `escalate`.
 - **Question ids are invisible to the model.** Everything the model needs is in the instruction text.
-- **Batch independent questions that share one state; answers cannot see each other.** Each step is one
-  request: the operation, a target for each operation, and whether the page needs a sign-in. The done check asks completion, unmet
-  actions and "does the draft need rewriting" in one call.
-- **Remove irrelevant state and keep arithmetic in code.** State is the redacted viewport and the notes;
-  counts and comparisons go to the LLM reader.
+- **Batch independent questions that share one state; answers cannot see each other.** The policy batches
+  operation and target choices, read assessment and applicable sign-in and bot checks. Grouped targets need
+  a second choice; code-selected pagination needs no policy call. The done check batches completion,
+  unmet actions and whether a draft needs rewriting.
+- **Match state to the question.** Navigation uses the redacted viewport, controls and working notes;
+  short-fact selection sees the full capture. Counts and comparisons go to the LLM reader.
 
-## Not yet used
+## Unused primitives
 
 - **Structured instructions** ([Structure](https://docs.typesafe.ai/primitives/advanced)): `jev.py`
   types instructions as strings. Structured criteria are used where they help: the tab choice passes each tab as an object.

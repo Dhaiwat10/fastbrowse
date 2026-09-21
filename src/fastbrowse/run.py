@@ -3,7 +3,7 @@
 This is the entry point for embedding fastbrowse in something else. The terminal (`fastbrowse.cli`) and
 the live eval are both callers of it, so the assembly has one definition rather than one per caller, and
 an embedder gets the parts that are easy to forget: the cloud browser's own cost folded into the result,
-downloads kept when a directory is given, and the browser closed on every path out.
+downloads kept when a directory is given, and owned tabs closed on every path out.
 """
 
 from collections.abc import AsyncGenerator, Mapping, Sequence
@@ -112,8 +112,9 @@ async def run_task(
     then proposed from the task and the run begins there, which is what a person does with the same sentence.
 
     The browser is one of three. `cdp_url` attaches to a browser that is already running, wherever it is
-    (a container, a VM, a machine the caller owns), and the run neither starts nor stops it: it opens one tab
-    and closes that tab. Otherwise `browser_api_key` runs on a Browser Use Cloud browser, and with neither,
+    (a container, a VM, a machine the caller owns), and the run neither starts nor stops it: it opens a tab
+    and closes the tabs it owns. Cookies and task changes can persist. `cdp_url` and `browser_api_key` cannot
+    be combined. Otherwise `browser_api_key` runs on a Browser Use Cloud browser, and with neither,
     local Chrome as `chrome` describes (default: from `Settings`, headless with a throwaway profile).
     `cloud_profile` names a profile on that cloud account, so a site someone signed into once in that
     profile is still signed in here; it is the remote counterpart of `LocalChrome.profile`. `proxy_country`
@@ -123,8 +124,10 @@ async def run_task(
 
     Files the run downloads are discarded unless `downloads` names a directory to keep them in. `record` saves
     an MP4 of the tab, ending on the answer; it needs ffmpeg, and shows whatever the pages showed.
-    `on_frame` receives JPEG bytes from the active tab, at most five times a second. Frames are dropped while
-    the handler is busy; its failures are logged without interrupting the run. No handler means no live capture.
+    `on_frame` receives JPEG bytes from the active tab. Frames are acknowledged after delivery, with no fixed
+    frame rate; only the latest pending frame is kept. Handler failures are logged without interrupting the run.
+    Live frames and recordings show the rendered page without the secret check used for PNG step frames.
+    No handler means no live capture.
     """
     config = config or Config()
     settings = load_settings()

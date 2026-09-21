@@ -131,10 +131,10 @@ class Download(BaseModel):
 
 class BrowseResult(BaseModel):
     status: Status
-    """`complete` is the only status whose answer is fully backed by quotes from the pages."""
+    """Only `complete` reports verified task completion."""
     answer: str | None
     data: JsonValue | None
-    """The requested `fields`, each copied from the page; None when none were asked for or they could not be."""
+    """The requested `fields`, supported by page evidence; None when none were asked for or extraction failed."""
     citations: list[Citation]
     next_step: str | None
     """What a caller can do about a status other than `complete`."""
@@ -153,7 +153,7 @@ def next_step(status: Status, *, allow_authorize: bool) -> str | None:
         case Status.COMPLETE:
             return None
         case Status.UNVERIFIED:
-            return "The answer could not be backed by quotes from the page. Treat it as unconfirmed."
+            return "The run could not verify every requirement or answer claim. Treat it as unconfirmed."
         case Status.NEEDS_CONFIRMATION:
             if allow_authorize:
                 return "Stopped before an irreversible action. Confirm with the user, then call again with authorize."
@@ -173,7 +173,10 @@ def next_step(status: Status, *, allow_authorize: bool) -> str | None:
                 "server's --profile."
             )
         case Status.NEEDS_INPUT:
-            return "A field needs a value the task did not give. Put the value in the task and call again."
+            return (
+                "A required value or file is missing, or an upload exceeds its size limit; see error. "
+                "Add missing text to the task and call again. This tool cannot supply file attachments."
+            )
         case Status.BUDGET_EXCEEDED:
             return (
                 "A limit was reached. Call again with a higher max_steps, max_dollars or max_seconds (up to the "
@@ -274,9 +277,9 @@ def _description(config: ServerConfig) -> str:
         "value stops the run at needs_input rather than being made up. Pass `fields` to get typed data back "
         "as well as the answer.",
         "",
-        "Statuses: complete (every claim quoted from a page), unverified, needs_confirmation, needs_login, blocked, "
-        "needs_input, stuck, budget_exceeded, observation_limit, error. A result other than complete carries "
-        "next_step.",
+        "Statuses: complete (task verified, answer claims supported by quotes), unverified, needs_confirmation, "
+        "needs_login, blocked, needs_input, stuck, budget_exceeded, observation_limit, error. "
+        "A result other than complete carries next_step.",
     ]
     if config.allow_authorize:
         lines += [
@@ -349,7 +352,7 @@ def build_server(
         ] = None,
         fields: Annotated[
             dict[str, OutputField] | None,
-            Field(description="Typed values to return in `data`, by name, each copied verbatim from a page."),
+            Field(description="Typed values to return in `data`, by name, supported by page evidence."),
         ] = None,
         authorize: Annotated[
             bool, Field(description="Go through irreversible actions. Needs the server's --allow-authorize.")

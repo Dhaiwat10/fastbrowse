@@ -23,52 +23,41 @@ Jev chooses each action, an LLM plans and reads, and code owns verification, saf
 
 ## Why
 
-Most browser agents generate each action from a screenshot. fastbrowse indexes the page into
-candidates and has [Jev](https://typesafe.ai), a choice model, **pick one**, so it cannot click
+fastbrowse indexes the page into candidates and has [Jev](https://typesafe.ai), a choice model, **pick one**, so it cannot click
 something that was never on the page. Every claim in an answer cites a verbatim quote from the page.
 
-![fastbrowse signing in to a shop, adding two products, filling the shipping form and placing the order: 12 steps, 37.7s, $0.0138, shown at 2x speed](docs/assets/demo.gif)
+![fastbrowse signing in to a shop, adding two products, filling the shipping form and placing the order](docs/assets/demo.gif)
 
 ### Against Browser Use
 
-The same 14 answer tasks (lookups, sign-ins, checkout, Google Flights), three passes each, on the same kind of
-cloud browser, run the same day under a 600s ceiling neither arm reached. Every run ended when the agent
-finished, so these figures compare the agents rather than their budgets.
+The published comparison used fastbrowse 0.4.1: the same 14 answer tasks (lookups, sign-ins, checkout,
+Google Flights), three passes each, on the same kind of cloud browser, under a 600s ceiling neither arm
+reached. These are historical results; the agent and Flights grader have changed since that run.
 
 | | passed | cost per task | median time |
 |:--|:--|:--|:--|
 | **fastbrowse** | 41/42 | **$0.0057** (median), $0.0084 mean | **21.0s** |
-| Browser Use (hosted) | 42/42 | $0.41 (median), $0.53 mean | 24.8s |
-| | | **71x cheaper** | 1.2x faster |
+| Browser Use (hosted) | 42/42 | $0.4070 (median), $0.5304 mean | 24.8s |
 
 The whole suite cost $0.35 here and $22.28 there.
 
-**Reliability is not the difference.** We are one task behind, not level: Browser Use passes every task, and
-the one failure in the table is ours (`saucedemo-locked-out`, one pass of three). Cost is the difference, and
-it is the whole difference.
+The one failure in this table is fastbrowse's (`saucedemo-locked-out`, one pass of three).
 
-**Where the cost difference comes from.** It grows with how much a task does: 63x on a lookup, 88x on the
-checkout, 182x on the sign-ins. Jev picks each action from the controls already on the page, so a step costs a
-classification rather than a generation, and a task that takes thirty steps still costs cents.
+The published median cost ratios are 63x for lookups, 88x for checkout and 182x for sign-ins.
+Jev selects actions through classification; planning, field text and reading can still require LLM generation.
 
-**Where it is fast, it is fast because it stops guessing.** The gap opens on the tasks with the most steps in
-them, which are the ones a person actually waits on:
+The published task medians show where time went:
 
-| task | fastbrowse | Browser Use (hosted) | |
-|:--|:--|:--|:--|
-| `saucedemo-checkout` two items, a shipping form and Finish | **36.3s** | 173.9s | **4.8x faster** |
-| `saucedemo-cart` sign in, find a product, add it | **25.8s** | 119.8s | **4.6x faster** |
-| `saucedemo-locked-out` report the site's error rather than claim success | **35.5s** | 115.8s | **3.3x faster** |
-| `internet-login` sign in and confirm the signed-in page | **18.3s** | 71.7s | **3.9x faster** |
-| `practice-login` the same on another practice site | **21.2s** | 36.3s | 1.7x faster |
+| task | fastbrowse | Browser Use (hosted) |
+|:--|:--|:--|
+| `saucedemo-checkout` two items, a shipping form and Finish | **36.3s** | 173.9s |
+| `saucedemo-cart` sign in, find a product, add it | **25.8s** | 119.8s |
+| `saucedemo-locked-out` report the site's error rather than claim success | **35.5s** | 115.8s |
+| `internet-login` sign in and confirm the signed-in page | **18.3s** | 71.7s |
+| `practice-login` the same on another practice site | **21.2s** | 36.3s |
 
-A plain lookup finishes in eleven to fourteen seconds (`pypi-version` 11.1s, `hn-top` 12.0s, `github-license`
-12.7s), where the two arms are within about four seconds of each other and theirs is often ahead. And on
-Google Flights - a date picker and a results widget, the hardest thing in the suite - theirs is nearly twice
-as fast (38.5s against 71.7s), and it is the one task whose grade here wobbles run to run.
-
-Treat the whole-suite median as the summary and the rows as the shape: the more a task does, the further
-ahead this gets.
+Lookup medians included `pypi-version` at 11.1s, `hn-top` at 12.0s and `github-license` at 12.7s.
+Google Flights took 71.7s here and 38.5s on hosted Browser Use. Its historical grades used the earlier grader.
 
 [Every run, what it cost, and how a failure is counted](docs/evals.md#head-to-head-2026-09-20).
 
@@ -76,12 +65,11 @@ ahead this gets.
 
 - **LLM agents that generate actions** (Browser Use and similar): Jev picks each action from the controls
   that are on the page, so there is no invented selector to retry. A task costs a fraction as much (a lookup,
-  $0.005 against $0.33, both measured the same day), and every claim in the answer cites a verbatim
-  quote. Reliability is about the same; the cost is the difference.
+  $0.0052 against $0.3308 median across the lookup category in the published run), and every claim in the
+  answer cites a verbatim quote. The published answer-task pass counts are 41/42 and 42/42.
 - **Choice-model navigators** ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast)): the same
-  core technique, plus everything a real task needs. fastbrowse reads pages and returns cited answers,
-  signs in without showing a model the password, and stops before anything irreversible. On the six
-  navigation tasks both can run, it passes 18/18 against 11/18 - though six of those seven failures ran into
+  core technique, with page reading, cited answers, scoped secrets and an authorization gate. In the published
+  run on the six navigation tasks both can run, fastbrowse passed 18/18 against 11/18 - though six of those seven failures ran into
   the shared 30-step limit rather than a wall, and jev-ultrafast is cheaper on all four tasks both finish.
 - **Scripts:** there are no selectors to maintain. The same agent handles a date picker, a checkout and
   a search box it has never seen.
@@ -96,9 +84,9 @@ export OPENROUTER_API_KEY=...   # for the LLM that plans and reads
 uvx fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
 
-`uvx` runs the published package without installing anything. `uv tool install fastbrowse` keeps it on your
-PATH, and `uv add fastbrowse` puts it in a project. Keys can live in a `.env` file in the working directory
-instead of the environment; [`.env.example`](.env.example) lists every setting.
+`uvx` runs the published package in an isolated cached environment. `uv tool install fastbrowse` keeps it on your
+PATH, and `uv add fastbrowse` puts it in a project. Service keys can live in a `.env` file in the working directory;
+[`.env.example`](.env.example) shows the settings. Values named by `--secret` must be in the process environment.
 
 To work on fastbrowse itself:
 
@@ -109,26 +97,20 @@ cp .env.example .env
 uv run fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
 
-```
-   0 read  -> executed
-complete ($0.0071, 1 steps)
-The top story on Hacker News is titled "...".
-```
-
-Steps go to stderr and the answer to stdout. `--json` prints every step, the quotes behind the
-answer, and cost by component.
+Steps go to stderr; the status, cost, step count and answer go to stdout. `--json` prints every step,
+the quotes behind the answer, and cost by component.
 
 | Flag | Effect |
 |:--|:--|
 | `--start URL` | the page to open first; worked out from the task when omitted |
-| `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`); far less likely to be bot-challenged. Prints a URL to watch it live |
+| `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`). Prints a URL to watch it live |
 | `--headed` | show the local Chrome window |
 | `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in |
 | `--cloud-profile ID` | run on a Browser Use Cloud profile, signed in as whoever set it up (needs `--cloud`) |
 | `--authorize` | allow submit, pay, delete and send; without it the run stops at `needs_confirmation` first |
-| `--secret NAME=ENV_VAR` | let the agent type `$ENV_VAR` on the start origin; models only see `NAME` |
-| `--bitwarden ITEM` | let the agent type that vault login's `username` and `password`, only where the item's saved URIs and their match detection allow |
-| `--max-steps N`, `--max-dollars N` | bound the run |
+| `--secret NAME=ENV_VAR[@ORIGIN]` | let the agent type `$ENV_VAR` on the declared origin, or the `--start` origin if omitted; models only see `NAME`. An explicit origin needs no `--start` |
+| `--bitwarden ITEM` | match the vault login's saved URIs against `--start`, then allow its `username` and `password` only on that start origin |
+| `--max-steps N`, `--max-dollars N` | bound steps and model spend; defaults are 60 steps and no dollar cap. Cloud browser charges are added when it stops |
 | `--downloads DIR` | keep downloaded files |
 | `--json` | full result instead of the answer |
 | `--record FILE` | save an MP4 of the tab ending on the answer, time and cost (needs `ffmpeg`), e.g. `recordings/demo.mp4`, which git ignores. It shows what the pages showed, so watch it before sharing |
@@ -158,8 +140,8 @@ uv run fastbrowse "Add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
   --start https://www.amazon.com/ --cloud --cloud-profile prof_1234
 ```
 
-Or from your vault, with the [Bitwarden CLI](https://bitwarden.com/help/cli/) unlocked. Values are typed
-only on a site the item's saved URIs cover, and models see only `username` and `password`:
+Or from your vault, with the [Bitwarden CLI](https://bitwarden.com/help/cli/) unlocked. The item's saved URIs
+must match `--start`; values are then typed only on that origin, and models see only `username` and `password`:
 
 ```sh
 export BW_SESSION="$(bw unlock --raw)"
@@ -187,10 +169,10 @@ The exit code is 0 only for `complete`.
 | `needs_confirmation` | stopped before an irreversible action; re-run with `--authorize` |
 | `needs_login` | a sign-in wall that no `--secret` covers |
 | `blocked` | a bot check (a CAPTCHA) that did not clear; not a sign-in, so no secret passes it |
-| `needs_input` | a field needs a value you did not give, which is never invented |
+| `needs_input` | a required value or file is missing, or an upload exceeds the configured size limit |
 | `stuck` | recovery ran out without reaching a page state the run had not seen |
 | `budget_exceeded` | a step, call, time or dollar limit was reached |
-| `observation_limit` | the page has more controls than Jev can take in |
+| `observation_limit` | the page or required evidence cannot fit the configured prompt budget |
 | `error` | a model or browser failure |
 
 ## How it works
@@ -201,7 +183,7 @@ The exit code is 0 only for `complete`.
 </picture>
 
 The LLM plans, reads and writes. Code owns the gates: irreversible actions stop without
-`--authorize`, secrets reach models by name only, and cookie banners are refused before they paint.
+`--authorize`, secrets reach models by name only, and supported cookie banners are refused through autoconsent.
 More in [docs/design.md](docs/design.md).
 
 ## How it compares
@@ -215,7 +197,7 @@ More in [docs/design.md](docs/design.md).
 | Irreversible actions | not gated | not gated | stop unless `--authorize` |
 | Browser | cloud | local Chrome, your profile | local Chrome or cloud |
 
-jev-ultrafast is Browser Use's navigation agent (a measured 7.1s Google Flights run); fastbrowse
+jev-ultrafast is Browser Use's navigation agent; fastbrowse
 shares its core techniques. Its column describes `main` as of 2026-09-18.
 
 ## Embed it
@@ -251,15 +233,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-```
-complete {'package': 'httpx', 'version': '0.28.1'} $0.0114
-  "httpx 0.28.1" from https://pypi.org/project/httpx/
-  "pip install httpx" from https://pypi.org/project/httpx/
-```
-
 `run_task(cdp_url=...)` drives a browser that is already running, wherever it is, instead of starting one:
-the run opens a tab and closes that tab, and the browser is left as it was found. With neither that nor a
-cloud key, it runs local Chrome.
+the run opens its own tab and closes the tabs it owns. It leaves the browser and pre-existing tabs open;
+cookies and other changes made by the task can persist. Pass `browser_api_key=` to start a cloud browser;
+with neither argument, it runs local Chrome. Passing both is an error.
 
 `RunResult.citations` is a tuple of `Citation` objects, also importable from `fastbrowse`. Each has `id`
 (the number in the answer), `text` (the Notes fact), `requirement_id` (or `None`), `url`, `quote` and
@@ -278,17 +255,29 @@ cloud browser, then a `StepEvent` per step. `Config(step_frames=True)` adds a PN
 on, for an interface that renders the run; a step whose page is showing a resolved secret sends no frame.
 `StepEvent.step.facts` (also `StepResult.facts`) holds only the facts added by that step: text, requirement id,
 quote, URL, deep link and reader (`jev_choice` or `llm`), with resolved secrets redacted before delivery.
+`StepResult.note` carries read outcomes, dispatch details, gate refusals or recovery guidance when available;
+it can be `None` for an ordinary successful action.
+
+For continuous live images, pass an async `on_frame` handler accepting JPEG bytes. Frames follow the active
+tab and are acknowledged after delivery, with no fixed frame rate. Only the latest pending frame is kept.
+Handler failures are logged without stopping the run. These live frames, like recordings, show the rendered
+page without the secret check used for PNG step frames. No handler means no live capture.
 
 Jev comes from Typesafe directly or through the Vercel AI Gateway, whichever key is set
-(`FASTBROWSE_JEV_SOURCE` picks when both are, `FASTBROWSE_JEV_BASE_URL` adds a proxy). Any other source
-can be passed as `run_task(jev=...)`, an object with one `evaluate(state, questions)` method; the LLM
-works the same way.
+(`FASTBROWSE_JEV_SOURCE=typesafe` or `gateway` picks the first provider when both are set). With both keys,
+a retryable HTTP failure that exhausts retries switches the run to the other provider. A custom
+`FASTBROWSE_JEV_BASE_URL` or nondefault `FASTBROWSE_JEV_MODEL` disables that failover.
+Any other source
+can be passed as `run_task(jev=...)`, implementing async `evaluate(state, questions)`; `run_task(llm=...)`
+accepts an implementation of the `LLMClient.generate(...)` protocol in `fastbrowse.llm`.
 
 ## Use it from an MCP client
 
 `fastbrowse-mcp` serves one `browse` tool over [MCP](https://modelcontextprotocol.io), so Claude Code, Claude
 Desktop, Cursor or any other MCP client can hand it a task. It returns the answer, typed `fields` if asked for,
 the quotes behind them, the status and what to do about it, and reports progress on every step.
+The answer contains numbered Markdown links. MCP's `citations` list contains `quote` and `url` from the
+run's evidence; it does not expose the Python `Citation` ids, requirement ids or deep-link fields.
 
 ```sh
 claude mcp add fastbrowse -e OPENROUTER_API_KEY=... -e AI_GATEWAY_API_KEY=... \
@@ -322,19 +311,21 @@ The server's flags decide what a calling model may do; a call can ask for less, 
 | `--max-concurrent N` | runs at once, default 1; more calls wait their turn |
 | `--transport http`, `--host`, `--port` | streamable HTTP at `/mcp` instead of stdio |
 
-Over HTTP, set `FASTBROWSE_MCP_TOKEN` and every request but `GET /healthz` needs
+Over HTTP, set `FASTBROWSE_MCP_TOKEN` in the environment or `.env` and every request but `/healthz` needs
 `Authorization: Bearer <token>`. The server refuses to bind anything but loopback without one. A run takes
 seconds to minutes, so raise the client's tool timeout if it has one (`MCP_TOOL_TIMEOUT` in Claude Code).
 
 ## Safety model
 
-- **Irreversible actions.** Before any button or submit, Jev is asked whether it commits something
-  that cannot be undone. Without `--authorize`, a yes stops the run. This is a classifier, not a
-  guarantee: a page can word a harmful control to look harmless.
+- **Irreversible actions.** Jev judges clicks, including links, form-submitting Enter presses and acceptance
+  of confirm, prompt or before-unload dialogs. Code-selected pagination is exempt, as are authorized
+  actions with sufficient confidence. A refusal appears as a failed step with a reason: an unauthorized,
+  confident action stops at `needs_confirmation`; an uncertain action goes to recovery. This is a classifier,
+  not a guarantee: a page can word a harmful control to look harmless.
 - **Secrets.** Models see secret names only. A value is resolved at the moment of typing, only for
   its declared origin, and redacted from everything the run returns. A password field is typed only
   from a stored secret, never generated.
-- **Page content is data.** Every prompt says so, and completion is judged against quotes and page
+- **Page content is data.** Reader and verifier prompts say so, and completion is judged against quotes and page
   state rather than the model's say-so.
 
 ## Evals and development
@@ -342,16 +333,16 @@ seconds to minutes, so raise the client's tool timeout if it has one (`MCP_TOOL_
 ```sh
 uv sync --all-extras                                         # the hosted-arm SDK too, which ty checks
 uv run pre-commit install                                    # ruff and ty before each commit
-uv run python -m fastbrowse.evals.runner                     # local fixtures, under half a cent a task
+uv run python -m fastbrowse.evals.runner                     # local fixtures, about $0.005 a task
 uv run --extra browser-use python -m fastbrowse.evals.live --max-dollars 0 --concurrency 8   # live head-to-head
 uv run --extra browser-use python -m fastbrowse.evals.live --arms fast              # ours alone, capped as configured
 uv run --extra browser-use python -m fastbrowse.evals.live --suite heldout   # the never-debugged split
 uv run ruff format . && uv run ruff check . && uv run ty check && uv run pytest
-uv run python scripts/no_slop.py && uv run vale sync && uv run vale README.md docs src scripts tests
+uv run python scripts/no_slop.py && uv run vale sync && uv run vale README.md CHANGELOG.md AGENTS.md docs src scripts tests
 ```
 
-Grades come only from things the agent cannot write: requests the fixture server recorded, truth
-from a site's own API, or the URL the browser ended on. See [docs/evals.md](docs/evals.md),
+Grades use recorded requests, API truth, final page state or captured quotes where the arm exposes them.
+Hosted Browser Use exposes answer text only, which is checked against task truth. See [docs/evals.md](docs/evals.md),
 [docs/design.md](docs/design.md), and [docs/jev.md](docs/jev.md) for every Jev assumption checked against
 Typesafe's documentation.
 

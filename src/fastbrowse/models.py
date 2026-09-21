@@ -26,12 +26,12 @@ class Status(StrEnum):
     """A bot check (a CAPTCHA, or a browser verification that never clears) stands in the way. Not a sign-in:
     no credential passes it, and a person is needed only if they choose to solve it."""
     NEEDS_INPUT = "needs_input"
-    """A field needs a value the caller did not supply and the LLM must not invent."""
+    """A required value or file is missing, or an upload exceeds the configured size limit."""
     STUCK = "stuck"
     """Recovery was exhausted without progress."""
     BUDGET_EXCEEDED = "budget_exceeded"
     OBSERVATION_LIMIT = "observation_limit"
-    """The page could not be represented within Jev's input limits even after reduction."""
+    """The page or requirement evidence could not fit the configured input budgets."""
     ERROR = "error"
 
 

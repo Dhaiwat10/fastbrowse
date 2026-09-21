@@ -8,9 +8,9 @@ signed into there once stays signed in. `--cloud-profile ID` is the same idea on
 starts with the cookies that profile holds. `--cloud` runs on a Browser Use Cloud browser (BROWSER_USE_API_KEY)
 and prints where to watch it live.
 Secrets come from `--secret NAME=ENV_VAR`, read from that variable, or `--bitwarden ITEM`, a vault login's
-`username` and `password`. Every secret is pinned to one origin and typed nowhere else, so the scope has to
-come from somewhere: `--secret NAME=ENV_VAR@https://host` states it, and otherwise it is the `--start` origin.
-A secret with neither is refused rather than offered to whatever the run happens to open.
+`username` and `password`. `--secret NAME=ENV_VAR@ORIGIN` declares an exact or wildcard origin; without it,
+the scope is the `--start` origin. A secret with neither is refused. Bitwarden matches the item against
+`--start` and limits its values to that origin.
 """
 
 import argparse
@@ -87,7 +87,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--cloud-profile", metavar="ID", default=None, help="a Browser Use Cloud profile to run signed in as"
     )
-    parser.add_argument("--authorize", action="store_true", help="allow submit/pay/delete/send without pausing")
+    parser.add_argument("--authorize", action="store_true", help="allow irreversible actions without confirmation")
     parser.add_argument(
         "--secret",
         action="append",
