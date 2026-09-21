@@ -593,7 +593,13 @@ class Agent:
         # steps that evidence nothing -- the requirement resolves on submit -- and counting those fired this
         # tripwire on every healthy contact-form run in the local suite. `progressed` is the same notion the
         # unchanged count already uses, so setup work is excluded by the definition already in the loop.
-        if not progressed:
+        if progressed:
+            # A step that got somewhere breaks the streak, the way it already resets `unchanged`. Without this
+            # the marks were append-only, so four scattered no-progress steps read as a stalled plan however
+            # much the run achieved between them -- and the successful read that resolved the LAST requirement
+            # still emitted the tripwire, because a productive step never touched the marks it would clear.
+            state.plan_marks.clear()
+        else:
             state.plan_marks.append(self._plan_mark(state))
         for tripped in self._tripwires(state):
             if tripped.tripwire is Tripwire.NO_PROGRESS or self._config.stall.tripwires is TripwireMode.ARMED:
