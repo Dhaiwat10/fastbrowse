@@ -25,7 +25,7 @@ from fastbrowse.agent import (
 from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation
-from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.memory import Fact, FactReader, Notes, evidence_id
 from fastbrowse.models import (
     Authorization,
     BrowserEvent,
@@ -36,11 +36,10 @@ from fastbrowse.models import (
     Status,
     StepEvent,
     StepOutcome,
-    StepResult,
 )
 from fastbrowse.page import Action, ActResult, BlockKind, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
-from fastbrowse.policy import Decision, HistoryEntry, decide
+from fastbrowse.policy import Decision, HistoryEntry, ReadAssessment, decide
 from fastbrowse.safety import ScopedSecrets
 from fastbrowse.telemetry import Ledger
 from fastbrowse.tripwires import Tripwire
@@ -306,37 +305,223 @@ def test_earlier_actions_stay_in_view_without_their_effects() -> None:
     assert _history(entries, ObservationLimits(history_entries=0, earlier_history_entries=0)) == ()
 
 
-@pytest.mark.parametrize(("typed", "reads"), [(True, 1), (False, 0)])
-async def test_the_results_of_a_typed_search_are_read_once_before_leaving(typed: bool, reads: int) -> None:
+@pytest.mark.parametrize("authorized", [False, True])
+@pytest.mark.parametrize("operation", [Operation.CLICK, Operation.FILL, Operation.SELECT])
+async def test_url_edits_are_not_reads_but_each_result_in_one_document_is_preserved(
+    authorized: bool, operation: Operation
+) -> None:
     state = await run_state()
+    state.authorization = Authorization(irreversible_actions=authorized)
     state.ready_plan = Plan(
-        requirements=(Requirement(id="r1", text="When was httpx released?", kind=RequirementKind.INFORMATION),),
+        requirements=(Requirement(id="r1", text="Compare both results", kind=RequirementKind.INFORMATION),),
         answer_expected=True,
     )
-    home, results = "https://example.test/", "https://example.test/search?q=httpx"
-    first = Operation.FILL if typed else Operation.CLICK
-    for operation, url in ((first, home), (Operation.ENTER, home), (Operation.FILL, results)):
-        state.steps.append(
-            StepResult(
-                index=len(state.steps),
-                operation=operation,
-                decided_by=Decider.JEV,
-                outcome=StepOutcome.EXECUTED,
-                url=url,
-                duration_ms=0,
-            )
-        )
-    agent = Agent(Mock(spec=Page), ScriptedJev({}), ScriptedLLM([]))
-    agent._capture = AsyncMock()
-    agent._read = AsyncMock(return_value=True)
-    button = Control(id="go", frame_id=None, role="button", label="Search", operations=frozenset({Operation.CLICK}))
-    obs = observation((button,)).model_copy(update={"url": results})
-    decision = await decide(ScriptedJev({"operation": "enter", "enter_target": "go"}), obs, context(), Config())
-    for _ in range(2):
-        state.read_here = False
-        await agent._read_before_leaving(state, obs, decision)
-    await asyncio.gather(*state.leaving)
-    assert agent._read.await_count == reads
+    control = field().model_copy(update={"operations": frozenset({operation})})
+    obs = observation((control,)).model_copy(update={"document_key": "same-document"})
+    page = Mock(spec=Page)
+    jev = ScriptedJev({"operation": operation.value, f"{operation.value}_target": control.id, "r1": "synthesis"})
+    llm = ScriptedLLM(
+        [
+            {"claims": [{"text": text, "source_id": "s0", "quote": text}], "answered": False}
+            for text in ("First result: 12", "Second result: 18")
+        ]
+    )
+    agent = Agent(page, jev, llm)
+    agent._action = AsyncMock(return_value=Action(operation=operation, target_id=control.id, text="new query"))
+    expected_quote = None
+
+    async def replace_content(*args: object) -> ActResult:
+        if expected_quote is not None:
+            assert expected_quote in [fact.evidence.quote for fact in state.notes.facts]
+        page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Editing")))
+        return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
+
+    page.act = AsyncMock(side_effect=replace_content)
+    decision = await decide(jev, obs, context(), Config())
+    for query in ("B", "Br", "Bristol"):
+        obs = obs.model_copy(update={"url": f"https://example.test/?q={query}"})
+        editing = decision.model_copy(update={"read_assessment": ReadAssessment.EDITING})
+        assert not await agent._read_before_interaction(state, obs, editing)
+        await agent._step(state, obs, editing)
+    page.capture.assert_not_called()
+    relevant = decision.model_copy(update={"read_assessment": ReadAssessment.EVIDENCE})
+    results_url = obs.url
+    for text in ("First result: 12", "Second result: 18"):
+        obs = obs.model_copy(update={"url": results_url})
+        page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, text)).model_copy(update={"url": obs.url}))
+        assert await agent._read_before_interaction(state, obs, relevant)
+        # Even a URL rewrite and another choice to READ cannot re-read this content and requirement set.
+        obs = obs.model_copy(update={"url": obs.url + "&view=compact"})
+        assert not await agent._read_before_interaction(state, obs, relevant)
+        assert not await agent._read(state, await agent._capture(), obs)
+        expected_quote = text
+        await agent._step(state, obs, decision)
+    assert [fact.evidence.quote for fact in state.notes.facts] == ["First result: 12", "Second result: 18"]
+    assert len(llm.calls) == 2
+    assert [fact.evidence.url for fact in state.notes.facts] == [results_url, results_url]
+    assert [step.operation for step in state.steps].count(Operation.READ) == 2
+    assert page.act.await_count == 5
+
+
+@pytest.mark.parametrize("assessment", [ReadAssessment.EVIDENCE, ReadAssessment.ABSENT])
+@pytest.mark.parametrize("role", ["button", "link"])
+async def test_a_message_is_read_before_mutation_and_the_next_action_is_reconsidered(
+    assessment: ReadAssessment, role: str
+) -> None:
+    message = "The account is locked out" if assessment is ReadAssessment.EVIDENCE else "Your preferences were saved"
+    control = _button("Continue").model_copy(update={"role": role})
+    obs = observation((control,)).model_copy(update={"viewport_text": message})
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Report why login failed", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=obs)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, message)))
+    page.artifacts = ()
+
+    async def remove_message(*args: object) -> ActResult:
+        page.observe.return_value = obs.model_copy(update={"viewport_text": ""})
+        return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
+
+    page.act = AsyncMock(side_effect=remove_message)
+
+    class MessageJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            # A preserved message makes the next decision DONE instead of the stale dismissal.
+            if "operation" in questions and isinstance(state, dict) and state.get("notes"):
+                self.pick = {"operation": "done"}
+            return await super().evaluate(state, questions)
+
+    jev = MessageJev(
+        {"operation": "click", "click_target": control.id, "read_assessment": assessment.value, "r1": "c0"},
+        noul=0.0,
+    )
+    agent = Agent(page, jev, ScriptedLLM([]))
+    # Stop at the next decision after the preservation, or immediately after an irrelevant message is removed.
+    state.ledger.limits = Limits(max_steps=1 if assessment is ReadAssessment.ABSENT else 2)
+    expected = agent._result(state, state.ledger, Status.COMPLETE)
+    agent._finish = AsyncMock(return_value=expected)
+    if assessment is ReadAssessment.EVIDENCE:
+        assert await agent._loop(state, None, None) is expected
+        assert state.notes.facts[0].evidence.quote == message
+        assert state.steps[0].operation is Operation.READ
+        page.act.assert_not_awaited()
+        agent._finish.assert_awaited_once()
+    else:
+        from fastbrowse.telemetry import BudgetExceeded
+
+        with pytest.raises(BudgetExceeded):
+            await agent._loop(state, None, None)
+        page.act.assert_awaited_once()
+        page.capture.assert_not_awaited()
+        assert not state.notes.facts
+
+
+async def test_unchanged_unsuccessful_preservation_does_not_loop_or_authorize_the_action() -> None:
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the total", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    button = _button("Place order")
+    obs = observation((button,))
+    page = Mock(spec=Page)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Pending total")))
+    llm = ScriptedLLM([{"claims": [], "answered": False}])
+    jev = ScriptedJev(
+        {"operation": "click", "click_target": button.id, "read_assessment": "evidence", "r1": "synthesis"}
+    )
+    decision = await decide(jev, obs, context(), Config())
+    agent = Agent(page, jev, llm)
+    assert await agent._read_before_interaction(state, obs, decision)
+    assert not await agent._read_before_interaction(state, obs, decision)
+    assert not await agent._read(state, await agent._capture(), obs)
+    assert len(llm.calls) == 1 and not state.notes.facts
+    with pytest.raises(_Stop) as stopped:
+        await agent._step(state, obs, decision)
+    assert stopped.value.status is Status.NEEDS_CONFIRMATION
+    page.act.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", [Operation.READ, Operation.DONE])
+async def test_an_exhausted_read_recovers_instead_of_repeating_even_when_jev_is_confident(operation: Operation) -> None:
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the total", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    more = _button("Show total")
+    obs = observation((more,))
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=obs)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Pending total")))
+    page.screenshot = AsyncMock(return_value=b"png")
+    page.artifacts = ()
+
+    async def show_total(*args: object) -> ActResult:
+        # The text changes without changing the URL or controls used by the action cycle detector.
+        page.capture.return_value = capture((BlockKind.PARAGRAPH, "Total: $12"))
+        return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
+
+    page.act = AsyncMock(side_effect=show_total)
+    contexts: list[JsonValue] = []
+
+    class ReadingJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            if "operation" in questions:
+                contexts.append(state)
+            return await super().evaluate(state, questions)
+
+    jev = ReadingJev({"operation": operation.value, "r1": "synthesis"}, noul=0.0)
+    llm = ScriptedLLM(
+        [
+            {"claims": [], "answered": False},
+            {
+                "diagnosis": "This content has no total; reading it again cannot supply one",
+                "next_subgoal": "Click Show total to load the missing evidence",
+                "operation": "click",
+                "control": 0,
+                "give_up": False,
+            },
+            {
+                "claims": [{"text": "Total: $12", "source_id": "s0", "quote": "Total: $12", "requirement_id": "r1"}],
+                "answered": True,
+            },
+        ]
+    )
+    agent = Agent(page, jev, llm)
+    finish = agent._finish
+
+    async def finish_when_evidenced(*args: object) -> agent_module.RunResult | None:
+        if state.notes.evidenced("r1"):
+            return agent._result(state, state.ledger, Status.COMPLETE)
+        return await finish(state, obs, None, None)
+
+    agent._finish = AsyncMock(side_effect=finish_when_evidenced)
+    result = await agent._loop(state, None, None)
+    assert result.status is Status.COMPLETE
+    page.act.assert_awaited_once()
+    assert state.recoveries == 1
+    assert [purpose for purpose, _ in llm.calls] == [LLMPurpose.READ, LLMPurpose.RECOVER, LLMPurpose.READ]
+    reads = [step for step in result.steps if step.operation is Operation.READ]
+    assert len(reads) == (3 if operation is Operation.READ else 2)
+    feedback = next(
+        entry.effect
+        for entry in state.history
+        if entry.operation is operation
+        and entry.effect
+        and (entry.outcome is StepOutcome.FAILED or entry.effect.startswith("Already read"))
+    )
+    assert "r1: Find the total" in feedback
+    assert "Re-reading this unchanged content will not supply it" in feedback
+    assert any(step.note == feedback for step in result.steps)
+    assert any(feedback in json.dumps(context) for context in contexts)
+    recovery = next(messages for purpose, messages in llm.calls if purpose is LLMPurpose.RECOVER)
+    assert feedback in recovery[-1].content
+    assert state.notes.facts[0].evidence.quote == "Total: $12"
 
 
 async def test_recovery_can_direct_a_read_with_no_control_to_name() -> None:
@@ -450,7 +635,8 @@ def test_the_verifier_cannot_hold_open_a_requirement_the_notes_cite(
         answer_expected=True,
     )
     notes = Notes(
-        Fact(requirement_id=r, text=r, evidence=evidence(start=i)) for i, r in enumerate(("httpx", "compare"))
+        Fact(reader=FactReader.LLM, requirement_id=r, text=r, evidence=evidence(start=i))
+        for i, r in enumerate(("httpx", "compare"))
     )
     assert _verified(LLMVerdict(complete=complete, missing=missing), plan, notes) is accepted
 
@@ -709,9 +895,9 @@ def test_a_plan_is_answered_when_what_it_asks_to_find_is_evidenced_whatever_acti
     )
     notes = Notes()
     assert not _answered(plan, notes)
-    notes.add(Fact(requirement_id="r1", text="20 books", evidence=evidence(start=0, end=4)))
+    notes.add(Fact(reader=FactReader.LLM, requirement_id="r1", text="20 books", evidence=evidence(start=0, end=4)))
     assert not _answered(plan, notes)
-    notes.add(Fact(requirement_id="r3", text="20 books", evidence=evidence(start=10, end=14)))
+    notes.add(Fact(reader=FactReader.LLM, requirement_id="r3", text="20 books", evidence=evidence(start=10, end=14)))
     assert _answered(plan, notes)
 
 
@@ -742,8 +928,8 @@ async def test_a_composed_answer_that_fails_its_check_falls_back_to_the_readers_
         answer_expected=True,
     )
     first, second = evidence(start=0, end=4), evidence(start=10, end=14)
-    state.notes.add(Fact(requirement_id="r1", text="Book A is listed", evidence=first))
-    state.notes.add(Fact(requirement_id="r1", text="Book B is listed", evidence=second))
+    state.notes.add(Fact(reader=FactReader.LLM, requirement_id="r1", text="Book A is listed", evidence=first))
+    state.notes.add(Fact(reader=FactReader.LLM, requirement_id="r1", text="Book B is listed", evidence=second))
     whole: JsonValue = {"claims": [{"text": "WHOLE LIST: Book A and Book B", "evidence_ids": [evidence_id(first)]}]}
     agent = Agent(Mock(spec=Page), DoubtingJev({}), ScriptedLLM([whole]))
 
@@ -923,3 +1109,22 @@ def test_a_secret_is_compared_by_the_length_the_page_reveals() -> None:
 def test_an_upload_is_judged_by_the_page_not_by_a_value() -> None:
     """A file input's value is not the file, so every upload after the first read as the same nothing."""
     assert Agent._edit_progress(*edit("a.pdf", holds=None, operation=Operation.UPLOAD)) is None
+
+
+async def test_same_text_can_be_read_for_a_new_document_or_new_requirement() -> None:
+    state = await run_state()
+    requirement = Requirement(id="r1", text="Find the total", kind=RequirementKind.INFORMATION)
+    state.ready_plan = Plan(requirements=(requirement,), answer_expected=True)
+    obs = observation(()).model_copy(update={"document_key": "document-a"})
+    page = capture((BlockKind.PARAGRAPH, "Waiting for a result"))
+    llm = ScriptedLLM([{"claims": [], "answered": False}] * 3)
+    agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "synthesis", "r2": "synthesis"}), llm)
+    assert not await agent._read(state, page, obs)
+    assert not await agent._read(state, page, obs)
+    assert len(llm.calls) == 1
+    obs = obs.model_copy(update={"document_key": "document-b"})
+    assert not await agent._read(state, page, obs)
+    assert len(llm.calls) == 2
+    state.ready_plan = Plan(requirements=(requirement.model_copy(update={"id": "r2"}),), answer_expected=True)
+    assert not await agent._read(state, page, obs)
+    assert len(llm.calls) == 3

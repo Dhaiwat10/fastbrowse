@@ -19,7 +19,7 @@ from fastbrowse.jev import (
     Question,
 )
 from fastbrowse.llm import DEFAULT_MAX_OUTPUT_TOKENS, Generation, Message
-from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.memory import Fact, FactReader, Notes, evidence_id
 from fastbrowse.models import CostBasis, CostComponent, CostLine, Frozen, Limits, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
@@ -254,10 +254,13 @@ async def test_short_read_batches_requirements_and_keeps_citations_without_llm()
     for requirement, fact, quote in zip(requirements, result.facts, ("httpx 0.28.1", "License: BSD"), strict=True):
         assert notes.evidenced(requirement.id)
         assert fact.text == f"{requirement.text}\n{quote}"
+        assert fact.reader is FactReader.JEV_CHOICE
         assert fact.evidence == locate_quote(page, fact.evidence.source_id, quote)
     _, questions = jev.requests[0]
     assert questions.keys() == {"version", "license"}
-    assert all(isinstance(q, ChoiceQuestion) and "none" in q.criteria for q in questions.values())
+    assert all(
+        isinstance(q, ChoiceQuestion) and {"synthesis", "absent"} <= q.criteria.keys() for q in questions.values()
+    )
     assert all("untrusted data" in q.instructions for q in questions.values())
     draft = draft_answer(Plan(requirements=requirements, answer_expected=True), notes)
     assert draft is not None and len(draft.claims) == 2
@@ -266,7 +269,7 @@ async def test_short_read_batches_requirements_and_keeps_citations_without_llm()
 
 
 @pytest.mark.parametrize(
-    "answer", [_choice("c1", 0.89), _choice("none"), _choice("invented"), NoulAnswer(probability=1), None]
+    "answer", [_choice("c1", 0.89), _choice("synthesis"), _choice("invented"), NoulAnswer(probability=1), None]
 )
 async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer: Answer | None) -> None:
     page = capture((BlockKind.PARAGRAPH, "Version: 1.2.3"), (BlockKind.PARAGRAPH, "License: MIT"))
@@ -298,7 +301,10 @@ async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer:
         ledger=ledger,
     )
     assert len(jev.requests) == 1 and len(llm.calls) == 1
-    assert "# Question\n- Find the license name\n\n# Requirement ids\nlicense\n" in llm.calls[0][1][-1].content
+    request = llm.calls[0][1][-1].content
+    assert "# Question\nFind version and license" in request
+    assert "Read only these remaining requirements:\n- license: Find the license name\n\n" in request
+    assert "# Requirement ids\nlicense\n" in request
     assert all(notes.evidenced(r.id) for r in requirements)
     assert [fact.evidence.quote for fact in result.facts] == ["Version: 1.2.3", "License: MIT"]
     assert [cost.component for cost in result.cost_lines] == [CostComponent.JEV, CostComponent.LLM]
@@ -308,18 +314,19 @@ async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer:
 @pytest.mark.parametrize(
     "text", ["List the cities", "Compare the cities", "Summarize the cities", "Count all cities on the page"]
 )
-async def test_synthesis_has_an_explicit_none_route_to_the_reader(text: str) -> None:
+async def test_synthesis_has_an_explicit_route_to_the_reader(text: str) -> None:
     page = capture((BlockKind.PARAGRAPH, "Lyon"))
     requirement = Requirement(id="r", text=text, kind=RequirementKind.INFORMATION)
-    jev, llm = _ReadJev({"r": _choice("none")}), ScriptedLLM([{"claims": [], "answered": False}])
+    jev, llm = _ReadJev({"r": _choice("synthesis")}), ScriptedLLM([{"claims": [], "answered": False}])
     await read(llm, page, text, ["r"], Notes(), jev=jev, requirements=(requirement,))
     question = jev.requests[0][1]["r"]
     assert isinstance(question, ChoiceQuestion)
     assert all(
         word in question.instructions for word in ("lists", "comparisons", "summaries", "counts across the page")
     )
-    assert text in question.instructions and "synthesis" in str(question.criteria["none"])
-    assert len(llm.calls) == 1 and f"# Question\n- {text}" in llm.calls[0][1][-1].content
+    assert text in question.instructions and "LLM reader" in str(question.criteria["synthesis"])
+    assert len(llm.calls) == 1 and f"# Question\n{text}" in llm.calls[0][1][-1].content
+    assert f"- r: {text}" in llm.calls[0][1][-1].content
 
 
 def test_short_read_spans_keep_dates_versions_and_table_context_grounded() -> None:
@@ -376,7 +383,7 @@ async def test_choice_sees_unoffered_passages_or_defers_to_chunked_reader(repeti
     passage = "This newer release has a long description " * 10 * repetitions
     page = capture((BlockKind.PARAGRAPH, "Old version: 1.0"), (BlockKind.PARAGRAPH, passage))
     requirement = Requirement(id="r", text="Find the latest version", kind=RequirementKind.INFORMATION)
-    jev = _ReadJev({"r": _choice("none")})
+    jev = _ReadJev({"r": _choice("synthesis")})
     response: JsonValue = {"claims": [], "answered": False}
     llm = ScriptedLLM([response, response])
     await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,))
@@ -436,7 +443,7 @@ async def test_compose_drops_uncited_and_unknown_claims_including_answer_text() 
     page = capture((BlockKind.PARAGRAPH, "Price is $12"))
     evidence = locate_quote(page, "s0", "Price is $12")
     assert evidence is not None
-    notes = Notes((Fact(requirement_id="r1", text="Price is $12", evidence=evidence),))
+    notes = Notes((Fact(reader=FactReader.LLM, requirement_id="r1", text="Price is $12", evidence=evidence),))
     key = evidence_id(evidence)
     llm = ScriptedLLM(
         [
@@ -514,7 +521,7 @@ async def test_a_text_field_off_the_final_page_is_taken_from_a_note_that_quotes_
     earlier = capture((BlockKind.PARAGRAPH, "requests 2.33.0 released May 14, 2026"))
     quote = locate_quote(earlier, "s0", "requests 2.33.0 released May 14, 2026")
     assert quote is not None
-    notes = Notes((Fact(text="requests was released on May 14, 2026", evidence=quote),))
+    notes = Notes((Fact(reader=FactReader.LLM, text="requests was released on May 14, 2026", evidence=quote),))
     key = next(iter(notes.evidence))
     llm = ScriptedLLM(
         [
@@ -536,7 +543,7 @@ async def test_a_name_the_task_gives_can_be_chosen_on_a_note_that_quotes_only_a_
     earlier = capture((BlockKind.PARAGRAPH, "May 14, 2026"))
     quote = locate_quote(earlier, "s0", "May 14, 2026")
     assert quote is not None
-    notes = Notes((Fact(text="requests: May 14, 2026", evidence=quote),))
+    notes = Notes((Fact(reader=FactReader.LLM, text="requests: May 14, 2026", evidence=quote),))
     key = next(iter(notes.evidence))
     proposal: dict[str, JsonValue] = {"field": "label", "value": "requests", "source_id": key, "quote": quote.quote}
     fields = {"label": Fields.model_fields["label"]}
@@ -629,7 +636,7 @@ async def test_only_a_confident_jev_no_lets_the_read_facts_stand_as_the_answer(
     page = capture((BlockKind.PARAGRAPH, "Price is $12"))
     evidence = locate_quote(page, "s0", "Price is $12")
     assert evidence is not None
-    notes = Notes((Fact(requirement_id="r1", text="The price is $12.", evidence=evidence),))
+    notes = Notes((Fact(reader=FactReader.LLM, requirement_id="r1", text="The price is $12.", evidence=evidence),))
     plan = Plan(
         requirements=(Requirement(id="r1", text="Find price", kind=RequirementKind.INFORMATION),),
         answer_expected=True,
@@ -721,7 +728,7 @@ async def test_pruning_the_only_claim_for_a_requirement_is_an_omission() -> None
             end=start + len(quote),
             quote=quote,
         )
-        return Fact(requirement_id=requirement, text=quote, evidence=evidence)
+        return Fact(reader=FactReader.LLM, requirement_id=requirement, text=quote, evidence=evidence)
 
     notes = Notes((fact("r1", 0, "A Year in Provence"), fact("r2", 40, "£56.88")))
     requirements = (
@@ -833,3 +840,96 @@ async def test_a_later_chunk_is_read_against_what_earlier_chunks_of_the_page_fou
     await read(llm, page, "How many Einstein quotes?", ["r1"], Notes())
     later = llm.calls[1][1][-1].content
     assert "the world as we have created it" in later, "chunk two cannot count what chunk one found unseen"
+
+
+@pytest.mark.parametrize("confidence", [0.89, 0.95])
+async def test_only_confident_absence_skips_the_llm_without_evidencing_a_requirement(
+    confidence: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    page = capture((BlockKind.PARAGRAPH, "Set a destination"))
+    requirement = Requirement(id="r", text="Find the submitted fare", kind=RequirementKind.INFORMATION)
+    jev = _ReadJev({"r": _choice("absent", confidence)})
+    llm, notes = ScriptedLLM([{"claims": [], "answered": False}]), Notes()
+    with caplog.at_level("DEBUG", logger="fastbrowse.retrieval"):
+        outcome = await read(llm, page, requirement.text, ["r"], notes, jev=jev, requirements=(requirement,))
+    assert len(llm.calls) == (confidence < 0.90)
+    assert not notes.evidenced("r") and not outcome.facts
+    assert ("reason=absent" in caplog.text) == (confidence >= 0.90)
+    assert page.text not in caplog.text
+
+
+async def test_mixed_read_routes_keep_provenance_and_narrow_the_llm_request() -> None:
+    page = capture((BlockKind.PARAGRAPH, "Version 1.2.3"), (BlockKind.PARAGRAPH, "One\n\tTwo"))
+    requirements = tuple(
+        Requirement(id=key, text=text, kind=RequirementKind.INFORMATION)
+        for key, text in (("version", "Version"), ("names", "List the names"), ("fare", "Find the fare"))
+    )
+    jev = _ReadJev({"version": _choice("c0"), "names": _choice("synthesis"), "fare": _choice("absent")})
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [{"requirement_id": "names", "text": "One and Two", "source_id": "s1", "quote": "One Two"}],
+                "answered": True,
+            }
+        ]
+    )
+    notes = Notes()
+    result = await read(llm, page, "Read all", [r.id for r in requirements], notes, jev=jev, requirements=requirements)
+    assert [fact.reader for fact in result.facts] == [FactReader.JEV_CHOICE, FactReader.LLM]
+    assert [fact.evidence.quote for fact in notes.facts] == ["Version 1.2.3", "One\n\tTwo"]
+    assert all(fact.evidence.url == page.url for fact in notes.facts)
+    assert not notes.evidenced("fare")
+    assert notes.evidenced("version") and notes.evidenced("names")
+    request = llm.calls[0][1][-1].content
+    assert "# Requirement ids\nnames\n" in request
+    assert "Version 1.2.3" in request.split("# Collected evidence\n")[1]
+
+
+@pytest.mark.parametrize("reader", list(FactReader))
+async def test_both_readers_verify_quotes_at_the_notes_write_and_log_bounded_rejections(
+    reader: FactReader, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from fastbrowse import retrieval
+
+    page = capture((BlockKind.PARAGRAPH, "The only page text"))
+    rejected = "unverified " * retrieval._READ_SPAN_CHARS
+    requirement = Requirement(id="r", text="Find the fact", kind=RequirementKind.INFORMATION)
+    if reader is FactReader.JEV_CHOICE:
+        candidate = read_candidates(page)[0]
+        # A malformed candidate must not bypass the same quote check used for generated claims.
+        bad = candidate.model_copy(update={"evidence": candidate.evidence.model_copy(update={"quote": rejected})})
+        monkeypatch.setattr(retrieval, "read_candidates", lambda _: (bad,))
+        jev = _ReadJev({"r": _choice(candidate.id)})
+        llm = ScriptedLLM([{"claims": [], "answered": False}])
+    else:
+        jev = None
+        llm = ScriptedLLM(
+            [
+                {
+                    "claims": [{"requirement_id": "r", "text": "Invented", "source_id": "s0", "quote": rejected}],
+                    "answered": True,
+                }
+            ]
+        )
+    notes = Notes()
+    with caplog.at_level("DEBUG", logger="fastbrowse.retrieval"):
+        result = await read(llm, page, requirement.text, ["r"], notes, jev=jev, requirements=(requirement,))
+    assert result.rejected_quotes == 1 and not notes.facts
+    record = next(record for record in caplog.records if "rejected quote" in record.message)
+    assert record.args == (reader.value, rejected[: retrieval._READ_SPAN_CHARS])
+    assert page.text not in caplog.text and rejected not in caplog.text
+
+
+@pytest.mark.parametrize("count", [MAX_CHOICE_OPTIONS - 2, MAX_CHOICE_OPTIONS - 1])
+async def test_short_read_leaves_room_for_both_non_candidate_choices(count: int) -> None:
+    page = capture(*((BlockKind.PARAGRAPH, f"Candidate {i}") for i in range(count)))
+    requirement = Requirement(id="r", text="Find the price", kind=RequirementKind.INFORMATION)
+    jev = _ReadJev({"r": _choice("absent")})
+    llm = ScriptedLLM([{"claims": [], "answered": False}])
+    await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,))
+    if count == MAX_CHOICE_OPTIONS - 2:
+        question = jev.requests[0][1]["r"]
+        assert isinstance(question, ChoiceQuestion) and len(question.criteria) == MAX_CHOICE_OPTIONS
+        assert not llm.calls
+    else:
+        assert not jev.requests and len(llm.calls) == 1

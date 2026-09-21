@@ -7,7 +7,7 @@ from pydantic import JsonValue
 
 from fastbrowse.config import Config, Thresholds, TokenBudget
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, Question
-from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.memory import Fact, FactReader, Notes, evidence_id
 from fastbrowse.models import CostBasis, CostComponent, CostLine
 from fastbrowse.page import Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
@@ -71,9 +71,12 @@ async def test_a_task_with_nothing_to_do_keeps_the_verifier() -> None:
 @pytest.mark.parametrize(("largest", "total"), [(1500, 5000), (5000, 1500)])
 async def test_verdict_prompts_keep_late_requirement_evidence_when_notes_overflow(largest: int, total: int) -> None:
     tokens = TokenBudget(state_plus_largest_question=largest, state_plus_all_questions=total)
-    notes = Notes(Fact(text="Background " * 100, evidence=evidence(sha=f"context-{i}")) for i in range(20))
+    notes = Notes(
+        Fact(reader=FactReader.LLM, text="Background " * 100, evidence=evidence(sha=f"context-{i}")) for i in range(20)
+    )
     total_text = "Checkout total is $42"
     late = Fact(
+        reader=FactReader.LLM,
         requirement_id="r1",
         text=total_text,
         evidence=evidence(sha="late", end=len(total_text)).model_copy(update={"quote": total_text}),

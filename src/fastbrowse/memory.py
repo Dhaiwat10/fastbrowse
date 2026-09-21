@@ -2,15 +2,23 @@
 
 import json
 from collections.abc import Iterable
+from enum import StrEnum
 
 from fastbrowse.models import Evidence, Frozen
 from fastbrowse.planner import Plan, Requirement
+
+
+class FactReader(StrEnum):
+    JEV_CHOICE = "jev_choice"
+    LLM = "llm"
 
 
 class Fact(Frozen):
     requirement_id: str | None = None
     text: str
     evidence: Evidence
+    reader: FactReader
+    """Which reader verified the quote; citations are built from it."""
 
 
 class NotesTooLarge(RuntimeError):
