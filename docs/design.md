@@ -55,7 +55,8 @@ when there is room for one; an excerpt too small to carry the marker is empty.
 Only visible effects or added evidence count as progress. Rewriting the value already in the observed
 field cannot count, even when it opens an autocomplete popup. `StallRules` checks lack of progress,
 repeated interactions and consecutive unproductive steps with the same unresolved requirements.
-The latter two log in `shadow` mode by default; `armed` mode sends them to recovery. A productive step
+The latter two are recorded in `RunResult.would_fire` in `shadow` mode, the default; `armed` mode sends
+them to recovery. A productive step
 clears the plan-stagnation streak, and recovery resets the evidence used by all three checks.
 
 ## Run events and images
