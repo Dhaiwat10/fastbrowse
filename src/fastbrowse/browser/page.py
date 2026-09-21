@@ -126,6 +126,10 @@ _BLOCK_KIND = {
 _SETTLE_SECONDS = 5.0
 _SETTLE_POLL_SECONDS = 0.1
 _SETTLE_QUIET_SECONDS = 0.2
+# A visible loading indicator outranks a quiet DOM, because a spinner settles the fingerprint while the page it
+# is waiting for does not exist yet. Its own budget, inside `_SETTLE_SECONDS`, is what keeps a page that spins
+# forever from paying the whole settle budget on every action: past it, quiet and ready decide alone.
+_SETTLE_LOADING_SECONDS = 1.5
 _SCREENSHOT_WAIT_SECONDS = 1.0
 _NAVIGATE_ATTEMPTS = 2
 _NAVIGATE_RETRY_SECONDS = 1.0
@@ -910,12 +914,16 @@ class CdpPage(Page):
             self._session.active_session_id,
             f"new Promise(resolve => {{ const sample = {_PAGE_JS}; "
             f"const deadline = performance.now() + {timeout_seconds * 1000}; "
+            f"const spinning = performance.now() + {_SETTLE_LOADING_SECONDS * 1000}; "
             "const poll = () => { "
             "const state = sample('fingerprint'); "
-            f"const stable = state.ready && state.quietFor >= {_SETTLE_QUIET_SECONDS * 1000}; "
+            f"const quiet = state.ready && state.quietFor >= {_SETTLE_QUIET_SECONDS * 1000}; "
+            "const stable = quiet && (!state.loading || performance.now() >= spinning); "
             "if (stable || state.hidden || performance.now() >= deadline) { "
             "resolve([stable, state.ready ? state.fingerprint : null]); return; } "
-            f"setTimeout(poll, state.ready ? Math.min({_SETTLE_POLL_SECONDS * 1000}, "
+            # Quiet but still spinning polls at the plain interval: sampling costs a walk of the document, so
+            # aiming at the moment quiet arrives would busy-poll once quiet has already arrived.
+            f"setTimeout(poll, state.ready && !quiet ? Math.min({_SETTLE_POLL_SECONDS * 1000}, "
             f"Math.max(1, {_SETTLE_QUIET_SECONDS * 1000} - state.quietFor)) "
             f": {_SETTLE_POLL_SECONDS * 1000}); }}; "
             # Wait for one rendered frame first: a menu shown in an animation frame callback mutates only when that

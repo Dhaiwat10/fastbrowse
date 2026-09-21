@@ -4,6 +4,13 @@
 // open shadow roots. Runs once per frame session (main frame or an OOPIF); the Python side merges frames.
 (mode => {
   const registry = window.__fastbrowse ||= { ids: new WeakMap(), nodes: new Map(), next: 1 };
+  // A visible loading indicator means the page is still fetching what it will draw, which network idle and a
+  // quiet DOM both report as settled: a spinner mutates nothing while it spins. Named classes are a heuristic
+  // and deliberately so -- the wait on them is bounded and expires into proceeding, so a false match costs
+  // time and never correctness. Hidden indicators are ignored because most pages keep one in the DOM always.
+  const LOADING = '[aria-busy="true"],[role="progressbar"],progress:not([value]),' +
+    ['spinner', 'loading', 'loader', 'skeleton', 'shimmer']
+      .flatMap(name => [`[class*="${name}" i]`, `[id*="${name}" i]`]).join(',');
   if (!registry.track) {
     const roots = new WeakSet();
     const changed = () => { registry.lastMutation = performance.now(); };
@@ -20,8 +27,11 @@
   }
   if (mode === 'fingerprint') {
     let hash = 2166136261;
+    let loading = false;
     const include = root => {
       registry.track(root);
+      loading ||= [...root.querySelectorAll(LOADING)].some(e => e.checkVisibility({ checkOpacity: true,
+        checkVisibilityCSS: true }));
       const text = root.body?.innerText ?? root.textContent ?? '';
       for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
       // innerText omits shadow trees and child documents even when their content is visible.
@@ -40,6 +50,7 @@
       ready: document.readyState === 'interactive' || document.readyState === 'complete',
       quietFor: performance.now() - registry.lastMutation,
       hidden: document.hidden,
+      loading,
     };
   }
   if (!document.body) return null;
