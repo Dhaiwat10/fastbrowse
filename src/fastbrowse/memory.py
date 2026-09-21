@@ -69,8 +69,13 @@ class Notes:
         return tuple((key, self._facts[key]) for key, ids in self._requirements.items() if requirement_id in ids)
 
     def expand_evidence_ids(self, keys: Iterable[str]) -> tuple[str, ...]:
-        """Cited facts and their transitive basis, once each in read order."""
-        pending = list(keys)
+        """Cited facts and their transitive basis, once each in read order.
+
+        An id no fact has is kept, after the known ones: dropping it would pass a claim whose citation the claim
+        check must see fail.
+        """
+        cited = tuple(dict.fromkeys(keys))
+        pending = list(cited)
         seen: set[str] = set()
         while pending:
             key = pending.pop()
@@ -79,7 +84,7 @@ class Notes:
             seen.add(key)
             if key in self._facts:
                 pending.extend(self._facts[key].basis)
-        return tuple(key for key in self._facts if key in seen)
+        return (*(key for key in self._facts if key in seen), *(key for key in cited if key not in self._facts))
 
     def unresolved(self, plan: Plan) -> tuple[Requirement, ...]:
         return tuple(requirement for requirement in plan.requirements if not self.evidenced(requirement.id))

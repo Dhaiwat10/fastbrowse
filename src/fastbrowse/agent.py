@@ -375,11 +375,18 @@ class Agent:
                 read_key = _read_key(state, observation, capture)
                 exhausted = read_key in state.reads
             deferred, state.deferred = state.deferred, None
-            if deferred is not None and exhausted and decision.operation is Operation.READ and read_key == deferred[0]:
+            if (
+                deferred is not None
+                and exhausted
+                and decision.operation is Operation.READ
+                and read_key == deferred[0]
+                and (deferred[1].target is None or deferred[1].target in observation.controls)
+            ):
                 # Asked again after the forced read, Jev chose to read the list it had just read: on Flights the
                 # unfiltered list could not show the cheapest nonstop fare, the skipped re-read ended the run stuck,
                 # and the "Nonstop" filter it had chosen was never applied. Nothing on the page changed, so the
-                # interaction still applies to it.
+                # interaction still applies to it; its control must be unchanged too, or authorization would judge
+                # a button whose label changed under it ("Preview" become "Send") by its old label.
                 decision = deferred[1]
                 uncertain = decision.confidence < self._config.thresholds.recover_below
             attempted = state.attempts.get(_signature(decision, observation, read_key))
@@ -1475,27 +1482,28 @@ class Agent:
             prepared = None
         facts = draft_answer(state.plan, state.notes)
         try:
-            composed = await (
-                prepared
-                if prepared is not None
-                else compose(
-                    self._llm, state.task, state.plan, state.notes, tokens=self._config.tokens, ledger=state.ledger
+            composed = (
+                await (
+                    prepared
+                    if prepared is not None
+                    else compose(
+                        self._llm, state.task, state.plan, state.notes, tokens=self._config.tokens, ledger=state.ledger
+                    )
                 )
-            )
+            ).data
         except LLMError:
             # A composer that fails (one looped to its output cap) leaves the reader's facts, each with its quote,
             # which is an answer the claim check can still pass; failing the run over it threw away read evidence.
             if facts is None:
                 raise
             logger.warning("The composer failed; offering the reader's facts to the claim check", exc_info=True)
-            held = await self._holds(state, facts)
-            return held or facts, held is not None
-        held = await self._holds(state, composed.data)
+            composed, facts = facts, None
+        held = await self._holds(state, composed)
         if held is None and facts is not None:
             # A list of forty records came back as one claim citing one quote, which no claim check should pass. The
             # reader's own facts each carry the quote that shows them, so they are offered to the same check.
             held = await self._holds(state, facts)
-        return held or composed.data, held is not None
+        return held or composed, held is not None
 
     async def _holds(self, state: _RunState, answer: ComposedAnswer) -> ComposedAnswer | None:
         return await check_claims(

@@ -497,6 +497,42 @@ async def test_after_a_forced_read_jev_decides_again_but_a_repeat_read_takes_the
     assert state.steps[1].target == expected.label
 
 
+async def test_a_deferred_interaction_is_not_replayed_on_a_control_that_changed_during_the_read() -> None:
+    fare = "Oslo to Rome, 1 stop, $320"
+    preview = _button("Preview draft")
+    obs = observation((preview,)).model_copy(update={"viewport_text": fare})
+    relabelled = obs.model_copy(update={"controls": (preview.model_copy(update={"label": "Send message"}),)})
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the cheapest nonstop fare", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(side_effect=[obs, relabelled, relabelled])
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, fare)))
+    page.screenshot = AsyncMock(return_value=b"")
+    page.artifacts = ()
+
+    class RereadingJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            if "operation" in questions and isinstance(state, dict) and state.get("notes"):
+                self.pick = {"operation": "read", "read_assessment": "evidence", "r1": "synthesis"}
+            return await super().evaluate(state, questions)
+
+    jev = RereadingJev(
+        {"operation": "click", "click_target": preview.id, "read_assessment": "evidence", "r1": "synthesis"},
+        noul=0.0,
+    )
+    llm = ScriptedLLM([{"claims": [{"text": fare, "source_id": "s0", "quote": fare}], "answered": False}])
+    agent = Agent(page, jev, llm)
+    agent._recover = AsyncMock(side_effect=_Stop(Status.STUCK, "recovering"))
+    agent._finish = AsyncMock(side_effect=_Stop(Status.STUCK, "finishing"))
+    with pytest.raises(_Stop):
+        await agent._loop(state, None, None)
+    page.act.assert_not_called()
+    assert Operation.CLICK not in [step.operation for step in state.steps]
+
+
 async def test_unchanged_unsuccessful_preservation_does_not_loop_or_authorize_the_action() -> None:
     state = await run_state()
     state.ready_plan = Plan(
