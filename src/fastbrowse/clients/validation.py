@@ -126,12 +126,15 @@ def describe(response: httpx.Response) -> str:
         return f"HTTP {response.status_code}: {body_excerpt(response) or '(empty body)'}"
     kind = _field(body, "error", "type")
     upstream = _field(body, "providerMetadata", "gateway", "routing", "resolvedProvider")
-    text = f"HTTP {response.status_code}{f' {kind}' if isinstance(kind, str) else ''}: {message[:300]}"
-    return _scrubbed(response, text + (f" (via {upstream})" if isinstance(upstream, str) else ""))
+    # Scrubbed before it is cut: a cut through an echoed key leaves a fragment no exact replacement matches.
+    text = f"HTTP {response.status_code}{f' {kind}' if isinstance(kind, str) else ''}: "
+    text += _scrubbed(response, message)[:300] + (f" (via {upstream})" if isinstance(upstream, str) else "")
+    return _scrubbed(response, text)
 
 
 def response_error(response: httpx.Response, detail: str) -> JevError:
-    return JevError(f"{detail[:300]}; {describe(response)}")
+    # `detail` can quote the body, as a validation error's input does.
+    return JevError(f"{_scrubbed(response, detail)[:300]}; {describe(response)}")
 
 
 RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0, 8.0, 8.0)

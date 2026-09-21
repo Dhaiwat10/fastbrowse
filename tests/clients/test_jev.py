@@ -1,5 +1,5 @@
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import httpx
 import pytest
@@ -316,3 +316,28 @@ async def test_a_choice_one_rounding_unit_below_the_top_is_accepted() -> None:
         evaluation = await TypeSafeJevClient("key", http=http).evaluate("state", {"q": choice()})
     result = evaluation.answers["q"]
     assert isinstance(result, ChoiceAnswer) and result.choice == "red"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # An echoed key straddling where the message is cut.
+        lambda key: (401, {"error": {"type": "auth", "message": "x" * 270 + f" bad key {key}"}}),
+        # A body that fails validation: the error quotes the value it rejected.
+        lambda key: (
+            200,
+            {
+                "answers": {},
+                "usage": {"inputTokens": 1, "outputTokens": 1},
+                "providerMetadata": {"gateway": {"cost": key}},
+            },
+        ),
+    ],
+)
+async def test_an_echoed_key_never_reaches_the_error(body: Callable[[str], tuple[int, JsonValue]]) -> None:
+    key = "sk-" + "a1b2c3d4" * 6
+    status, payload = body(key)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(status, json=payload))) as http:
+        with pytest.raises(JevError) as error:
+            await VercelGatewayJevClient(key, http=http).evaluate("state", {"q": choice()})
+    assert "a1b2c3d4a1b2" not in str(error.value)
