@@ -1131,6 +1131,29 @@ async def test_a_bot_check_stops_the_run_even_where_a_secret_is_held_for_the_sit
     assert "login_required" not in asked
 
 
+async def test_a_decision_dropped_for_a_redraw_still_asks_the_bot_check_again() -> None:
+    captcha = _at("https://shop.test/login", _button("Verify you are human"))
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=captcha)
+    page.redrawn = AsyncMock(side_effect=[True, False])
+    page.artifacts = ()
+
+    class SlowFirstJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            if not self.requests:
+                await asyncio.sleep(0.1)  # still deciding when the redraw is seen
+            return await super().evaluate(state, questions)
+
+    jev = SlowFirstJev({}, noul=0.9)
+    agent = Agent(page, jev, ScriptedLLM([{"requirements": [], "answer_expected": False}]))
+    agent._outwait = AsyncMock(return_value=False)
+
+    result = await agent.run("Open my orders", limits=Limits(max_steps=3))
+
+    assert result.status is Status.BLOCKED
+    assert all("bot_check" in asked for asked in jev.requests)
+
+
 @pytest.mark.parametrize(
     ("proposed", "opened"),
     [

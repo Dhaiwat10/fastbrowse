@@ -356,12 +356,13 @@ class Agent:
             # bot check is asked on every page a secret covers too.
             fresh = page != state.last_page
             context = self._context(state, secrets, check_login=fresh and not secrets, check_bot=fresh)
-            state.last_page = page
             decision = await self._unless_redrawn(
                 state, decide(self._jev, observation, context, self._config, ledger=state.ledger), observation, None
             )
             if decision is None:
                 continue
+            # Only an answered decision has asked the page's sign-in and bot questions; a dropped one asked nothing.
+            state.last_page = page
             bot_check = (decision.bot_check or 0.0) > self._config.thresholds.bot_check_above
             if bot_check or (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
                 # A wall offering nothing to act on cannot be signed into. It is a bot check such as PyPI's
@@ -471,29 +472,23 @@ class Agent:
         Watching while Jev decides and gates drops the work as soon as it is doomed, and the next decision is made
         on the settled page. Only one drop per action: a control that never stops changing is still acted on.
         """
+        if state.redecided:
+            return await work
         working = asyncio.create_task(work)
-        watching = (
-            None
-            if state.redecided
-            else asyncio.create_task(
-                self._page.redrawn(
-                    self._raw_observation or observation,
-                    _REDRAW_WATCH_SECONDS,
-                    target_id=target.id if target else None,
-                )
+        watching = asyncio.create_task(
+            self._page.redrawn(
+                self._raw_observation or observation, _REDRAW_WATCH_SECONDS, target_id=target.id if target else None
             )
         )
         try:
-            if watching is not None:
-                await asyncio.wait({working, watching}, return_when=asyncio.FIRST_COMPLETED)
-                if not working.done() and watching.result():
-                    trace("redecide", url=self._redactor.redact(observation.url))
-                    state.redecided = True
-                    return None
+            await asyncio.wait({working, watching}, return_when=asyncio.FIRST_COMPLETED)
+            if not working.done() and watching.result():
+                trace("redecide", url=self._redactor.redact(observation.url))
+                state.redecided = True
+                return None
             return await working
         finally:
-            if watching is not None:
-                await _discard(watching)
+            await _discard(watching)
             await _discard(working)
 
     async def _first_page(self, task: str, ledger: Ledger) -> str:
