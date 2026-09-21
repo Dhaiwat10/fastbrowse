@@ -16,6 +16,8 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   the page (a table cell's `|`, a record quoted as two lines). A count or winner the page never states
   cites no text: it is kept as a derived fact, and the claim check judges it from the records it counts.
   `StepFact.quote`, `url` and `deep_link` are `None` for such a fact.
+- **A card or table row is one block.** A repeated card (a quote with its author and tags, a product) and each
+  table row with its header are captured as single blocks, so a record is read and cited whole.
 - **`python -m fastbrowse.evals.probe` measures the reader and claim check on live pages.** It loads the
   given pages once and runs the agent's own read, draft and claim check over them N times at once.
 
