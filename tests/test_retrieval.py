@@ -19,7 +19,7 @@ from fastbrowse.jev import (
     Question,
 )
 from fastbrowse.llm import DEFAULT_MAX_OUTPUT_TOKENS, Generation, Message
-from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.memory import Fact, Notes, evidence_id, fact_id
 from fastbrowse.models import CostBasis, CostComponent, CostLine, FactReader, Frozen, Limits, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
@@ -203,7 +203,7 @@ async def test_read_continues_after_an_unoffered_cite_tracks_coverage_and_cost()
     )
     assert llm.output_caps == [4096, 4096]
     assert result.coverage == (0, 1) and result.rejected_claims == 1
-    assert len(result.facts) == 1 and result.facts[0].evidence.quote == "Price is $12"
+    assert len(result.facts) == 1 and next(iter(Notes(result.facts).evidence.values())).quote == "Price is $12"
     assert notes.evidenced("r1")
     assert sum(line.dollars or 0 for line in result.cost_lines) == 0.002
     assert all(purpose is LLMPurpose.READ for purpose, _ in llm.calls)
@@ -268,7 +268,7 @@ async def test_short_read_batches_requirements_and_keeps_citations_without_llm()
         assert notes.evidenced(requirement.id)
         assert fact.text == f"{requirement.text}\n{quote}"
         assert fact.reader is FactReader.JEV_CHOICE
-        assert fact.evidence == locate_quote(page, fact.evidence.source_id, quote)
+        assert fact.evidence is not None and fact.evidence == locate_quote(page, fact.evidence.source_id, quote)
     _, questions = jev.requests[0]
     assert questions.keys() == {"version", "license"}
     assert all(
@@ -315,7 +315,7 @@ async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer:
     )
     assert len(jev.requests) == 1 and len(llm.calls) == 1
     assert all(notes.evidenced(r.id) for r in requirements)
-    assert [fact.evidence.quote for fact in result.facts] == ["Version: 1.2.3", "License: MIT"]
+    assert [evidence.quote for evidence in Notes(result.facts).evidence.values()] == ["Version: 1.2.3", "License: MIT"]
     assert [cost.component for cost in result.cost_lines] == [CostComponent.JEV, CostComponent.LLM]
     assert ledger.lines == list(result.cost_lines) and ledger.jev_calls == ledger.llm_calls == 1
 
@@ -783,7 +783,7 @@ async def test_pruning_the_only_claim_for_a_requirement_is_an_omission() -> None
     # The price was read as the winner's price, so its fact draws on the winner; citing the price must still not
     # count as stating which book won.
     winner = fact("r1", 0, "A Year in Provence")
-    price = fact("r2", 40, "£56.88").model_copy(update={"basis": (evidence_id(winner.evidence),)})
+    price = fact("r2", 40, "£56.88").model_copy(update={"basis": (fact_id(winner),)})
     notes = Notes((winner, price))
     requirements = (
         Requirement(id="r1", text="Which book is the most expensive?", kind=RequirementKind.INFORMATION),
@@ -981,7 +981,7 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
         result = draft_answer(plan, notes)
     assert result is not None and result.answer == answer
     assert notes.expand_evidence_ids(result.claims[0].evidence_ids) == keys
-    assert [citation.quote for citation in result.citations] == [fact.evidence.quote for fact in notes.facts]
+    assert [citation.quote for citation in result.citations] == [evidence.quote for evidence in notes.evidence.values()]
     assert [citation.id for citation in result.citations] == list(range(1, 6))
     for citation in result.citations:
         assert f"[{citation.id}](<{citation.deep_link}>)" in result.linked_answer
@@ -991,7 +991,33 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
     assert await check_claims(jev, result, notes, Thresholds()) is result
     for name in ("unsupported_0", "contradicted_0"):
         question = jev.requests[0][1][name]
-        assert all(fact.evidence.model_dump_json() in question.instructions for fact in notes.facts)
+        assert all(evidence.model_dump_json() in question.instructions for evidence in notes.evidence.values())
+
+
+async def test_a_count_the_page_does_not_state_is_derived_and_judged_by_its_records() -> None:
+    page = capture((BlockKind.PARAGRAPH, "Oak $19"), (BlockKind.PARAGRAPH, "Pine $7"))
+    requirement = Requirement(id="r", text="How many trees are listed?", kind=RequirementKind.INFORMATION)
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {"text": "Oak $19", "cites": ["s0"]},
+                    {"text": "Pine $7", "cites": ["s1"]},
+                    {"requirement_id": "r", "text": "Two trees", "cites": [], "draws_on": ["claim:0", "claim:1"]},
+                ],
+                "answered": True,
+            }
+        ]
+    )
+    notes = Notes()
+    await read(llm, page, requirement.text, ["r"], notes, requirements=(requirement,))
+    ((key, count),) = notes.supporting("r")
+    assert count.evidence is None and notes.derived(key) and "derived" in notes.render(10_000)
+    draft = draft_answer(Plan(requirements=(requirement,), answer_expected=True), notes)
+    assert draft is not None
+    assert [citation.quote for citation in draft.citations] == ["Oak $19", "Pine $7"]
+    unsupported = claim_check_questions(draft, notes)["unsupported_0"].instructions
+    assert "Oak $19" in unsupported and "Pine $7" in unsupported and "MISSING" not in unsupported
 
 
 async def test_basis_references_cannot_name_rejected_or_later_claims() -> None:
@@ -1017,7 +1043,7 @@ async def test_basis_references_cannot_name_rejected_or_later_claims() -> None:
     notes = Notes()
     result = await read(llm, page, "Cheapest?", ["r"], notes)
     assert result.rejected_claims == 1
-    assert notes.supporting("r")[0][1].basis == (evidence_id(notes.facts[0].evidence),)
+    assert notes.supporting("r")[0][1].basis == (fact_id(notes.facts[0]),)
 
 
 @pytest.mark.parametrize("confidence", [0.89, 0.95])
@@ -1053,8 +1079,8 @@ async def test_mixed_read_routes_keep_provenance_and_narrow_the_llm_request() ->
     notes = Notes()
     result = await read(llm, page, "Read all", [r.id for r in requirements], notes, jev=jev, requirements=requirements)
     assert [fact.reader for fact in result.facts] == [FactReader.JEV_CHOICE, FactReader.LLM]
-    assert [fact.evidence.quote for fact in notes.facts] == ["Version 1.2.3", "One\n\tTwo"]
-    assert all(fact.evidence.url == page.url for fact in notes.facts)
+    assert [evidence.quote for evidence in notes.evidence.values()] == ["Version 1.2.3", "One\n\tTwo"]
+    assert all(evidence.url == page.url for evidence in notes.evidence.values())
     assert not notes.evidenced("fare")
     assert notes.evidenced("version") and notes.evidenced("names")
     request = llm.calls[0][1][-1].content
@@ -1082,7 +1108,7 @@ async def test_the_reader_keeps_only_claims_citing_consecutive_offered_blocks(
     with caplog.at_level("DEBUG", logger="fastbrowse.retrieval"):
         result = await read(llm, page, "Find the prices", ["r"], notes)
     assert result.rejected_claims == 1
-    assert [fact.evidence.quote for fact in notes.facts] == ["A $3\n\nB $5"]
+    assert [evidence.quote for evidence in notes.evidence.values()] == ["A $3\n\nB $5"]
     assert "read rejected claim" in caplog.text and "unverified " * 5 not in caplog.text
 
 

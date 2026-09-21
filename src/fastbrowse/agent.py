@@ -1498,7 +1498,7 @@ class Agent:
         composed: ComposedAnswer | None = None
         citations: tuple[Citation, ...] = ()
         data: JsonValue | None = None
-        evidence: list[Evidence] = [fact.evidence for fact in state.notes.facts]
+        evidence: list[Evidence] = [fact.evidence for fact in state.notes.facts if fact.evidence is not None]
         verified = True
         # Writing the answer and filling the caller's schema read the same finished notes and neither
         # needs the other's output, so a task that wants both pays for the slower one rather than both.
@@ -1537,10 +1537,14 @@ class Agent:
 
     def _public_fact(self, fact: Fact) -> StepFact:
         redact = self._redactor.redact
+        text = redact(fact.text)
+        requirement_id = redact(fact.requirement_id) if fact.requirement_id is not None else None
+        if fact.evidence is None:
+            return StepFact(text=text, requirement_id=requirement_id, reader=fact.reader)
         url, quote = redact(fact.evidence.url), redact(fact.evidence.quote)
         return StepFact(
-            text=redact(fact.text),
-            requirement_id=redact(fact.requirement_id) if fact.requirement_id is not None else None,
+            text=text,
+            requirement_id=requirement_id,
             quote=quote,
             url=url,
             reader=fact.reader,

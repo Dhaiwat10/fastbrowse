@@ -23,7 +23,7 @@ from fastbrowse.citations import text_fragment
 from fastbrowse.config import TokenBudget
 from fastbrowse.jev import MAX_CHOICE_OPTIONS, ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, Message
-from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.memory import Fact, Notes, fact_id
 from fastbrowse.models import Citation, CostComponent, CostLine, Evidence, FactReader, Frozen, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture
 from fastbrowse.planner import Plan, Requirement, RequirementKind
@@ -205,7 +205,8 @@ class _ReadClaim(Frozen):
     text: str
     cites: tuple[str, ...] = Field(
         description="The Source blocks the claim is read from, by label without brackets (main/:12 for a line shown "
-        "as [main/:12]): one block, or several consecutive ones when the claim spans them; never an evidence id."
+        "as [main/:12]): one block, or several consecutive ones when the claim spans them; never an evidence id. "
+        "Empty for a count, total or winner the page does not state, which rests on draws_on alone."
     )
     draws_on: tuple[str, ...] = Field(
         default=(),
@@ -244,10 +245,6 @@ def _remember(
     notes: Notes,
     references: Mapping[str, str],
 ) -> Fact | None:
-    evidence = _cited(capture, part, claim.cites)
-    if evidence is None:
-        logger.debug("read rejected claim cites=%s", reprlib.repr(claim.cites))
-        return None
     basis: list[str] = []
     for reference in claim.draws_on:
         key = references.get(reference)
@@ -255,6 +252,11 @@ def _remember(
             logger.debug("read dropped unknown basis reference=%r", reference)
         elif key not in basis:
             basis.append(key)
+    evidence = _cited(capture, part, claim.cites)
+    # A derived claim cites nothing and rests on its basis; one that cites blocks must cite them correctly.
+    if evidence is None and (claim.cites or not basis):
+        logger.debug("read rejected claim cites=%s basis=%d", reprlib.repr(claim.cites), len(basis))
+        return None
     fact = Fact(
         requirement_id=claim.requirement_id,
         text=claim.text,
@@ -350,7 +352,7 @@ async def read(
         costs.extend(chosen.cost_lines)
         for fact in chosen.facts:
             notes.add(fact)
-            facts[(evidence_id(fact.evidence), fact.requirement_id)] = fact
+            facts[(fact_id(fact), fact.requirement_id)] = fact
         answered = {fact.requirement_id for fact in facts.values()}
         requirement_ids = [key for key in requirement_ids if key not in answered and key not in chosen.absent]
         if not requirement_ids:
@@ -386,7 +388,8 @@ async def read(
                     "does: when the capture holds the complete set being compared (no further pages or "
                     "unloaded results), cite each compared record and the winner or total may be "
                     "assigned the requirement id. A count, total or winner must list in draws_on every record "
-                    "it counts or compares, including the contextual facts it relies on. Use evidence ids from "
+                    "it counts or compares, including the contextual facts it relies on; one the page does not "
+                    "state itself cites no blocks. Use evidence ids from "
                     "the collected notes' [sha:start:end] labels without brackets. For records cited earlier "
                     "in this response, use claim:0 for the first claim, claim:1 for the second, and so on. "
                     "Cite the records before the conclusion; never refer to a later claim.\n\n"
@@ -433,7 +436,7 @@ async def read(
             if fact is None:
                 rejected_here += 1
                 continue
-            references[f"claim:{index}"] = evidence_id(fact.evidence)
+            references[f"claim:{index}"] = fact_id(fact)
             requirement_id = claim.requirement_id if claim.requirement_id in requirement_ids else None
             found.append(fact.model_copy(update={"requirement_id": requirement_id}))
             accepted += 1
@@ -454,7 +457,7 @@ async def read(
             fact = fact.model_copy(update={"requirement_id": None})
         # Its quote was verified against this capture when the chunk was read.
         notes.add(fact)
-        facts[(evidence_id(fact.evidence), fact.requirement_id)] = fact
+        facts[(fact_id(fact), fact.requirement_id)] = fact
     return ReadOutcome(
         facts=tuple(facts.values()),
         coverage=tuple(coverage),
@@ -912,21 +915,24 @@ def assemble_answer(
     # A claim keeps what it cited, which is what it states; the records its facts were derived from are shown
     # with it, so the caller and the claim check see what a total or winner was compared against.
     supports = [notes.expand_evidence_ids(claim.evidence_ids) for claim in claims]
+    # A derived fact has no page to link; its basis records carry the citations.
     known = {
-        evidence_id(fact.evidence): Citation(
+        key: Citation(
             id=index,
             text=fact.text,
             requirement_id=fact.requirement_id,
-            url=fact.evidence.url,
-            quote=fact.evidence.quote,
-            deep_link=text_fragment(fact.evidence.url, fact.evidence.quote),
+            url=evidence.url,
+            quote=evidence.quote,
+            deep_link=text_fragment(evidence.url, evidence.quote),
         )
-        for index, fact in enumerate(notes.facts, 1)
+        for index, (key, fact, evidence) in enumerate(
+            ((fact_id(fact), fact, fact.evidence) for fact in notes.facts if fact.evidence is not None), 1
+        )
     }
     cited = {key for support in supports for key in support}
     linked = []
     for claim, support in zip(claims, supports, strict=True):
-        links = " ".join(f"[{known[key].id}](<{known[key].deep_link}>)" for key in support)
+        links = " ".join(f"[{known[key].id}](<{known[key].deep_link}>)" for key in support if key in known)
         linked.append(f"{claim.text} {links}")
     return ComposedAnswer(
         answer="\n\n".join(claim.text for claim in claims),
@@ -942,7 +948,7 @@ def _without_citation_markup(text: str) -> str:
     # The composer can echo bracketed references in prose; only its checked evidence_ids create links.
     def replace(match: re.Match[str]) -> str:
         label = match[1]
-        if label.isdecimal() or re.fullmatch(r"[\w-]+:\d+:\d+", label):
+        if label.isdecimal() or re.fullmatch(r"[\w-]+:\d+:\d+|derived:[0-9a-f]+", label):
             logger.warning("compose dropped inline citation reference %r", label)
             return ""
         return label if match[2] else match[0]
@@ -1038,9 +1044,11 @@ def claim_check_questions(
     questions: dict[str, NoulQuestion] = {}
     known = notes.evidence
     for index, claim in enumerate(composed.claims):
+        # A derived fact is judged from the records it expands to, never from the reader's own conclusion.
         evidence = "\n".join(
             known[key].model_dump_json() if key in known else f"MISSING: {key}"
             for key in notes.expand_evidence_ids(claim.evidence_ids)
+            if not notes.derived(key)
         )
         for issue in ("unsupported", "contradicted"):
             questions[f"{issue}_{index}"] = NoulQuestion(

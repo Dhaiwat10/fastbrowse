@@ -7,7 +7,7 @@ from pydantic import JsonValue
 
 from fastbrowse.config import Config, Thresholds, TokenBudget
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, Question
-from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.memory import Fact, Notes, fact_id
 from fastbrowse.models import CostBasis, CostComponent, CostLine, FactReader, Operation
 from fastbrowse.page import Control, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
@@ -93,7 +93,7 @@ async def test_verdict_prompts_keep_late_requirement_evidence_when_notes_overflo
     llm = ScriptedLLM(
         [
             {"complete": True, "missing": []},
-            {"claims": [{"text": late.text, "evidence_ids": [evidence_id(late.evidence)]}]},
+            {"claims": [{"text": late.text, "evidence_ids": [fact_id(late)]}]},
         ]
     )
     await llm_verify(llm, "Total?", plan, _PAGE, (), notes, (), config=Config(tokens=tokens))
@@ -104,7 +104,7 @@ async def test_verdict_prompts_keep_late_requirement_evidence_when_notes_overflo
         *(call[1][-1].content for call in llm.calls),
         questions["requirement_omitted"].instructions,
     ]:
-        assert late.text in prompt and evidence_id(late.evidence) in prompt
+        assert late.text in prompt and fact_id(late) in prompt
         assert "facts omitted]" in prompt
     for state, batch in [(jev.state, jev.questions), ({"answer": composed.data.answer}, questions)]:
         state_chars = len(json.dumps(state))

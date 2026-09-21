@@ -363,7 +363,7 @@ async def test_url_edits_are_not_reads_but_each_result_in_one_document_is_preser
 
     async def replace_content(*args: object) -> ActResult:
         if expected_quote is not None:
-            assert expected_quote in [fact.evidence.quote for fact in state.notes.facts]
+            assert expected_quote in [evidence.quote for evidence in state.notes.evidence.values()]
         page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Editing")))
         return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
 
@@ -387,9 +387,9 @@ async def test_url_edits_are_not_reads_but_each_result_in_one_document_is_preser
         await agent._read(state, await agent._capture(), obs)
         expected_quote = text
         await agent._step(state, obs, decision)
-    assert [fact.evidence.quote for fact in state.notes.facts] == ["First result: 12", "Second result: 18"]
+    assert [evidence.quote for evidence in state.notes.evidence.values()] == ["First result: 12", "Second result: 18"]
     assert len(llm.calls) == 2
-    assert [fact.evidence.url for fact in state.notes.facts] == [results_url, results_url]
+    assert [evidence.url for evidence in state.notes.evidence.values()] == [results_url, results_url]
     assert [step.operation for step in state.steps].count(Operation.READ) == 2
     assert page.act.await_count == 5
 
@@ -436,7 +436,7 @@ async def test_a_message_is_read_before_mutation_and_the_next_action_is_reconsid
     agent._finish = AsyncMock(return_value=expected)
     if assessment is ReadAssessment.EVIDENCE:
         assert await agent._loop(state, None, None) is expected
-        assert state.notes.facts[0].evidence.quote == message
+        assert next(iter(state.notes.evidence.values())).quote == message
         assert state.steps[0].operation is Operation.READ
         page.act.assert_not_awaited()
         agent._finish.assert_awaited_once()
@@ -617,7 +617,7 @@ async def test_an_exhausted_read_recovers_instead_of_repeating_even_when_jev_is_
     page.act.assert_awaited_once()
     assert state.recoveries == 1
     assert [purpose for purpose, _ in llm.calls] == [LLMPurpose.READ, LLMPurpose.RECOVER, LLMPurpose.READ]
-    assert state.notes.facts[0].evidence.quote == "Total: $12"
+    assert next(iter(state.notes.evidence.values())).quote == "Total: $12"
 
 
 @pytest.mark.parametrize("operation", [Operation.READ, Operation.DONE])
@@ -1326,7 +1326,7 @@ async def test_a_secret_quoted_by_a_citation_is_redacted_from_its_links_too(read
     assert fact.deep_link == text_fragment(fact.url, fact.quote)
     assert "hunter" not in events[0].model_dump_json()
     assert len(state.notes.facts) == 2
-    assert state.notes.facts[-1].evidence.quote == quote
+    assert [*state.notes.evidence.values()][-1].quote == quote
     await agent._step(state, observation(()), _code_decision(Operation.SCROLL, None), Decider.CODE)
     assert events[1].step.facts == ()
     assert events[1].step.note is None
