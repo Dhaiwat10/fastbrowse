@@ -111,7 +111,7 @@ the quotes behind the answer, and cost by component.
 | `--max-steps N`, `--max-dollars N` | bound steps and model spend; defaults are 60 steps and no dollar cap. Cloud browser charges are added when it stops |
 | `--downloads DIR` | keep downloaded files |
 | `--json` | full result instead of the answer |
-| `--record FILE` | save an MP4 of the tab ending on the answer, time and cost (needs `ffmpeg`), e.g. `recordings/demo.mp4`, which git ignores. It shows what the pages showed, so watch it before sharing |
+| `--record FILE` | save an MP4 of the tab, each step captioned, ending on the answer, time and cost (needs `ffmpeg` with libass), e.g. `recordings/demo.mp4`, which git ignores; `demo.plain.mp4` beside it has no captions. It shows what the pages showed, so watch it before sharing |
 
 ```sh
 export SAUCE_PASSWORD=secret_sauce

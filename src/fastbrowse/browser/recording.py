@@ -1,8 +1,10 @@
 """Record a run's active tab to a video: Chrome's screencast frames, resampled to a steady rate by ffmpeg.
 
 The screencast sends a frame only when the page repaints, so a ticker repeats the latest frame at `_FPS`;
-the video's timing is then the run's real timing. The recording follows tab switches, and ends on a card
-showing the run's outcome, so one file shows both what the agent did and what it answered.
+the video's timing is then the run's real timing. The recording follows tab switches, captions each step from
+when its action began, and ends on a card showing the run's outcome, so one file shows both what the agent did
+and what it answered. A second ffmpeg pass over a lossless first one writes it twice: with the step captions
+burned in, and plain beside it as `<name>.plain.mp4`.
 
 A recording shows whatever the page shows. Typed passwords are masked by the page, but an email address,
 an order history or an echoed key is not, so check a recording before sharing it.
@@ -15,17 +17,18 @@ import itertools
 import logging
 import re
 import shutil
+import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Self, assert_never
 from urllib.parse import urlsplit
 
 from cdp_use.cdp.page.events import ScreencastFrameEvent
 
 from fastbrowse.browser.session import BrowserSession
-from fastbrowse.models import RunResult
+from fastbrowse.models import Decider, Operation, RunResult, StepResult
 from fastbrowse.page import BrowserError
 
 logger = logging.getLogger(__name__)
@@ -58,18 +61,23 @@ class Recording:
         self._ffmpeg: asyncio.subprocess.Process | None = None
         self._ticker: asyncio.Task[None] | None = None
         self._started = time.monotonic()
+        self._captions: list[tuple[float, str]] = []
+        self._card_at: float | None = None
+        self._scratch = tempfile.TemporaryDirectory(prefix="fastbrowse-recording-")
+        self._uncaptioned = Path(self._scratch.name, "uncaptioned.mkv")
 
     async def __aenter__(self) -> Self:
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
             raise RecordingError("recording needs ffmpeg on PATH")
+        self._ffmpeg_path = ffmpeg
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._ffmpeg = await asyncio.create_subprocess_exec(
             ffmpeg,
             *("-loglevel", "error", "-y", "-f", "image2pipe", "-framerate", str(_FPS), "-i", "-"),
             # H.264 needs even dimensions, and yuv420p is what phones and social sites play.
-            *("-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264", "-pix_fmt", "yuv420p"),
-            *("-movflags", "+faststart", str(self._path)),
+            # Lossless, so the captioning pass is the only lossy encode; 4:4:4 also takes the odd sizes a tab has.
+            *("-c:v", "libx264", "-qp", "0", "-preset", "ultrafast", "-pix_fmt", "yuv444p", str(self._uncaptioned)),
             stdin=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -97,6 +105,55 @@ class Recording:
         _, stderr = await self._ffmpeg.communicate()
         if self._ffmpeg.returncode != 0:
             logger.warning("ffmpeg could not write %s: %s", self._path, stderr.decode(errors="replace").strip()[:400])
+            return
+        await self._finish()
+
+    @property
+    def plain_path(self) -> Path:
+        """The same video without step captions, next to the captioned one."""
+        return self._path.with_suffix(".plain" + self._path.suffix)
+
+    def caption(self, step: StepResult) -> None:
+        """Caption `step` from when its action began; it arrives once the step is over."""
+        began = time.monotonic() - self._started - step.duration_ms / 1000
+        self._captions.append((max(0.0, began), f"{step.index + 1} · {_describe(step)}"))
+
+    async def _finish(self) -> None:
+        """Encode the final video twice from the lossless pass: with step captions, and plain."""
+        with self._scratch as scratch:
+            subtitles = Path(scratch, "steps.srt")
+            end = self._card_at if self._card_at is not None else time.monotonic() - self._started
+            # A run that opens straight onto its answer takes no steps, and has no captions to end.
+            starts = [at for at, _ in self._captions]
+            ends = [*starts[1:], end][: len(starts)]
+            cues = [
+                f"{number}\n{_srt_time(at)} --> {_srt_time(until)}\n{text}\n"
+                for number, ((at, text), until) in enumerate(zip(self._captions, ends, strict=True), 1)
+                if until > at
+            ]
+            await asyncio.to_thread(subtitles.write_text, "\n".join(cues), encoding="utf-8")
+            # BorderStyle 3 draws a box behind the text, coloured by OutlineColour (alpha first, 00 opaque).
+            style = "Fontsize=10,BorderStyle=3,Outline=6,Shadow=0,OutlineColour=&H50000000,MarginV=16,Alignment=2"
+            # H.264 needs even dimensions, and yuv420p is what phones and social sites play.
+            # libass cannot open an empty subtitle file.
+            burn = f"subtitles={subtitles}:force_style='{style}'" if cues else "null"
+            graph = (
+                f"[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,split=2[plain][steps];[steps]{burn}[captioned]"
+            )
+            # Page text is the subject of a shared clip; x264's default quality blurs small type.
+            encode = ("-c:v", "libx264", "-crf", "18", "-preset", "slow", "-movflags", "+faststart")
+            process = await asyncio.create_subprocess_exec(
+                self._ffmpeg_path,
+                *("-loglevel", "error", "-y", "-i", str(self._uncaptioned), "-filter_complex", graph),
+                *("-map", "[captioned]", *encode, str(self._path)),
+                *("-map", "[plain]", *encode, str(self.plain_path)),
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await process.communicate()
+            if process.returncode != 0:
+                logger.warning(
+                    "ffmpeg could not caption %s: %s", self._path, stderr.decode(errors="replace").strip()[:400]
+                )
 
     async def show_result(self, task: str, result: RunResult) -> None:
         """End the video on the task and its outcome, in the tab being recorded."""
@@ -113,7 +170,8 @@ class Recording:
             for citation in result.citations
             if citation.id in cited
         )
-        seconds = time.monotonic() - self._started
+        self._card_at = time.monotonic() - self._started
+        seconds = self._card_at
         card = (
             "<meta charset=utf-8><body style='margin:0;height:100vh;display:grid;place-content:center;gap:28px;"
             "grid-template-columns:minmax(0,1fr);padding:0 8vw;background:#0d1117;color:#e6edf3;"
@@ -159,10 +217,51 @@ class Recording:
         # The previous tab may already be closed, taking its screencast with it; an unanswered start is retried.
         if self._casting is not None:
             await self._command("Page.stopScreencast", None, self._casting)
-        await self._command("Page.startScreencast", {"format": "jpeg", "quality": 85}, session_id)
+        await self._command("Page.startScreencast", {"format": "jpeg", "quality": 95}, session_id)
         self._casting = session_id
         self._frame_at = time.monotonic()
 
     async def _command(self, method: str, params: dict[str, object] | None, session_id: str) -> None:
         with suppress(BrowserError, TimeoutError):
             await asyncio.wait_for(self._session.client.send_raw(method, params, session_id), _COMMAND_SECONDS)
+
+
+def _describe(step: StepResult) -> str:
+    target = f" {step.target}" if step.target else ""
+    match step.decided_by:
+        case Decider.JEV:
+            by = "picked by Jev"
+        case Decider.LLM:
+            by = "LLM"
+        case Decider.CODE:
+            by = "code"
+        case _:
+            assert_never(step.decided_by)
+    match step.operation:
+        case Operation.READ:
+            return f"read the page · {by}"
+        case Operation.ESCALATE:
+            return "ask the planner"
+        case Operation.DONE:
+            return "check the answer"
+        case (
+            Operation.CLICK
+            | Operation.HOVER
+            | Operation.FILL
+            | Operation.SELECT
+            | Operation.ENTER
+            | Operation.ESCAPE
+            | Operation.SCROLL
+            | Operation.BACK
+            | Operation.SWITCH_TAB
+            | Operation.UPLOAD
+            | Operation.DIALOG
+        ):
+            return f"{step.operation.value.replace('_', ' ')}{target} · {by}"
+        case _:
+            assert_never(step.operation)
+
+
+def _srt_time(seconds: float) -> str:
+    millis = round(seconds * 1000)
+    return f"{millis // 3_600_000:02}:{millis // 60_000 % 60:02}:{millis // 1000 % 60:02},{millis % 1000:03}"

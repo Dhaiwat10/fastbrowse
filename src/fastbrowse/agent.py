@@ -8,7 +8,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -16,7 +15,7 @@ from urllib.parse import urljoin, urlsplit
 
 from pydantic import BaseModel, Field, JsonValue
 
-from fastbrowse.citations import text_fragment
+from fastbrowse.citations import ANSWER_LINK, text_fragment
 from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.effects import SETTING_ROLES, effect, state_key
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
@@ -111,9 +110,6 @@ _IDLE_CHECKED = frozenset({Operation.CLICK, Operation.ENTER})
 alone, which leaves the DOM as it was, so it is not judged by the DOM."""
 
 logger = logging.getLogger(__name__)
-
-# A cited claim's link as the composer writes it: `[3](<https://page#:~:text=...>)`.
-_ANSWER_LINK = re.compile(r"\]\(<([^>]*)>\)")
 
 type _Prepared = ComposedAnswer | asyncio.Task[Generation[ComposedAnswer]] | None
 """An answer ready before conclusion: the reader's facts Jev accepted as written, or a composer in flight."""
@@ -1559,7 +1555,7 @@ class Agent:
             citations.append(public)
         # Every link destination in one pass. Replacing one link at a time rewrote the start of any longer link
         # sharing its prefix, which then no longer matched and kept its percent-encoded secret.
-        answer = _ANSWER_LINK.sub(lambda link: f"](<{links[link.group(1)]}>)", composed.linked_answer)
+        answer = ANSWER_LINK.sub(lambda link: f"](<{links[link.group(1)]}>)", composed.linked_answer)
         return redact(answer), tuple(citations)
 
     def _plan_mark(self, state: _RunState) -> str:
