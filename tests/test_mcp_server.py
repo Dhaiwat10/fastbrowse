@@ -324,6 +324,7 @@ async def test_configure_reads_secrets_and_ceilings_from_flags() -> None:
         (["--secret", "password=UNSET@https://a.example"], {}, {}, "unset variables: UNSET"),
         (["--profile", "p", "--max-concurrent", "2"], {}, {}, "one Chrome at a time"),
         ([], {}, {}, "BROWSER_USE_API_KEY"),
+        (["--local", "--cloud-profile", "p"], {}, {}, "--cloud-profile needs the cloud browser"),
         (["--headed"], {}, {"chrome": "no-such-chrome"}, "Chrome was not found"),
         # FASTBROWSE_HEADED alone still means local Chrome, as it did before cloud became the default.
         ([], {}, {"chrome": "no-such-chrome", "headed": True}, "Chrome was not found"),

@@ -11,11 +11,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastbrowse.clients.environment import Settings
+from fastbrowse.clients.environment import ConfigurationError, Settings
 from fastbrowse.models import LocalChrome, StepResult
 
 
-def cloud(local: bool, chrome: LocalChrome) -> bool:
+def cloud(local: bool, chrome: LocalChrome, cloud_profile: str | None) -> bool:
     """Browser Use Cloud unless the operator asked for local Chrome: `--local`, or a headed window or kept profile,
     which only local Chrome has, whether from its flag or from FASTBROWSE_HEADED / FASTBROWSE_PROFILE.
 
@@ -23,7 +23,13 @@ def cloud(local: bool, chrome: LocalChrome) -> bool:
     Chrome's own interface. Chrome's leaked-password bubble sits outside the page, where the agent can neither see
     nor dismiss it, and it took every click after saucedemo's sign-in.
     """
-    return not (local or chrome.headed or chrome.profile is not None)
+    on_cloud = not (local or chrome.headed or chrome.profile is not None)
+    if cloud_profile is not None and not on_cloud:
+        raise ConfigurationError(
+            "--cloud-profile needs the cloud browser: drop it, or drop --local, --headed and --profile "
+            "(and FASTBROWSE_HEADED / FASTBROWSE_PROFILE)"
+        )
+    return on_cloud
 
 
 def browser_key(settings: Settings, cloud: bool) -> str | None:

@@ -520,7 +520,7 @@ async def configure(args: argparse.Namespace, settings: Settings, environ: Mappi
         if value <= 0:
             raise ConfigurationError(f"{flag} must be above 0")
     chrome = options.chrome(settings, args.headed, args.profile)
-    cloud = options.cloud(args.local, chrome)
+    cloud = options.cloud(args.local, chrome, args.cloud_profile)
     if not cloud and find_chrome(chrome.binary) is None:
         raise ConfigurationError("Chrome was not found: install it, name it in FASTBROWSE_CHROME, or drop --local")
     if not cloud and chrome.profile is not None and args.max_concurrent > 1:

@@ -140,11 +140,12 @@ async def run(args: argparse.Namespace) -> int:
     # The operator's own flags are checked before the browser key: with the cloud browser the default, a missing key
     # would otherwise hide a secret that could never be typed anywhere.
     secrets = _secrets(args.secret, args.bitwarden, args.start)
-    chrome = options.chrome(load_settings(), args.headed, args.profile)
+    settings = load_settings()
+    chrome = options.chrome(settings, args.headed, args.profile)
     result = await run_task(
         args.task,
         start=args.start,
-        browser_api_key=options.browser_key(load_settings(), options.cloud(args.local, chrome)),
+        browser_api_key=options.browser_key(settings, options.cloud(args.local, chrome, args.cloud_profile)),
         chrome=chrome,
         cloud_profile=args.cloud_profile,
         secrets=secrets,
