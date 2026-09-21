@@ -583,7 +583,12 @@ class Agent:
             state.hint = None
         else:
             state.unchanged += 1
-        state.plan_marks.append(self._plan_mark(state))
+        # Only a step that got nowhere on the page can count towards plan stagnation. Filling a form is four
+        # steps that evidence nothing -- the requirement resolves on submit -- and counting those fired this
+        # tripwire on every healthy contact-form run in the local suite. `progressed` is the same notion the
+        # unchanged count already uses, so setup work is excluded by the definition already in the loop.
+        if not progressed:
+            state.plan_marks.append(self._plan_mark(state))
         for tripped in self._tripwires(state):
             if tripped.tripwire is Tripwire.NO_PROGRESS or self._config.stall.tripwires is TripwireMode.ARMED:
                 await self._recover(state, observation, str(tripped))
