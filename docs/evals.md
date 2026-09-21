@@ -33,7 +33,7 @@ The same prompts run through three arms: fastbrowse on a Browser Use Cloud brows
 
 Use `--suite`, `--only` and `--category` to select tasks, `--bitwarden` for vault credentials, and
 `--record DIR` for videos. `--max-dollars 0` and `--max-seconds 0` remove those caps; `--concurrency N`
-sets how many runs can overlap. The current jev-ultrafast pin is `1231850a0bf1a0c0341fe408ef1668dbbfdfac46`.
+sets how many runs overlap (default 8; one at a time timed the same, see below). The current jev-ultrafast pin is `1231850a0bf1a0c0341fe408ef1668dbbfdfac46`.
 
 | Category | Task | Graded on |
 |---|---|---|

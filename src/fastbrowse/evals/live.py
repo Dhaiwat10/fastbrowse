@@ -515,9 +515,9 @@ async def main(argv: list[str]) -> int:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=1,
-        help="runs in flight at once (default 1). Only sound for an arm whose work happens elsewhere: a local "
-        "arm would be timing itself against its own neighbours. A row from a parallel run says so.",
+        default=8,
+        help="runs in flight at once (default 8). A run waits on pages rather than on this machine, so eight at a "
+        "time timed the same as one at a time; compare arms only under the same setting.",
     )
     args = parser.parse_args(argv)
     limits = Limits(max_steps=MAX_STEPS, max_dollars=args.max_dollars or None, max_seconds=args.max_seconds or None)

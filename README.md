@@ -334,7 +334,7 @@ seconds to minutes, so raise the client's tool timeout if it has one (`MCP_TOOL_
 uv sync --all-extras                                         # the hosted-arm SDK too, which ty checks
 uv run pre-commit install                                    # ruff and ty before each commit
 uv run python -m fastbrowse.evals.runner                     # local fixtures, about $0.005 a task
-uv run --extra browser-use python -m fastbrowse.evals.live --max-dollars 0 --concurrency 8   # live head-to-head
+uv run --extra browser-use python -m fastbrowse.evals.live --max-dollars 0     # live head-to-head, 8 at a time
 uv run --extra browser-use python -m fastbrowse.evals.live --arms fast              # ours alone, capped as configured
 uv run --extra browser-use python -m fastbrowse.evals.live --suite heldout   # the never-debugged split
 uv run ruff format . && uv run ruff check . && uv run ty check && uv run pytest
