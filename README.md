@@ -27,7 +27,7 @@ Most browser agents generate each action from a screenshot. fastbrowse indexes t
 candidates and has [Jev](https://typesafe.ai), a choice model, **pick one**, so it cannot click
 something that was never on the page. Every claim in an answer cites a verbatim quote from the page.
 
-![fastbrowse searching Google Flights for one-way nonstop London → New York flights: 45s run, shown at 3× speed](docs/assets/demo.gif)
+![fastbrowse signing in to a shop, adding two products, filling the shipping form and placing the order: 12 steps, 37.7s, $0.0138, shown at 2x speed](docs/assets/demo.gif)
 
 ### Against Browser Use
 
