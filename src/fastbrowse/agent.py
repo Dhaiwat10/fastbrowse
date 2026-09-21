@@ -588,7 +588,12 @@ class Agent:
                     progressed = False
                     act = act.model_copy(update={"detail": f"no effect: {done.summary}"})
                 effect_now = done.summary
-            attempt.idle = act.outcome is StepOutcome.EXECUTED and not effective and decision.operation in _IDLE_CHECKED
+            # A covered flight control never dispatched, so it escaped idle memory and was picked again.
+            attempt.idle = (
+                act.outcome in {StepOutcome.EXECUTED, StepOutcome.COVERED}
+                and not effective
+                and decision.operation in _IDLE_CHECKED
+            )
         if changed:
             state.read_here = False
         state.history.append(

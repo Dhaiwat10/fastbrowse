@@ -974,20 +974,28 @@ async def test_the_pages_code_opens_are_capped() -> None:
     assert agent_module._paging(state, here) is None
 
 
-async def test_a_click_that_changed_nothing_is_not_taken_again_from_the_same_page() -> None:
+@pytest.mark.parametrize("outcome", [StepOutcome.EXECUTED, StepOutcome.COVERED])
+async def test_a_click_that_changed_nothing_is_not_taken_again_from_the_same_page(outcome: StepOutcome) -> None:
     search = _button("Search")
     form = observation((search,))
     page = Mock(spec=Page)
-    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=False))
+    page.act = AsyncMock(return_value=ActResult(outcome=outcome, page_changed=False))
+    page.observe = AsyncMock(return_value=form)
     state = await run_state()
     state.authorization = Authorization(irreversible_actions=True)
-    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
-    decision = await decide(ScriptedJev({"operation": "click", "click_target": "search"}), form, context(), Config())
+    jev = ScriptedJev({"operation": "click", "click_target": "search"}, noul=0.0)
+    agent = Agent(page, jev, ScriptedLLM([]))
+    decision = await decide(jev, form, context(), Config())
     await agent._step(state, form, decision)
     assert state.attempts[agent_module._signature(decision, form)].idle
     # From a page that has since changed, the same click is a new try.
     filled = observation((search, field("Return").model_copy(update={"value": "Fri, Oct 23"})))
     assert agent_module._signature(decision, filled) not in state.attempts
+    agent._recover = AsyncMock(side_effect=_Stop(Status.STUCK, "recovering"))
+    with pytest.raises(_Stop, match="recovering"):
+        await agent._loop(state, None, None)
+    agent._recover.assert_awaited_once_with(state, form, "click Search already did nothing here")
+    page.act.assert_awaited_once()
 
 
 def test_a_pager_the_page_marks_rel_next_is_followed_whatever_its_label() -> None:
