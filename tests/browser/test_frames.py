@@ -3,15 +3,12 @@
 import asyncio
 import base64
 import logging
-from itertools import pairwise
 from pathlib import Path
-from time import monotonic
 
 import pytest
 
 from fastbrowse.browser import BrowserSession
 from fastbrowse.browser.recording import Recording
-from fastbrowse.browser.session import _FRAME_INTERVAL_SECONDS
 from tests.browser.conftest import RecordingArtifactSink
 from tests.browser.test_lifecycle import CONNECTION, CdpTransport
 
@@ -24,20 +21,18 @@ async def emit_frame(session: BrowserSession, number: int, data: bytes, tab_sess
     )
 
 
-async def test_live_frames_follow_tabs_ack_every_frame_and_keep_only_the_latest(
+async def test_live_frames_follow_tabs_ack_after_delivery_and_keep_only_the_latest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     transport = CdpTransport(monkeypatch)
     frames: list[bytes] = []
-    times: list[float] = []
     delivering = asyncio.Event()
     release = asyncio.Event()
     release.set()
 
     async def receive(frame: bytes) -> None:
         frames.append(frame)
-        times.append(monotonic())
         delivering.set()
         await release.wait()
 
@@ -55,7 +50,6 @@ async def test_live_frames_follow_tabs_ack_every_frame_and_keep_only_the_latest(
         await emit_frame(session, 3, b"latest")
         await asyncio.gather(*session._background)
         assert frames == [b"first", b"latest"]
-        assert times[1] - times[0] >= _FRAME_INTERVAL_SECONDS
 
         release.clear()
         delivering.clear()
@@ -68,7 +62,8 @@ async def test_live_frames_follow_tabs_ack_every_frame_and_keep_only_the_latest(
         assert session.pending_dialog() is not None
         await session.handle_dialog(True)
         await asyncio.sleep(0)
-        assert ("Page.screencastFrameAck", {"sessionId": 5}, "session") in transport.requests
+        # Back-pressure: Chrome is not told to send more until the frame in hand has been delivered.
+        assert ("Page.screencastFrameAck", {"sessionId": 4}, "session") not in transport.requests
         release.set()
         await asyncio.gather(*session._background)
         assert frames == [b"first", b"latest", b"slow", b"arrived while busy"]
@@ -105,10 +100,10 @@ async def test_live_frames_follow_tabs_ack_every_frame_and_keep_only_the_latest(
 
     assert not session._background
     assert not session._frame_scheduled
-    assert all(later - earlier >= _FRAME_INTERVAL_SECONDS for earlier, later in pairwise(times))
     assert [request for request in transport.requests if request[0] == "Page.screencastFrameAck"] == [
         ("Page.screencastFrameAck", {"sessionId": number}, "second-session" if number == 7 else "session")
-        for number in range(1, 10)
+        # 9 was cancelled mid-delivery by close, which stops the cast; an ack would be for a cast already gone.
+        for number in range(1, 9)
     ]
     assert [(method, sid) for method, _, sid in transport.requests if method.endswith("Screencast")] == [
         ("Page.startScreencast", "session"),
