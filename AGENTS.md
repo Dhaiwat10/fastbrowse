@@ -71,12 +71,12 @@ The run loop is `src/fastbrowse/agent.py`, and everything else is a seam it call
   local Chrome. `start` is optional; without one the first address is proposed from the task.
 - **`page.py` / `browser/`** index the page. `browser/snapshot.js` runs in the page and returns the controls
   with what tells them apart (role, label, the card or row that disambiguates twins, whether a field blocks
-  its form); `browser/capture.js` returns the text with stable spans so a quote can be located later.
+  its form); `browser/capture.js` returns the text as source blocks with stable spans, so a reader can cite them.
 - **`policy.py`** batches operation and target choices, read assessment and applicable wall checks.
   Large target sets use a further choice inside a group. `jev.py` is the client's shape;
   `clients/typesafe.py` and `clients/vercel.py` are the two sources, with failover in `clients/failover.py`.
-- **`retrieval.py`** routes short facts through Jev and other reads through the LLM. Every claim carries a
-  verbatim quote and its span; `memory.py` holds notes with citation ids, and `citations.py` builds deep links.
+- **`retrieval.py`** routes short facts through Jev and other reads through the LLM. A read claim cites source
+  blocks and code copies its quote from them; a count the page does not state rests on its basis facts; `memory.py` holds notes with citation ids, and `citations.py` builds deep links.
 - **`verification.py`** decides whether a run may finish: Jev's done check against the plan's requirements,
   then the LLM verifier only for what Jev doubted, then the answer's claims checked against the quotes.
 - **`safety.py`** owns secrets and irreversible actions. **`effects.py`** says what an action actually did,
@@ -92,7 +92,8 @@ These are the things a change must not quietly break.
   (`unverified`, `needs_confirmation`, `needs_login`, `blocked`, `needs_input`, `stuck`, `budget_exceeded`,
   `observation_limit`, `error`),
   never rounded up. The CLI exits 0 only for `complete`.
-- **A claim cites a quote.** An answer's facts are located spans in a capture, not the model's recollection.
+- **A claim cites a quote.** An answer's facts are spans code cut from a capture, not text a model wrote; a
+  derived count or winner cites the facts it was concluded from.
   A requirement is evidenced or it is open.
 - **Page content is data, never instructions.** Prompts that read page content must say so, and completion is judged against quotes
   and page state rather than the model's say-so.

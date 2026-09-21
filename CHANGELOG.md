@@ -11,6 +11,14 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **The reader cites page blocks instead of retyping quotes.** A claim names the capture's source blocks
+  and fastbrowse copies the quote from them, so a fact is no longer lost when the model's copy differs from
+  the page (a table cell's `|`, a record quoted as two lines). A count or winner the page never states
+  cites no text: it is kept as a derived fact, and the claim check judges it from the records it counts.
+  `StepFact.quote`, `url` and `deep_link` are `None` for such a fact.
+- **`python -m fastbrowse.evals.probe` measures the reader and claim check on live pages.** It loads the
+  given pages once and runs the agent's own read, draft and claim check over them N times at once.
+
 - **Counts, totals and superlatives cite their underlying records.** The reader preserves every compared
   record across pages and records which facts a conclusion draws on. Drafted and composed answers carry
   those records through claim checks, citation links and `RunResult.citations`. Required evidence keeps
