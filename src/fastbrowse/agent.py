@@ -1266,9 +1266,12 @@ class Agent:
             # Deciding each hop costs a Jev call to pick a link code has already found, on every page of the list.
             state.next_page = True
             return
+        # "Otherwise finish" was a dead end: the reader withholds a list it has not seen the end of, so the done check
+        # refused every such finish, and Flights runs spent their recoveries finding "View more flights" instead.
         state.hint = (
-            "The reader saw the list this task needs go on past this page. If a next page or load-more "
-            "control shows the rest, open it and READ it; otherwise finish with what was read."
+            "The reader saw the list this task needs go on past what the page shows, so what was read cannot settle "
+            "it. Show the rest and READ it: open the control that loads or pages through more of the list, or narrow "
+            "the list with the page's own filter or sort so the answer is in view."
         )
 
     async def _recover(self, state: _RunState, observation: Observation, reason: str) -> None:
@@ -1293,8 +1296,20 @@ class Agent:
         stored = self._secret_names(origin_of(observation.url))
         # Without the notes, a run that had read the answer was told to scroll down "to see the remaining
         # books" three times, and stopped stuck with the answer in hand.
+        # Without the reader's word that a list goes on, a note holding the best record SO FAR reads as the answer:
+        # a run with the cheapest of the first few flights noted was sent to finish, and the done check refused.
         open_requirements = (
-            "\n".join(f"- {r.text}" for r in state.notes.unresolved(state.ready_plan)) if state.ready_plan else ""
+            "\n".join(
+                f"- {r.text}"
+                + (
+                    " (the reader saw the list this ranges over go on past what the page shows: load the rest first)"
+                    if r.id in state.continuing
+                    else ""
+                )
+                for r in state.notes.unresolved(state.ready_plan)
+            )
+            if state.ready_plan
+            else ""
         )
         secrets = (
             f"\n\n## Stored secrets\n{', '.join(stored)}. Filling a field with one types its hidden value."

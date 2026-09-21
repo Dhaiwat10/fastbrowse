@@ -947,7 +947,7 @@ async def test_a_list_goes_on_to_jev_with_a_hint_when_code_finds_no_next_page() 
     agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "none"}), ScriptedLLM(reads))
     await agent._read(state, capture((BlockKind.PARAGRAPH, "Einstein quote")), here)
     assert not state.next_page
-    assert state.hint is not None and "go on past this page" in state.hint
+    assert state.hint is not None and "go on past what the page shows" in state.hint
 
 
 async def test_the_pages_code_opens_are_capped() -> None:
