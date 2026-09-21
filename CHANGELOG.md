@@ -11,6 +11,8 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-21
+
 - **A decision the page redraws under is dropped at once.** While Jev decides and gates a click, the run watches
   the controls on offer; if one changes, as Google Flights' date picker does when its prices arrive late, it
   decides again on the settled page instead of clicking into a stale refusal.
@@ -261,7 +263,8 @@ Fixed in the same release, from tasks that failed in the field:
 - First release: a browser agent that picks its next action from the controls the page actually has, with an
   LLM to plan and read, and code owning verification, safety and secrets.
 
-[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.5.1
 [0.5.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.5.0
 [0.4.2]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.2
 [0.4.1]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.1
