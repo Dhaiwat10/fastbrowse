@@ -160,7 +160,8 @@ async def test_pointer_entry_dialog_does_not_block_a_fresh_hit_test(
         + ("requestAnimationFrame(() => confirm('Continue?'))" if deferred else "confirm('Continue?')"),
     )
     obs = await page.observe()
-    async with asyncio.timeout(2):
+    # The bound catches a click that hangs behind the dialog; a busy CI runner took over 2s to get through it.
+    async with asyncio.timeout(10):
         result = await page.act(Action(operation=Operation.CLICK, target_id=find(obs, "One way").id), obs)
     assert result.outcome is StepOutcome.FAILED
     assert browser_session.pending_dialog() is not None
