@@ -885,6 +885,14 @@ class CdpPage(Page):
         raw = await self._evaluate(self._session.active_session_id, "location.origin")
         return str(raw) if raw is not None else ""
 
+    async def response_status(self) -> int | None:
+        raw = await self._evaluate(
+            self._session.active_session_id,
+            "performance.getEntriesByType('navigation')[0]?.responseStatus ?? null",
+        )
+        # Chrome reports 0 for a document it did not fetch over HTTP, which says nothing about success.
+        return raw if isinstance(raw, int) and raw > 0 else None
+
     async def navigate(self, url: str, load_timeout_seconds: float = 15.0) -> None:
         """Setup helper (tests, initial task URL): navigate the active tab and wait until its document is usable.
 

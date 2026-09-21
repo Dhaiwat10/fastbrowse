@@ -1156,6 +1156,21 @@ async def test_a_run_with_no_page_named_works_the_first_address_out_of_the_task(
         assert await agent._first_page("What is the top story?", ledger) == opened
 
 
+@pytest.mark.parametrize(("status", "stays"), [(404, False), (200, True), (None, True)])
+async def test_a_shortcut_the_site_does_not_serve_returns_to_the_start_page(status: int | None, stays: bool) -> None:
+    start, guessed = "https://books.test/", "https://books.test/catalogue/mysteryfile_3/index.html"
+    page = Mock(spec=Page)
+    page.navigate = AsyncMock()
+    page.origin = AsyncMock(return_value="https://books.test")
+    page.response_status = AsyncMock(return_value=status)
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([{"url": guessed}]))
+
+    history = await agent._open("Which is the cheapest mystery book?", start, Ledger(Limits()))
+
+    assert bool(history) is stays
+    assert page.navigate.await_args_list[-1].args == ((guessed,) if stays else (start,))
+
+
 @pytest.mark.parametrize(
     ("opened", "controls", "text", "goes_to"),
     [

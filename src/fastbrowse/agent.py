@@ -512,10 +512,17 @@ class Agent:
             await self._page.navigate(shortcut)
             # `accept` saw only the proposed address; a redirect can still land on another site.
             landed = origin_of(await self._page.origin())
+            status = await self._page.response_status()
         except BrowserError:
-            landed = None
+            landed, status = None, None
         if landed != origin_of(start):
             logger.warning("shortcut %s did not stay on %s; returning to the start page", shortcut, start)
+            await self._page.navigate(start)
+            return []
+        if status is not None and status >= 400:
+            # A proposed address is a guess, and a guess can name a path the site does not serve: books-mystery
+            # opened `mysteryfile_3/`, read a 404 and spent a BACK leaving it, every run. The start page is known good.
+            logger.info("shortcut %s answered HTTP %s; staying on the start page", shortcut, status)
             await self._page.navigate(start)
             return []
         note = f"opened {shortcut} directly instead of clicking there; the start page {start} is one BACK away"
