@@ -339,7 +339,8 @@ async def read(
                 role="system",
                 content=(
                     "# Reader\nAnswer using this capture only. Each claim needs its source_id "
-                    "and a verbatim quote. "
+                    "and a verbatim quote, and says only what that quote (with the claims it draws on) shows: "
+                    "a claim naming two messages or values quotes both. "
                     "Use only the supplied requirement ids (or null). Mark answered only when collected evidence "
                     "fully answers the question; otherwise continue. Assign a requirement id only when the claim "
                     "answers that whole requirement with its constraints; use null for partial information. "
