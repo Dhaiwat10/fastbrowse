@@ -96,7 +96,7 @@ _LOAD_MORE = re.compile(r"(?:show|view|load|see)(?: \d+)? more(?: [\w-]+){0,3}",
 def loads_more(control: Control) -> bool:
     """Whether a control is labelled as loading more of the list it ends: "View more flights", "Show 20 more".
 
-    It sits at the foot of the list like a pager does, past what the off-screen cap keeps, and usually carries no
+    It sits at the foot of the list like a pager does, past what the off-screen cap keeps, and may carry no
     mark but its words: Google Flights' button has only its label. "Learn more" and the like do not match.
     """
     return Operation.CLICK in control.operations and _LOAD_MORE.fullmatch(" ".join(control.label.split())) is not None
