@@ -247,7 +247,10 @@ class OpenAICompatibleLLM:
         costs: list[CostLine] = []
         started = monotonic()
         try:
-            for attempt in range(2):
+            short_retried = False
+            for turn in range(3):
+                # A reply the provider cut short is asked for again without spending the one retry the rest share.
+                attempt = turn - int(short_retried)
                 if ledger is not None:
                     ledger.reserve(CostComponent.LLM)
                 usage = RequestUsage()
@@ -281,10 +284,11 @@ class OpenAICompatibleLLM:
                     if _ends_mid_json(error):
                         if (written := _short_of_cap(payload, body["max_tokens"])) is None:
                             _grow_cap(body, attempt, max_output_tokens)
-                        elif attempt == 1:
+                        elif short_retried:
                             raise LLMRetriesExhausted(
-                                f"LLM response ended mid-JSON at {written} of {body['max_tokens']} output tokens"
+                                f"LLM response ended mid-JSON at {written} of {body['max_tokens']} output tokens twice"
                             ) from None
+                        short_retried = True
                         continue
                     if attempt == 1:
                         raise LLMError(f"LLM schema validation failed after one retry: {detail[:1000]}") from None

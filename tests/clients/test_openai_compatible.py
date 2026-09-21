@@ -354,3 +354,25 @@ async def test_json_that_ends_mid_value_short_of_the_cap_is_a_provider_fault_not
                 "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
             ).generate(LLMPurpose.READ, [], Result, max_output_tokens=100)
     assert caps == [100, 100] and isinstance(error.value, Unavailable)
+
+
+async def test_a_short_reply_after_a_schema_repair_is_still_asked_for_again() -> None:
+    contents = ['{"count":"five"}', '{"count":"cut off', '{"count":5}']
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": contents[calls - 1]}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens": 7},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await OpenAICompatibleLLM(
+            "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
+        ).generate(LLMPurpose.READ, [], Result, max_output_tokens=100)
+    assert result.data.count == 5 and calls == 3
