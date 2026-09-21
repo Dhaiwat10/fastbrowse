@@ -9,7 +9,8 @@ Cloud browser: BROWSER_USE_API_KEY. FASTBROWSE_LLM_MODEL overrides every purpose
 FASTBROWSE_LLM_MODEL_<PURPOSE> (PLAN, READ, FIELD_TEXT, RECOVER, COMPOSE, VERIFY, SHORTCUT) overrides one.
 FASTBROWSE_LLM_REASONING sets the reasoning effort: low (default), medium or high. FASTBROWSE_CHROME
 names the Chrome binary; FASTBROWSE_HEADED=1 shows its window and FASTBROWSE_PROFILE keeps its profile
-between runs. `.env.example` lists them all. A real environment variable beats `.env`.
+between runs, and either one selects local Chrome. `.env.example` lists them all. A real environment variable
+beats `.env`.
 """
 
 from enum import StrEnum

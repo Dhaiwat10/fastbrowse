@@ -280,7 +280,7 @@ def _description(config: ServerConfig) -> str:
         "as well as the answer.",
         "",
         "Statuses: complete (task verified, answer claims supported by quotes), unverified, needs_confirmation, "
-        "needs_login, blocked, needs_input, stuck, budget_exceeded, observation_limit, error. "
+        "needs_login, blocked, needs_input, stuck, budget_exceeded, observation_limit, unavailable, error. "
         "A result other than complete carries next_step.",
     ]
     if config.allow_authorize:

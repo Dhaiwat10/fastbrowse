@@ -32,6 +32,17 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   count as one. A select the page reverts is a failed step.
 - **A recording ends on a readable answer.** The closing card shows each citation as a number beside the
   claim and lists the cited site and quote underneath, instead of the raw text-fragment link.
+- **A run reports where its recording went.** `RunResult.recordings` lists the videos written; the CLI prints
+  `recorded: <paths>` or `not recorded`, and prints warnings to stderr.
+- **Local Chrome has no password popups.** Every launch switches off Chrome's password manager and leak
+  detection, in a kept `--profile` too; a kept profile whose preferences cannot be read is a `BrowserError`.
+- **Finishing is judged more carefully.** A lookup that has its answer ends rather than clicking on; a search
+  the task only asks to run is a requirement to act on; the verifier confirms requirements one by one, sees the
+  controls that are set and the ones the done check doubted, and a narrowing requirement needs its filter
+  applied rather than matching rows.
+- **Pages are read when they have settled.** Navigation waits for the loaded page's DOM to go quiet; a
+  transparent checkbox styled by its ancestors is offered; an `aria-disabled="false"` added during hydration is
+  not a new control.
 
 ## [0.5.0] - 2026-09-21
 

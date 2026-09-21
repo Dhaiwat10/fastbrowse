@@ -74,15 +74,14 @@ where hosted Browser Use is faster on some. Google Flights took 109.3s here, slo
 
 ## Try it
 
-Needs [uv](https://docs.astral.sh/uv/); uv fetches Python itself (3.13 or newer). We recommend a
-[Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`), which runs use by default: it
-passes bot checks a fresh local Chrome fails, and has none of desktop Chrome's own popups, such as its
-leaked-password warning, which sit outside the page where the agent cannot close them. Local Chrome is fully
-supported with `--local`.
+Needs [uv](https://docs.astral.sh/uv/); uv fetches Python itself (3.13 or newer). Runs use a
+[Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`) by default: it passes bot checks
+a fresh local Chrome fails. Local Chrome is fully supported with `--local`.
 
 ```sh
 export AI_GATEWAY_API_KEY=...   # or TYPESAFE_API_KEY, for Jev
 export OPENROUTER_API_KEY=...   # for the LLM that plans and reads
+export BROWSER_USE_API_KEY=...  # the cloud browser; or pass --local to use Chrome
 uvx fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
 
@@ -95,7 +94,7 @@ To work on fastbrowse itself:
 ```sh
 git clone https://github.com/agent-labs-dev/fastbrowse.git && cd fastbrowse
 uv sync --all-extras   # the extras carry mcp and browser_use_sdk, which the tests and evals import
-cp .env.example .env
+cp .env.example .env   # then fill in the keys, BROWSER_USE_API_KEY included, or pass --local
 uv run fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
 
@@ -115,7 +114,7 @@ the quotes behind the answer, and cost by component.
 | `--max-steps N`, `--max-dollars N` | bound steps and model spend; defaults are 60 steps and no dollar cap. Cloud browser charges are added when it stops |
 | `--downloads DIR` | keep downloaded files |
 | `--json` | full result instead of the answer |
-| `--record FILE` | save an MP4 of the tab, each step captioned, ending on the answer, time and cost (needs `ffmpeg` with libass), e.g. `recordings/demo.mp4`, which git ignores; `demo.plain.mp4` beside it has no captions. It shows what the pages showed, so watch it before sharing |
+| `--record FILE` | save an MP4 of the tab, each step captioned, ending on the answer, time and cost (needs `ffmpeg`; the captions need its libass), e.g. `recordings/demo.mp4`, which git ignores; `demo.plain.mp4` beside it has no captions. It shows what the pages showed, so watch it before sharing |
 
 ```sh
 export SAUCE_PASSWORD=secret_sauce
@@ -198,7 +197,7 @@ More in [docs/design.md](docs/design.md).
 | Reads pages | yes | no | yes, every claim cited |
 | Signing in | yes | password fields excluded | `--secret` or a Bitwarden vault item; models see names only |
 | Irreversible actions | not gated | not gated | stop unless `--authorize` |
-| Browser | cloud | local Chrome, your profile | cloud (recommended), or local Chrome |
+| Browser | cloud | local Chrome, your profile | cloud by default, or local Chrome with `--local` |
 
 jev-ultrafast is Browser Use's navigation agent; fastbrowse
 shares its core techniques. Its column describes `main` as of 2026-09-18.
@@ -284,7 +283,7 @@ The answer contains numbered Markdown links. MCP's `citations` list contains `qu
 run's evidence; it does not expose the Python `Citation` ids, requirement ids or deep-link fields.
 
 ```sh
-claude mcp add fastbrowse -e OPENROUTER_API_KEY=... -e AI_GATEWAY_API_KEY=... \
+claude mcp add fastbrowse -e OPENROUTER_API_KEY=... -e AI_GATEWAY_API_KEY=... -e BROWSER_USE_API_KEY=... \
   -- uvx --from 'fastbrowse[mcp]' fastbrowse-mcp --max-dollars 0.25
 ```
 
@@ -296,7 +295,7 @@ For a client configured by JSON, such as Claude Desktop:
     "fastbrowse": {
       "command": "uvx",
       "args": ["--from", "fastbrowse[mcp]", "fastbrowse-mcp"],
-      "env": { "OPENROUTER_API_KEY": "...", "AI_GATEWAY_API_KEY": "..." }
+      "env": { "OPENROUTER_API_KEY": "...", "AI_GATEWAY_API_KEY": "...", "BROWSER_USE_API_KEY": "..." }
     }
   }
 }
