@@ -312,7 +312,9 @@ class Agent:
         except (ObservationTooLarge, NotesTooLarge) as error:
             return self._result(state, ledger, Status.OBSERVATION_LIMIT, error=str(error))
         except (JevError, LLMError, BrowserError) as error:
-            return self._result(state, ledger, Status.ERROR, error=self._redactor.redact(str(error))[:500])
+            message = self._redactor.redact(str(error))[:500]
+            trace("run_error", kind=type(error).__name__, step=len(state.steps) if state else 0, error=message)
+            return self._result(state, ledger, Status.ERROR, error=message)
         finally:
             # A run can end before it ever needed the plan, and a plan still being written would bill it.
             if planning is not None:
@@ -371,14 +373,22 @@ class Agent:
                 decision, uncertain, decided_by = directed, False, Decider.LLM
             if await self._read_before_interaction(state, observation, decision):
                 continue
-            if decision.operation is Operation.CLICK and decision.target is not None and pages_forward(decision.target):
-                plan = await state.await_plan()
-                if _answered(plan, state.notes):
+            pager = (
+                decision.operation is Operation.CLICK and decision.target is not None and pages_forward(decision.target)
+            )
+            # Only a pager waits for the plan: the clicks that set a search up run while it is still being written.
+            plan = await state.await_plan() if pager else state.ready_plan
+            if decision.operation is Operation.CLICK and plan is not None:
+                # A lookup has nothing left to do once it is answered: with the cheapest flight read, Jev went on to
+                # click "Select flight", which the page covered, and the recording showed a failed click after the
+                # answer. A click recovery directed stands, so a DONE the verifier refused is not asked again.
+                lookup = all(r.kind is RequirementKind.INFORMATION for r in plan.requirements)
+                if (pager or (lookup and decided_by is Decider.JEV)) and _answered(plan, state.notes):
                     # Everything asked to be found is evidenced, so another page is wandering: Jev, offered the pager,
                     # kept turning pages through a whole catalogue after the two the task named had been read. DONE
                     # is judged again by `_finish`, which carries on if it does not hold.
                     decision, uncertain, decided_by = _code_decision(Operation.DONE, None), False, Decider.CODE
-                elif not state.read_here and _unread(plan, state.notes):
+                elif pager and not state.read_here and _unread(plan, state.notes):
                     # Turning the page of a list nobody has read loses that page: with the pager in view Jev opened
                     # the next page from the first, and a task over "this page and the next" was answered from the
                     # second and third. Read here first, which also tells code whether the list goes on.
