@@ -1,4 +1,5 @@
 import runpy
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from fastbrowse.evals import live
+from fastbrowse.evals import live, live_tasks
 from fastbrowse.evals.live_tasks import TASKS, LiveTask, Outcome
 
 RUNNER: dict[str, Any] = runpy.run_path(str(live.ULTRAFAST_RUNNER))
@@ -149,6 +150,118 @@ def test_a_repeated_label_passes_when_any_control_holds_the_value() -> None:
         task("flights-search").check(Outcome(None, None, "https://www.google.com/travel/flights", controls=page), None)
         is None
     )
+
+
+_FLIGHT_DATE = date(2026, 10, 19)
+# Recorded after Search and the Nonstop filter, with city entities rather than airport codes.
+_FLIGHT_TFS = "CBwQAhorEgoyMDI2LTEwLTE5KABqDAgDEggvbS8wNGpwbHINCAMSCS9tLzAyXzI4NkABSAFwAYIBCwj___________8BmAEC"
+_FLIGHT_LEG = b"\x12\x0a2026-10-19\x28\x00\x6a\x0c\x08\x03\x12\x08/m/04jpl\x72\x0d\x08\x03\x12\x09/m/02_286"
+
+
+def _flight_payload(*legs: bytes, trip: int = 2) -> bytes:
+    return b"".join(bytes((26, len(leg))) + leg for leg in legs) + b"\x98\x01" + bytes((trip,))
+
+
+@pytest.mark.parametrize(
+    ("payload", "form", "failure"),
+    [
+        pytest.param(urlsafe_b64decode(_FLIGHT_TFS), False, None, id="recorded-collapsed-header"),
+        pytest.param(_flight_payload(_FLIGHT_LEG), False, None, id="collapsed-header"),
+        pytest.param(
+            _flight_payload(_FLIGHT_LEG.replace(b"\x6a", b"\x72", 1).replace(b"\x72\x0d", b"\x6a\x0d")),
+            True,
+            "encoded search",
+            id="reversed-route-overrides-form",
+        ),
+        pytest.param(
+            _flight_payload(_FLIGHT_LEG.replace(b"2026-10-19", b"2026-10-20")),
+            True,
+            "encoded search",
+            id="wrong-date-overrides-form",
+        ),
+        pytest.param(
+            _flight_payload(_FLIGHT_LEG.replace(b"2026-10-19", b"2027-10-19")),
+            True,
+            "encoded search",
+            id="wrong-year-overrides-form",
+        ),
+        pytest.param(
+            _flight_payload(_FLIGHT_LEG.replace(b"2026-10-19", b"2026-10-20"), _FLIGHT_LEG),
+            True,
+            "encoded search",
+            id="date-only-in-later-leg",
+        ),
+        pytest.param(
+            _flight_payload(_FLIGHT_LEG.replace(b"\x12\x09/m/02_286", b"\x1a\x09/m/02_286")),
+            True,
+            "encoded search",
+            id="destination-in-wrong-field",
+        ),
+        pytest.param(_flight_payload(_FLIGHT_LEG, trip=1), True, "ticket type", id="round-trip-overrides-form"),
+        pytest.param(_flight_payload(_FLIGHT_LEG)[:-3], True, None, id="trip-type-from-control"),
+        pytest.param(_flight_payload(_FLIGHT_LEG)[:-3], False, "ticket type", id="trip-type-unavailable"),
+        pytest.param(
+            _flight_payload(_FLIGHT_LEG, _FLIGHT_LEG)[:-3], True, "ticket type", id="multiple-legs-override-form"
+        ),
+    ],
+)
+def test_flights_grades_the_encoded_outbound_leg(
+    monkeypatch: pytest.MonkeyPatch, payload: bytes, form: bool, failure: str | None
+) -> None:
+    monkeypatch.setattr(live_tasks, "_FLIGHT_DAY", _FLIGHT_DATE)
+    encoded = urlsafe_b64encode(payload).decode().rstrip("=")
+    page = _flights_page(_FLIGHT_DATE)
+    outcome = Outcome(
+        "JetBlue, $846",
+        None,
+        f"https://www.google.com/travel/flights/search?tfs={encoded}",
+        controls=page if form else page[4:],
+    )
+    actual = task("flights-search").check(outcome, None)
+    assert actual is None if failure is None else actual is not None and failure in actual
+
+
+@pytest.mark.parametrize("encoded", ["!", "A", "", "GoAB", "GoCAgICAgICAgIAC", "GgESAQ", "AA"])
+@pytest.mark.parametrize("form", [False, True])
+def test_unreadable_flight_urls_require_rendered_fields(
+    monkeypatch: pytest.MonkeyPatch, encoded: str, form: bool
+) -> None:
+    monkeypatch.setattr(live_tasks, "_FLIGHT_DAY", _FLIGHT_DATE)
+    page = _flights_page(_FLIGHT_DATE)
+    outcome = Outcome(
+        None,
+        None,
+        f"https://www.google.com/travel/flights/search?tfs={encoded}",
+        controls=page if form else page[4:],
+    )
+    assert (task("flights-search").check(outcome, None) is None) is form
+
+
+@pytest.mark.parametrize(
+    ("task_id", "rows", "nonstop", "answer", "failure"),
+    [
+        ("google-flights", True, False, "JetBlue, $846", None),
+        ("google-flights", True, False, "JetBlue", "no price"),
+        ("google-flights", False, False, "JetBlue, $846", "no results"),
+        ("flights-search", False, True, None, "no results"),
+        ("flights-search", True, False, None, "no nonstop filter"),
+    ],
+)
+def test_encoded_flight_search_still_needs_results_filters_and_price(
+    monkeypatch: pytest.MonkeyPatch,
+    task_id: str,
+    rows: bool,
+    nonstop: bool,
+    answer: str | None,
+    failure: str | None,
+) -> None:
+    monkeypatch.setattr(live_tasks, "_FLIGHT_DAY", _FLIGHT_DATE)
+    page = _flights_page(_FLIGHT_DATE, nonstop=nonstop)[4:]
+    if not rows:
+        page = (*page[:-1], (f"{_FLIGHT_DATE:%A, %B} {_FLIGHT_DATE.day}, {_FLIGHT_DATE.year}, $517", None))
+    outcome = Outcome(answer, None, f"https://www.google.com/travel/flights/search?tfs={_FLIGHT_TFS}", controls=page)
+    actual = task(task_id).check(outcome, None)
+    assert actual is None if failure is None else actual is not None and failure in actual
 
 
 async def test_a_hosted_session_whose_output_fails_the_schema_keeps_its_cost(monkeypatch: pytest.MonkeyPatch) -> None:

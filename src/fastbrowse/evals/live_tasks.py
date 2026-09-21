@@ -6,10 +6,12 @@ Login tasks use published demo credentials, or a Bitwarden vault item of the sam
 
 import asyncio
 import re
+from base64 import b64decode
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from enum import StrEnum
+from typing import Literal
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
@@ -229,9 +231,85 @@ _FLIGHT_DAY = date.today() + timedelta(days=28)
 _PRICE = re.compile(r"[£$€]\s?\d[\d,]*")
 
 
+class _FlightLeg(BaseModel):
+    departure: date | None
+    origin: tuple[str, ...]
+    destination: tuple[str, ...]
+
+
+class _FlightSearch(BaseModel):
+    legs: tuple[_FlightLeg, ...]
+    trip_type: Literal[1, 2, 3] | None
+
+
+def _protobuf_fields(payload: bytes | int) -> dict[int, list[bytes | int]]:
+    if not isinstance(payload, bytes):
+        raise ValueError("expected a protobuf message")
+    offset = 0
+
+    def varint() -> int:
+        nonlocal offset
+        value = 0
+        for shift in range(0, 70, 7):
+            if offset == len(payload):
+                break
+            byte = payload[offset]
+            offset += 1
+            value |= (byte & 127) << shift
+            if byte < 128 and value < 1 << 64:
+                return value
+        raise ValueError("invalid protobuf varint")
+
+    fields: dict[int, list[bytes | int]] = {}
+    while offset < len(payload):
+        tag = varint()
+        number, wire = tag >> 3, tag & 7
+        if not 0 < number < 1 << 29:
+            raise ValueError("invalid protobuf field")
+        if wire == 0:
+            value: bytes | int = varint()
+        elif wire in (1, 2, 5):
+            size = varint() if wire == 2 else (8 if wire == 1 else 4)
+            end = offset + size
+            if end > len(payload):
+                raise ValueError("truncated protobuf field")
+            value = payload[offset:end]
+            offset = end
+        else:
+            raise ValueError("unsupported protobuf wire type")
+        fields.setdefault(number, []).append(value)
+    return fields
+
+
+def _flight_search_url(url: str | None) -> _FlightSearch | None:
+    # Google collapses the fields after Search. These field numbers come from recorded tfs payloads;
+    # keeping each leg intact prevents a return date or reversed route from proving the outbound search.
+    try:
+        parsed = urlparse(url or "")
+        if parsed.hostname != "www.google.com" or parsed.path not in ("/travel/flights", "/travel/flights/search"):
+            return None
+        (encoded,) = parse_qs(parsed.query).get("tfs", [])
+        fields = _protobuf_fields(b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True))
+        legs = []
+        for message in fields.get(3, []):
+            leg = _protobuf_fields(message)
+            (departure,) = leg.get(2, [None])
+            endpoints = {}
+            for name, number in (("origin", 13), ("destination", 14)):
+                entities = []
+                for endpoint in leg.get(number, []):
+                    (entity,) = _protobuf_fields(endpoint).get(2, [b""])
+                    entities.append(entity)
+                endpoints[name] = entities
+            legs.append(_FlightLeg.model_validate({"departure": departure, **endpoints}))
+        (trip_type,) = fields.get(19, [None])
+        return _FlightSearch.model_validate({"legs": legs, "trip_type": trip_type}) if legs else None
+    except ValueError:
+        return None
+
+
 def _flight_results(outcome: Outcome, *, one_way_nonstop: bool) -> str | None:
-    """The search Google ran, read from the form and results it rendered at the end of the run. The URL is no
-    guide: a search typed as a query stays on /travel/flights?q=..., and an unsubmitted form can carry the date."""
+    """The encoded search or rendered fields, plus results: either can exist before Search is pressed."""
     if outcome.controls is None:
         return None
     # A label can repeat (an overlay editor over the field it edits), so any control holding the value counts.
@@ -240,20 +318,31 @@ def _flight_results(outcome: Outcome, *, one_way_nonstop: bool) -> str | None:
         values.setdefault(label.strip(), []).append(value or "")
     departure = f"{_FLIGHT_DAY:%a, %b} {_FLIGHT_DAY.day}"
     day = f"{_FLIGHT_DAY:%A, %B} {_FLIGHT_DAY.day}"
-    wanted = {"Where from?": "London", "Where to?": "New York", "Departure": departure}
-    wrong = [
-        f"{label}={values.get(label)!r}"
-        for label, part in wanted.items()
-        if not any(part in value for value in values.get(label, []))
-    ]
+    wrong = []
+    search = _flight_search_url(outcome.final_url)
+    if search is not None:
+        wanted_leg = _FlightLeg(departure=_FLIGHT_DAY, origin=("/m/04jpl",), destination=("/m/02_286",))
+        if search.legs[0] != wanted_leg:
+            wrong.append(f"encoded search {search.legs[0]}")
+    else:
+        wanted = {"Where from?": "London", "Where to?": "New York", "Departure": departure}
+        wrong.extend(
+            f"{label}={values.get(label)!r}"
+            for label, part in wanted.items()
+            if not any(part in value for value in values.get(label, []))
+        )
     trip = [
         f"{label} {value}"
         for label, found in values.items()
         if label.startswith("Change ticket type")
         for value in found
     ]
-    if one_way_nonstop and not any("One way" in text for text in trip):
-        wrong.append(f"ticket type {trip!r}")
+    if one_way_nonstop:
+        if search is not None and (search.trip_type is not None or len(search.legs) != 1):
+            if search.trip_type != 2 or len(search.legs) != 1:
+                wrong.append(f"encoded ticket type {search.trip_type}, {len(search.legs)} legs")
+        elif not any("One way" in text for text in trip):
+            wrong.append(f"ticket type {trip!r}")
     if one_way_nonstop and not any(label.startswith("Nonstop, Stops, Selected") for label in values):
         wrong.append("no nonstop filter")
     # A result row names its day ("Leaves ... on Friday, October 16", or "Select flight" in some renderings); the
