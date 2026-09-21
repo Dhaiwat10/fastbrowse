@@ -78,7 +78,12 @@ class Notes:
             basis = tuple(dict.fromkeys((*previous.basis, *fact.basis)))
             # A winner can quote a row already collected as context; its answer must survive that reuse.
             kept = fact if previous.requirement_id is None and fact.requirement_id is not None else previous
-            self._facts[key] = kept.model_copy(update={"basis": basis})
+            # One block can answer two requirements (a card's title and its price): the draft answers each
+            # requirement with this fact's text, so every requirement's claim must survive the reuse.
+            text = kept.text
+            if fact is not kept and fact.requirement_id is not None and fact.text not in text:
+                text = f"{text}\n{fact.text}"
+            self._facts[key] = kept.model_copy(update={"basis": basis, "text": text})
             return False
         self._facts[key] = fact
         return True

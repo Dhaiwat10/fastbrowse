@@ -29,6 +29,10 @@ def test_notes_deduplicate_spans_without_losing_requirement_coverage() -> None:
     )
     assert notes.evidenced("r1") and notes.evidenced("r2")
     assert len(notes.facts) == 1
+    # One block answering two requirements keeps both claims: the draft answers each from this fact's text.
+    assert notes.facts[0].text == "First fact\nSame span, another requirement"
+    assert not notes.add(Fact(reader=FactReader.LLM, requirement_id="r2", text="First fact", evidence=evidence()))
+    assert notes.facts[0].text == "First fact\nSame span, another requirement"
     plan = Plan(
         requirements=tuple(
             Requirement(id=f"r{i}", text=f"Requirement {i}", kind=RequirementKind.INFORMATION) for i in range(1, 4)
