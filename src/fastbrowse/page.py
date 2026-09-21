@@ -90,6 +90,18 @@ def pages_forward(control: Control) -> bool:
     return bool(control.next_page) or _NEXT_PAGE.fullmatch(" ".join(control.label.split())) is not None
 
 
+_LOAD_MORE = re.compile(r"(?:show|view|load|see)(?: \d+)? more(?: [\w-]+){0,3}", re.IGNORECASE)
+
+
+def loads_more(control: Control) -> bool:
+    """Whether a control is labelled as loading more of the list it ends: "View more flights", "Show 20 more".
+
+    It sits at the foot of the list like a pager does, past what the off-screen cap keeps, and usually carries no
+    mark but its words: Google Flights' button has only its label. "Learn more" and the like do not match.
+    """
+    return Operation.CLICK in control.operations and _LOAD_MORE.fullmatch(" ".join(control.label.split())) is not None
+
+
 def pager_link(control: Control) -> bool:
     """Whether this control is one the loop could actually walk a list with: a link, to an address.
 

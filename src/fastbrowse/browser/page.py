@@ -38,6 +38,7 @@ from fastbrowse.page import (
     Observation,
     Page,
     cut_marker,
+    loads_more,
     pager_link,
 )
 
@@ -228,16 +229,18 @@ class _ObservedState:
 
 
 def _capped(controls: list[Control], limit: int) -> list[Control]:
-    """The first `limit` controls, and past that the pager links too.
+    """The first `limit` controls, and past that the controls that go on with a list too: pager links and
+    load-more buttons.
 
-    A listing's pager sits at the foot, after everything the cap keeps: a catalogue of twenty books a page ran
-    past the off-screen limit, so its "next" link was never offered and a task over two pages never left the first.
-    The exemption stays inside the cap: a page drawing more pager links than the cap allows would otherwise return
+    Both sit at the foot, after everything the cap keeps: a catalogue of twenty books a page ran past the off-screen
+    limit, so its "next" link was never offered and a task over two pages never left the first; Google Flights'
+    "View more flights" was dropped the same way, and recovery asked for it by name while it could not be clicked.
+    The exemption stays inside the cap: a page drawing more of them than the cap allows would otherwise return
     more controls than were asked for.
     """
     if len(controls) <= limit:
         return controls
-    pagers = [c for c in controls if pager_link(c)][:limit]
+    pagers = [c for c in controls if pager_link(c) or loads_more(c)][:limit]
     keep = {c.id for c in pagers}
     room = max(0, limit - len(keep))
     keep.update(c.id for c in [c for c in controls if c.id not in keep][:room])

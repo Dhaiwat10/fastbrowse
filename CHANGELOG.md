@@ -19,7 +19,9 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   input, such as a flight results list, is split at line breaks rather than stopping the run at
   `observation_limit`, and the last chunk of a page decides whether its list goes on. When the list does
   go on, recovery and the next-step hint say to load the rest or narrow it with the page's own filter or
-  sort, instead of finishing early with the best record seen so far.
+  sort, instead of finishing early with the best record seen so far. A load-more button at the foot of a
+  long list ("View more flights", "Show 20 more") stays on offer past the off-screen control limit, as a
+  pager link already did.
 - **The completion check keeps the page state that matters on long pages.** When the page and the notes
   do not both fit, the check drops page text and controls without state before it drops the evidence, so
   a checked filter such as "Nonstop only" still counts.

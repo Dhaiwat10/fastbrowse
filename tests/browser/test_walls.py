@@ -51,12 +51,15 @@ async def test_a_sign_in_form_is_still_a_sign_in(page: CdpPage, main_site: str) 
     assert result.error is not None and "sign-in required" in result.error
 
 
-async def test_the_pager_at_the_foot_of_a_long_listing_is_still_offered(page: CdpPage, main_site: str) -> None:
+async def test_the_pager_and_load_more_at_the_foot_of_a_long_listing_are_still_offered(
+    page: CdpPage, main_site: str
+) -> None:
     await page.navigate(f"{main_site}/long-list.html")
     observation = await observe_until(page, "Book 1")
     labels = [control.label for control in observation.controls]
     assert observation.omitted_controls > 0, "the page must be long enough to hit the cap"
     assert "next" in labels
+    assert "Show more books" in labels
     assert len(labels) <= page._config.observation.max_offscreen_controls + len(
         [c for c in observation.controls if not c.offscreen]
     )
