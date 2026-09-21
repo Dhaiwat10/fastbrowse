@@ -84,6 +84,42 @@
   <button id="open-dialog">Confirm</button>
   <p id="dialog-result"></p>
 
+  <section id="capture-records">
+    <h2>Quotations</h2>
+    <div id="quote-cards">
+      <div class="quote card">
+        <blockquote>Measure twice, cut once.</blockquote>
+        <div>by Ada <a href="/authors/ada">(about)</a></div>
+        <div>Tags: <a href="/tags/craft">craft</a> <a href="/tags/care">care</a></div>
+      </div>
+      <div class="card quote">
+        <blockquote>Leave room for a second idea.</blockquote>
+        <div>by Grace <a href="/authors/grace">(about)</a></div>
+        <div>Tags: <a href="/tags/ideas">ideas</a> <a href="/tags/work">work</a></div>
+      </div>
+      <div class="quote card">
+        <h3>A thought for today</h3>
+        <blockquote>Ask what the evidence says.</blockquote>
+        <div>by Katherine <a href="/authors/katherine">(about)</a></div>
+        <div>Tags: <a href="/tags/science">science</a> <a href="/tags/care">care</a></div>
+      </div>
+    </div>
+    <p>After the quotations.</p>
+    <div id="standalone">
+      <p>A standalone first paragraph.</p>
+      <p>A standalone second paragraph.</p>
+    </div>
+    <h2>Rankings</h2>
+    <table id="record-table">
+      <thead><tr><th>Team</th><th>Points</th></tr></thead>
+      <tbody>
+        <tr><td>North</td><td>12</td></tr>
+        <tr><td>East</td><td>11</td></tr>
+        <tr><td>West</td><td>10</td></tr>
+      </tbody>
+    </table>
+  </section>
+
   <script>
     document.getElementById('login').addEventListener('submit', e => {
       e.preventDefault();

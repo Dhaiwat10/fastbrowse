@@ -56,12 +56,16 @@
 
   const renderTable = table => {
     const rows = [...table.querySelectorAll(':scope > tr, :scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr')]
-      .map(row => [...row.querySelectorAll(':scope > th, :scope > td')].map(c => cellText(c).replace(/\|/g, '\\|')))
-      .filter(cells => cells.length);
-    if (!rows.length) return '';
-    const lines = ['| ' + rows[0].join(' | ') + ' |', '| ' + rows[0].map(() => '---').join(' | ') + ' |'];
-    for (const cells of rows.slice(1)) lines.push('| ' + cells.join(' | ') + ' |');
-    return lines.join('\n');
+      .map(row => ({ row, cells: [...row.querySelectorAll(':scope > th, :scope > td')] }))
+      .filter(({ cells }) => cells.length);
+    if (!rows.length) return [];
+    let headers = rows.filter(({ row }) => row.parentElement.tagName === 'THEAD');
+    if (!headers.length && rows[0].cells.every(c => c.tagName === 'TH')) headers = [rows[0]];
+    const line = ({ cells }) => '| ' + cells.map(c => cellText(c).replace(/\|/g, '\\|')).join(' | ') + ' |';
+    const prefix = headers.map(line);
+    if (headers.length) prefix.push('| ' + headers[0].cells.map(() => '---').join(' | ') + ' |');
+    const data = rows.filter(row => !headers.includes(row));
+    return data.length ? data.map(row => [...prefix, line(row)].join('\n')) : [prefix.join('\n')];
   };
 
   function flush(run) {
@@ -79,6 +83,30 @@
     return ![...el.children].some(c => !SKIP.has(c.tagName) && !hidden(c) && isBlock(c));
   }
 
+  // A classless div repeated three times is usually page layout; a record is a styled unit or a semantic item.
+  function repeated(el) {
+    if (!el.classList.length && el.tagName !== 'ARTICLE' && el.tagName !== 'LI') return false;
+    return [...(el.parentNode?.children ?? [])].filter(sibling => sibling.tagName === el.tagName
+      && sibling.classList.length === el.classList.length
+      && [...el.classList].every(token => sibling.classList.contains(token))).length >= 3;
+  }
+
+  const records = new WeakMap();
+  function recordText(el) {
+    if (records.has(el)) return records.get(el);
+    records.set(el, null);
+    if (!repeated(el) || el.shadowRoot || el.querySelector('table,iframe,frame')) return null;
+    const descendants = [...el.querySelectorAll('*')];
+    if (descendants.some(c => c.shadowRoot) || descendants.filter(c => HEADINGS[c.tagName]).length > 1) return null;
+    if (!descendants.some(c => !SKIP.has(c.tagName) && !hidden(c) && isBlock(c))) return null;
+    const text = textOf(el);
+    if (!text || text.length > 1500) return null;
+    // A repeated wrapper around another list is a group, so keep the inner records separately citable.
+    if (descendants.some(c => (c.tagName === 'LI' && leaf(c)) || recordText(c) !== null)) return null;
+    records.set(el, text);
+    return text;
+  }
+
   function walk(el) {
     const run = [];
     for (const node of el.childNodes) {
@@ -87,7 +115,7 @@
         continue;
       }
       if (node.nodeType !== 1 || SKIP.has(node.tagName) || hidden(node)) continue;
-      if (!isBlock(node)) {
+      if (!isBlock(node) && recordText(node) === null) {
         run.push(node);
         continue;
       }
@@ -108,11 +136,16 @@
       }
       return;
     }
-    if (el.tagName === 'TABLE') return push('table', renderTable(el));
+    if (el.tagName === 'TABLE') {
+      for (const text of renderTable(el)) push('table', text);
+      return;
+    }
     if (el.tagName === 'PRE') return push('code', textOf(el));
-    if (el.tagName === 'LI' && leaf(el)) {
+    const record = recordText(el);
+    if ((el.tagName === 'LI' && leaf(el)) || record !== null) {
       const links = el.querySelectorAll('a[href]');
-      return push('list_item', textOf(el), links.length === 1 ? { href: hrefOf(links[0]) } : {});
+      return push(el.tagName === 'LI' ? 'list_item' : 'record', record ?? textOf(el),
+        links.length === 1 ? { href: hrefOf(links[0]) } : {});
     }
     walk(el);
   }
