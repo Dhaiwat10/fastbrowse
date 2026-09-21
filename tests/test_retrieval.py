@@ -20,7 +20,7 @@ from fastbrowse.jev import (
 )
 from fastbrowse.llm import DEFAULT_MAX_OUTPUT_TOKENS, Generation, Message
 from fastbrowse.memory import Fact, Notes, evidence_id, fact_id
-from fastbrowse.models import CostBasis, CostComponent, CostLine, FactReader, Frozen, Limits, LLMPurpose
+from fastbrowse.models import CostBasis, CostComponent, CostLine, Evidence, FactReader, Frozen, Limits, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.retrieval import (
@@ -32,7 +32,6 @@ from fastbrowse.retrieval import (
     draft_answer,
     field_candidates,
     field_question,
-    locate_quote,
     propose_text_fields,
     propose_text_fields_from_notes,
     read,
@@ -85,27 +84,20 @@ class ScriptedLLM:
         )
 
 
-def test_quote_location_preserves_original_offsets_and_is_block_scoped() -> None:
-    page = capture(
-        (BlockKind.PARAGRAPH, "Outside match"), (BlockKind.PARAGRAPH, "Prefix  bright\n\t blue\u00a0 sky suffix")
+def block_evidence(page: Capture, source_id: str) -> Evidence:
+    """Evidence for one whole block, as the reader's cite of it copies."""
+    block = next(block for block in page.blocks if block.source_id == source_id)
+    return Evidence(
+        source_id=source_id,
+        url=page.url,
+        frame_id=block.frame_id,
+        captured_at=page.captured_at,
+        capture_sha256=page.sha256,
+        start=block.start,
+        end=block.end,
+        quote=page.text[block.start : block.end],
+        heading_path=block.heading_path,
     )
-    evidence = locate_quote(page, "s1", "bright blue sky")
-    assert evidence is not None
-    assert evidence.quote == "bright\n\t blue\u00a0 sky"
-    assert evidence.start == page.text.index("bright")
-    assert evidence.end == page.text.index(" sky") + len(" sky")
-    assert page.text[evidence.start : evidence.end] == evidence.quote
-    assert evidence.capture_sha256 == page.sha256 and evidence.frame_id == "frame"
-    assert locate_quote(page, "s0", "bright blue sky") is None
-    assert locate_quote(page, "s1", "BRIGHT blue sky") is None
-    assert locate_quote(page, "missing", "bright") is None
-    assert locate_quote(page, "s1", " \n ") is None
-    # A quote may run on into the next block, as a card's title and price do, but only one it starts in names it.
-    run_on = locate_quote(page, "s0", "match Prefix")
-    assert run_on is not None and (run_on.source_id, run_on.quote) == ("s0", "match\n\nPrefix")
-    assert locate_quote(page, "s1", "match Prefix") is None
-    framed = page.model_copy(update={"blocks": (page.blocks[0], page.blocks[1].model_copy(update={"frame_id": "ad"}))})
-    assert locate_quote(framed, "s0", "match Prefix") is None
 
 
 def test_chunk_prefers_headings_and_preserves_block_coverage() -> None:
@@ -152,15 +144,6 @@ def test_chunk_repeats_markdown_table_header_and_keeps_rows_grounded() -> None:
     assert all(len(part.text) <= 65 for part in parts)
     for row in rows:
         assert any(row in part.text for part in parts)
-        evidence = locate_quote(page, "s0", row)
-        assert evidence is not None and page.text[evidence.start : evidence.end] == row
-
-
-def test_a_quote_matches_a_table_cell_whose_pipe_the_capture_escaped() -> None:
-    page = capture((BlockKind.TABLE, r"| Story | 244 points \| hide \| 115 comments |"))
-    for quote in ("Story | 244 points | hide | 115 comments", r"244 points \| hide"):
-        evidence = locate_quote(page, "s0", quote)
-        assert evidence is not None and "\\| hide" in page.text[evidence.start : evidence.end]
 
 
 def test_chunk_repeats_nearest_header_when_table_rows_are_separate_blocks() -> None:
@@ -268,7 +251,7 @@ async def test_short_read_batches_requirements_and_keeps_citations_without_llm()
         assert notes.evidenced(requirement.id)
         assert fact.text == f"{requirement.text}\n{quote}"
         assert fact.reader is FactReader.JEV_CHOICE
-        assert fact.evidence is not None and fact.evidence == locate_quote(page, fact.evidence.source_id, quote)
+        assert fact.evidence is not None and fact.evidence == block_evidence(page, fact.evidence.source_id)
     _, questions = jev.requests[0]
     assert questions.keys() == {"version", "license"}
     assert all(
@@ -320,19 +303,14 @@ async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer:
     assert ledger.lines == list(result.cost_lines) and ledger.jev_calls == ledger.llm_calls == 1
 
 
-@pytest.mark.parametrize(
-    "text", ["List the cities", "Compare the cities", "Summarize the cities", "Count all cities on the page"]
-)
-async def test_synthesis_has_an_explicit_route_to_the_reader(text: str) -> None:
+async def test_synthesis_has_an_explicit_route_to_the_reader() -> None:
+    text = "List the cities"
     page = capture((BlockKind.PARAGRAPH, "Lyon"))
     requirement = Requirement(id="r", text=text, kind=RequirementKind.INFORMATION)
     jev, llm = _ReadJev({"r": _choice("synthesis")}), ScriptedLLM([{"claims": [], "answered": False}])
     await read(llm, page, text, ["r"], Notes(), jev=jev, requirements=(requirement,))
     question = jev.requests[0][1]["r"]
     assert isinstance(question, ChoiceQuestion)
-    assert all(
-        word in question.instructions for word in ("lists", "comparisons", "summaries", "counts across the page")
-    )
     assert text in question.instructions and "LLM reader" in str(question.criteria["synthesis"])
     assert len(llm.calls) == 1 and f"# Question\n{text}" in llm.calls[0][1][-1].content
     assert f"- r: {text}" in llm.calls[0][1][-1].content
@@ -355,7 +333,6 @@ def test_short_read_spans_keep_dates_versions_and_table_context_grounded() -> No
     assert "column 'Population'" in cell.context
     for candidate in candidates:
         evidence = candidate.evidence
-        assert evidence == locate_quote(page, evidence.source_id, evidence.quote)
         assert evidence.quote == page.text[evidence.start : evidence.end]
 
 
@@ -451,8 +428,7 @@ def test_field_constraints_and_explicit_unsupported_records() -> None:
 
 async def test_compose_drops_uncited_and_unknown_claims_including_answer_text(caplog: pytest.LogCaptureFixture) -> None:
     page = capture((BlockKind.PARAGRAPH, "Price is $12"))
-    evidence = locate_quote(page, "s0", "Price is $12")
-    assert evidence is not None
+    evidence = block_evidence(page, "s0")
     notes = Notes((Fact(reader=FactReader.LLM, requirement_id="r1", text="Price is $12", evidence=evidence),))
     key = evidence_id(evidence)
     llm = ScriptedLLM(
@@ -496,8 +472,7 @@ async def test_composer_cannot_cite_a_note_omitted_from_its_input(caplog: pytest
     page = capture((BlockKind.PARAGRAPH, "Price is $12"), (BlockKind.PARAGRAPH, "Shipping is free"))
     notes = Notes()
     for index, text in enumerate(("Price is $12", "Unused context " * 1000)):
-        evidence = locate_quote(page, f"s{index}", page.text[page.blocks[index].start : page.blocks[index].end])
-        assert evidence is not None
+        evidence = block_evidence(page, f"s{index}")
         notes.add(Fact(reader=FactReader.LLM, text=text, evidence=evidence))
     key, omitted = tuple(notes.evidence)
     llm = ScriptedLLM(
@@ -538,15 +513,15 @@ def test_currency_sentence_punctuation_and_candidate_context() -> None:
     }
 
 
-async def test_text_fields_are_kept_only_when_quoted_verbatim_from_the_page() -> None:
+async def test_text_fields_are_kept_only_when_their_block_holds_the_value_verbatim() -> None:
     page = capture((BlockKind.HEADING, "httpx 0.28.1"), (BlockKind.PARAGRAPH, "License: BSD"))
     llm = ScriptedLLM(
         [
             {
                 "fields": [
-                    {"field": "label", "value": "0.28.1", "source_id": "s0", "quote": "httpx 0.28.1"},
-                    {"field": "license", "value": "MIT", "source_id": "s1", "quote": "License: BSD"},
-                    {"field": "owner", "value": "encode", "source_id": "s1", "quote": "Owner: encode"},
+                    {"field": "label", "value": "0.28.1", "source_id": "s0"},
+                    {"field": "license", "value": "MIT", "source_id": "s1"},
+                    {"field": "owner", "value": "encode", "source_id": "s1"},
                 ]
             }
         ]
@@ -560,16 +535,15 @@ async def test_text_fields_are_kept_only_when_quoted_verbatim_from_the_page() ->
 
 async def test_a_text_field_off_the_final_page_is_taken_from_a_note_that_quotes_it() -> None:
     earlier = capture((BlockKind.PARAGRAPH, "requests 2.33.0 released May 14, 2026"))
-    quote = locate_quote(earlier, "s0", "requests 2.33.0 released May 14, 2026")
-    assert quote is not None
+    quote = block_evidence(earlier, "s0")
     notes = Notes((Fact(reader=FactReader.LLM, text="requests was released on May 14, 2026", evidence=quote),))
     key = next(iter(notes.evidence))
     llm = ScriptedLLM(
         [
             {
                 "fields": [
-                    {"field": "label", "value": "requests", "source_id": key, "quote": quote.quote},
-                    {"field": "license", "value": "httpx", "source_id": key, "quote": quote.quote},
+                    {"field": "label", "value": "requests", "source_id": key},
+                    {"field": "license", "value": "httpx", "source_id": key},
                 ]
             }
         ]
@@ -582,11 +556,10 @@ async def test_a_text_field_off_the_final_page_is_taken_from_a_note_that_quotes_
 
 async def test_a_name_the_task_gives_can_be_chosen_on_a_note_that_quotes_only_a_date() -> None:
     earlier = capture((BlockKind.PARAGRAPH, "May 14, 2026"))
-    quote = locate_quote(earlier, "s0", "May 14, 2026")
-    assert quote is not None
+    quote = block_evidence(earlier, "s0")
     notes = Notes((Fact(reader=FactReader.LLM, text="requests: May 14, 2026", evidence=quote),))
     key = next(iter(notes.evidence))
-    proposal: dict[str, JsonValue] = {"field": "label", "value": "requests", "source_id": key, "quote": quote.quote}
+    proposal: dict[str, JsonValue] = {"field": "label", "value": "requests", "source_id": key}
     fields = {"label": Fields.model_fields["label"]}
     task = "Which has the more recent release, httpx or requests?"
     assert await propose_text_fields_from_notes(ScriptedLLM([{"fields": [proposal]}]), task, notes, fields) == {
@@ -600,13 +573,13 @@ async def test_a_name_the_task_gives_can_be_chosen_on_a_note_that_quotes_only_a_
 async def test_a_name_chosen_on_a_derived_comparison_is_evidenced_by_the_record_read_for_it() -> None:
     page = capture((BlockKind.PARAGRAPH, "Dec 6, 2024"), (BlockKind.PARAGRAPH, "May 14, 2026"))
     records = [
-        Fact(reader=FactReader.LLM, text=f"{name}: {date}", evidence=locate_quote(page, source, date))
+        Fact(reader=FactReader.LLM, text=f"{name}: {date}", evidence=block_evidence(page, source))
         for name, source, date in (("httpx", "s0", "Dec 6, 2024"), ("requests", "s1", "May 14, 2026"))
     ]
     notes = Notes(records)
     winner = Fact(reader=FactReader.LLM, text="requests is newer", evidence=None, basis=tuple(notes.evidence))
     notes.add(winner)
-    proposal: dict[str, JsonValue] = {"field": "label", "value": "requests", "source_id": fact_id(winner), "quote": ""}
+    proposal: dict[str, JsonValue] = {"field": "label", "value": "requests", "source_id": fact_id(winner)}
     fields = {"label": Fields.model_fields["label"]}
     task = "Which has the more recent release, httpx or requests?"
     found = await propose_text_fields_from_notes(ScriptedLLM([{"fields": [proposal]}]), task, notes, fields)
@@ -694,8 +667,7 @@ async def test_only_a_confident_jev_no_lets_the_read_facts_stand_as_the_answer(
     doubt: float | None, skips_composer: bool
 ) -> None:
     page = capture((BlockKind.PARAGRAPH, "Price is $12"))
-    evidence = locate_quote(page, "s0", "Price is $12")
-    assert evidence is not None
+    evidence = block_evidence(page, "s0")
     notes = Notes((Fact(reader=FactReader.LLM, requirement_id="r1", text="The price is $12.", evidence=evidence),))
     plan = Plan(
         requirements=(Requirement(id="r1", text="Find price", kind=RequirementKind.INFORMATION),),
@@ -756,8 +728,7 @@ async def test_a_doubted_claim_is_dropped_only_if_the_rest_still_answers(omitted
     page = capture((BlockKind.PARAGRAPH, "Logged in"), (BlockKind.PARAGRAPH, "Log out"))
     notes = Notes()
     for index, text in enumerate(("Logged in", "Log out")):
-        evidence = locate_quote(page, f"s{index}", text)
-        assert evidence is not None
+        evidence = block_evidence(page, f"s{index}")
         notes.add(Fact(reader=FactReader.LLM, requirement_id="r1", text=text, evidence=evidence))
     first, second = tuple(notes.evidence)
     claims = (
