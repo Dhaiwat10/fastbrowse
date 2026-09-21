@@ -74,7 +74,7 @@ where hosted Browser Use is faster on some. Google Flights took 109.3s here, slo
 
 ## Try it
 
-Needs [uv](https://docs.astral.sh/uv/) and Chrome (not needed with `--cloud`); uv fetches Python itself (3.13 or newer).
+Needs [uv](https://docs.astral.sh/uv/) and a [Browser Use Cloud](https://cloud.browser-use.com) key (`BROWSER_USE_API_KEY`), or Chrome for `--local`; uv fetches Python itself (3.13 or newer).
 
 ```sh
 export AI_GATEWAY_API_KEY=...   # or TYPESAFE_API_KEY, for Jev
@@ -101,10 +101,10 @@ the quotes behind the answer, and cost by component.
 | Flag | Effect |
 |:--|:--|
 | `--start URL` | the page to open first; worked out from the task when omitted |
-| `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`). Prints a URL to watch it live |
-| `--headed` | show the local Chrome window |
-| `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in |
-| `--cloud-profile ID` | run on a Browser Use Cloud profile, signed in as whoever set it up (needs `--cloud`) |
+| `--local` | use local Chrome instead of a Browser Use Cloud browser. Cloud is the default: it passes bot checks a fresh Chrome fails, and prints a URL to watch the run live |
+| `--headed` | show the local Chrome window (implies `--local`) |
+| `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in (implies `--local`) |
+| `--cloud-profile ID` | run on a Browser Use Cloud profile, signed in as whoever set it up |
 | `--authorize` | allow submit, pay, delete and send; without it the run stops at `needs_confirmation` first |
 | `--secret NAME=ENV_VAR[@ORIGIN]` | let the agent type `$ENV_VAR` on the declared origin, or the `--start` origin if omitted; models only see `NAME`. An explicit origin needs no `--start` |
 | `--bitwarden ITEM` | match the vault login's saved URIs against `--start`, then allow its `username` and `password` only on that start origin |
@@ -135,7 +135,7 @@ browser of their own; the run inherits the cookies and no model is shown a crede
 
 ```sh
 uv run fastbrowse "Add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
-  --start https://www.amazon.com/ --cloud --cloud-profile prof_1234
+  --start https://www.amazon.com/ --cloud-profile prof_1234
 ```
 
 Or from your vault, with the [Bitwarden CLI](https://bitwarden.com/help/cli/) unlocked. The item's saved URIs
@@ -301,7 +301,7 @@ The server's flags decide what a calling model may do; a call can ask for less, 
 
 | Flag | Effect |
 |:--|:--|
-| `--cloud`, `--headed`, `--profile DIR`, `--downloads DIR` | as for the CLI, fixed for every call |
+| `--local`, `--headed`, `--profile DIR`, `--downloads DIR` | as for the CLI, fixed for every call |
 | `--cloud-profile ID` | every call runs signed in as that cloud profile; a calling model cannot choose it |
 | `--allow-authorize` | let a call pass `authorize` to go through irreversible actions; without it they always stop at `needs_confirmation` |
 | `--secret NAME=ENV_VAR@ORIGIN` | typed when a call's start page is on `ORIGIN` (`https://*.site.com` covers its hosts); the model sees `NAME` only |

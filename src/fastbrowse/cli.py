@@ -1,12 +1,12 @@
 """Run one task from the terminal.
 
     fastbrowse "What is the latest version of httpx?" --start https://pypi.org/
-    fastbrowse "Send the form" --start https://example.com/contact --authorize --cloud --json
+    fastbrowse "Send the form" --start https://example.com/contact --authorize --json
 
-A local headless Chrome by default; `--headed` shows it, and `--profile DIR` keeps its profile so a site
-signed into there once stays signed in. `--cloud-profile ID` is the same idea on a cloud browser: the run
-starts with the cookies that profile holds. `--cloud` runs on a Browser Use Cloud browser (BROWSER_USE_API_KEY)
-and prints where to watch it live.
+A Browser Use Cloud browser by default (BROWSER_USE_API_KEY), with a URL printed to watch it live;
+`--cloud-profile ID` starts it with the cookies that profile holds. `--local` runs a headless local Chrome
+instead; `--headed` shows it, and `--profile DIR` keeps its profile so a site signed into there once stays
+signed in. Either of those implies `--local`.
 Secrets come from `--secret NAME=ENV_VAR`, read from that variable, or `--bitwarden ITEM`, a vault login's
 `username` and `password`. `--secret NAME=ENV_VAR@ORIGIN` declares an exact or wildcard origin; without it,
 the scope is the `--start` origin. A secret with neither is refused. Bitwarden matches the item against
@@ -81,9 +81,11 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--start", default=None, help="URL to open before the task starts; worked out from the task if omitted"
     )
-    parser.add_argument("--cloud", action="store_true", help="use a Browser Use Cloud browser")
-    parser.add_argument("--headed", action="store_true", help="show the local Chrome window")
-    parser.add_argument("--profile", type=Path, default=None, help="Chrome profile directory kept between runs")
+    parser.add_argument("--local", action="store_true", help="use local Chrome instead of a Browser Use Cloud browser")
+    parser.add_argument("--headed", action="store_true", help="show the local Chrome window (implies --local)")
+    parser.add_argument(
+        "--profile", type=Path, default=None, help="Chrome profile directory kept between runs (implies --local)"
+    )
     parser.add_argument(
         "--cloud-profile", metavar="ID", default=None, help="a Browser Use Cloud profile to run signed in as"
     )
@@ -137,7 +139,7 @@ async def run(args: argparse.Namespace) -> int:
     result = await run_task(
         args.task,
         start=args.start,
-        browser_api_key=options.browser_key(load_settings(), args.cloud),
+        browser_api_key=options.browser_key(load_settings(), options.cloud(args.local, args.headed, args.profile)),
         chrome=options.chrome(load_settings(), args.headed, args.profile),
         cloud_profile=args.cloud_profile,
         secrets=_secrets(args.secret, args.bitwarden, args.start),

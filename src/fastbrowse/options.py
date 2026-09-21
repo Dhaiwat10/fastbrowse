@@ -15,6 +15,16 @@ from fastbrowse.clients.environment import Settings
 from fastbrowse.models import LocalChrome, StepResult
 
 
+def cloud(local: bool, headed: bool, profile: Path | None) -> bool:
+    """Browser Use Cloud unless the operator asked for local Chrome, by `--local` or by a flag only it has.
+
+    Cloud is the default: its browsers pass bot checks a fresh local Chrome fails, and they carry none of a desktop
+    Chrome's own interface. Chrome's leaked-password bubble sits outside the page, where the agent can neither see
+    nor dismiss it, and it took every click after saucedemo's sign-in.
+    """
+    return not (local or headed or profile is not None)
+
+
 def browser_key(settings: Settings, cloud: bool) -> str | None:
     """The cloud browser's key when the run wants one; None runs local Chrome."""
     return settings.browser_key() if cloud else None
