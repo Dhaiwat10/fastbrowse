@@ -54,7 +54,10 @@ def _unreachable(cause: Exception) -> bool:
     """A connection the browser's endpoint dropped or refused for now, as a cloud browser still starting does."""
     if isinstance(cause, InvalidStatus):
         return cause.response.status_code in RETRYABLE_STATUS
-    return isinstance(cause, (InvalidMessage, ConnectionClosed, OSError, TimeoutError))
+    # A malformed reply, such as a proxy's bare 401, and a TLS failure both need the configuration changed.
+    if isinstance(cause, InvalidMessage):
+        return isinstance(cause.__cause__, (EOFError, ConnectionError))
+    return isinstance(cause, (ConnectionClosed, ConnectionError, TimeoutError))
 
 
 # Response-stage interception is enough: fastbrowse only needs the bytes of a save-as download, never to

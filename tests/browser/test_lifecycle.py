@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import re
+import ssl
 import subprocess
 import sys
 import threading
@@ -101,10 +102,21 @@ async def test_session_setup_rolls_back(monkeypatch: pytest.MonkeyPatch, method:
     assert ("Target.closeTarget" in transport.calls) == (method != "Target.setDiscoverTargets")
 
 
+def dropped_handshake(cause: Exception) -> InvalidMessage:
+    error = InvalidMessage("did not receive a valid HTTP response")
+    error.__cause__ = cause
+    return error
+
+
 @pytest.mark.parametrize(
     ("failure", "outage"),
-    [(InvalidMessage("did not receive a valid HTTP response"), True), (ValueError("not a websocket URL"), False)],
-    ids=["dropped handshake", "bad endpoint"],
+    [
+        (dropped_handshake(EOFError("connection closed while reading HTTP status line")), True),
+        (ConnectionRefusedError(), True),
+        (dropped_handshake(ValueError("unsupported protocol; expected HTTP/1.1: HTTP/1.0 401")), False),
+        (ssl.SSLCertVerificationError(), False),
+    ],
+    ids=["dropped handshake", "refused", "malformed reply", "bad certificate"],
 )
 async def test_a_browser_unreachable_at_start_is_an_outage(
     monkeypatch: pytest.MonkeyPatch, failure: Exception, outage: bool
