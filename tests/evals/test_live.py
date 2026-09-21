@@ -75,10 +75,10 @@ async def test_concurrent_traces_keep_only_their_runs_events(
 
 def test_videos_count_up_past_names_already_claimed(tmp_path: Path) -> None:
     # Repeats are allocated before any of them records, so a name must be taken the moment it is handed out.
-    first = live.video_path(tmp_path, "fast", task("hn-top"))
-    assert first == tmp_path.resolve() / "fast" / "hn-top-1.mp4"
-    assert live.video_path(tmp_path, "fast", task("hn-top")).name == "hn-top-2.mp4"
-    assert live.video_path(tmp_path, "ultrafast", task("hn-top")).name == "hn-top-1.mp4"
+    first = live.video_path(tmp_path, "fastbrowse", task("hn-top"))
+    assert first == tmp_path.resolve() / "fastbrowse" / "hn-top-1.mp4"
+    assert live.video_path(tmp_path, "fastbrowse", task("hn-top")).name == "hn-top-2.mp4"
+    assert live.video_path(tmp_path, "jev-ultrafast", task("hn-top")).name == "hn-top-1.mp4"
 
 
 @pytest.mark.parametrize(("status", "passed"), [("done", True), ("blocked", False)])
@@ -96,7 +96,7 @@ async def test_ultrafast_passes_only_on_a_correct_outcome_it_called_done(
 
     monkeypatch.setattr(live, "ultrafast_arm", ultrafast_arm)
     async with httpx.AsyncClient() as http:
-        row = await live.run_arm("ultrafast", arxiv, http, Path(), bitwarden=False, record=None)
+        row = await live.run_arm("jev-ultrafast", arxiv, http, Path(), bitwarden=False, record=None)
     assert row.correct is True
     assert row.passed is passed
     assert row.seconds == 3.0
@@ -125,11 +125,11 @@ def test_a_real_gap_in_probabilities_is_left_alone() -> None:
 
 def test_each_task_runs_only_where_it_grades_on_equal_terms() -> None:
     for live_task in TASKS:
-        if "ultrafast" in live_task.arms:
+        if "jev-ultrafast" in live_task.arms:
             # jev-ultrafast has no answer, so its tasks must be graded on the page alone.
             assert live_task.output_schema is None
             assert "hosted" not in live_task.arms
-    assert {t.id for t in TASKS if "ultrafast" in t.arms} >= {"wiki-open", "flights-search"}
+    assert {t.id for t in TASKS if "jev-ultrafast" in t.arms} >= {"wiki-open", "flights-search"}
 
 
 @pytest.mark.parametrize(

@@ -50,7 +50,7 @@ Unit tests cannot tell you whether the agent still browses well. The suites can.
 ```sh
 uv run python -m fastbrowse.evals.runner                      # local fixtures, headless Chrome, ~$0.005 a task
 uv run --extra browser-use python -m fastbrowse.evals.live    # live head-to-head, three arms
-uv run --extra browser-use python -m fastbrowse.evals.live --arms fast --suite heldout --repeat 3
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse --suite heldout --repeat 3
 ```
 
 `--suite` picks the set: `core` (the published suite), `dev`, `heldout`. **Agent changes are iterated against

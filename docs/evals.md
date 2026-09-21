@@ -25,8 +25,8 @@ Needs Jev and LLM keys (see `fastbrowse.clients.environment`). Costs about $0.00
 ## Live head-to-head
 
 ```sh
-uv run --extra browser-use python -m fastbrowse.evals.live --arms fast ultrafast hosted
-uv run --extra browser-use python -m fastbrowse.evals.live --arms fast --category lookup --repeat 3
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse jev-ultrafast hosted
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse --category lookup --repeat 3
 ```
 
 The same prompts run through three arms: fastbrowse on a Browser Use Cloud browser, [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (pinned commit, run in its own environment by `scripts/ultrafast_arm.py`) on the same kind of browser, and hosted Browser Use. Every run ends when its agent does; fastbrowse and jev-ultrafast share a 30-step limit, and hosted Browser Use exposes none. Tasks are defined in `src/fastbrowse/evals/live_tasks.py`. Truth is fetched at run time from PyPI's JSON API, the Hacker News API and GitHub's REST API, so grades follow the live site; the rest are fixed by the site (an arXiv title, a practice shop's prices). Cost includes reported model charges, estimates where only token usage is available, and the browser and proxy cost returned when the cloud browser stops; the hosted arm reports `total_cost_usd`.
@@ -57,7 +57,7 @@ unreadable URL evidence falls back to the controls. The encoding is undocumented
 payloads. Neither a URL nor a filled form proves submission: rendered result rows remain required, along with
 the Nonstop control for `flights-search`. Hosted Browser Use exposes no final page, so its answer-only limit remains.
 
-The login sites are public practice sites whose credentials are printed on the page, so the suite needs nothing private. `--bitwarden` makes the fast arm read them from vault items instead, which exercises the whole vault path: `bw` lookup, the item's saved URI checked against the start origin, and secret names (never values) shown to the models. Create the items once with your vault unlocked:
+The login sites are public practice sites whose credentials are printed on the page, so the suite needs nothing private. `--bitwarden` makes the fastbrowse arm read them from vault items instead, which exercises the whole vault path: `bw` lookup, the item's saved URI checked against the start origin, and secret names (never values) shown to the models. Create the items once with your vault unlocked:
 
 ```sh
 export BW_SESSION=$(bw unlock --raw)
@@ -94,13 +94,13 @@ skills the core suite barely touches: pagination, frames, new windows, hover, sc
 server-rendered forms. Each pair across the split exercises the same skill, so the two sets are comparable.
 
 ```sh
-uv run --extra browser-use python -m fastbrowse.evals.live --arms fast --suite heldout --repeat 3
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse --suite heldout --repeat 3
 ```
 
 `--only` selects within the chosen suites, so a held-out task needs its suite as well as its id:
 
 ```sh
-uv run --extra browser-use python -m fastbrowse.evals.live --arms fast --suite heldout     --only books-mystery-cheapest quotes-einstein-count --repeat 3
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse --suite heldout     --only books-mystery-cheapest quotes-einstein-count --repeat 3
 ```
 
 The rule that makes the split worth having: **agent changes are iterated against `dev` only.** `heldout` is run
@@ -184,7 +184,7 @@ $0.0086) is what counts. Nothing else was re-run.
 
 ### Full suite
 
-Three passes of all 15 tasks on the fast arm on 2026-09-18: **37/45 passed, 37/45 correct, $0.65 in total**, 1409s. Per pass: 13, 11 and 13. Excluding the two tasks that run to their step limit, a task took a median of 19.4s and $0.0074.
+Three passes of all 15 tasks on the fastbrowse arm on 2026-09-18: **37/45 passed, 37/45 correct, $0.65 in total**, 1409s. Per pass: 13, 11 and 13. Excluding the two tasks that run to their step limit, a task took a median of 19.4s and $0.0074.
 
 | Category | Passed | Failures |
 |---|---|---|

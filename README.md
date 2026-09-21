@@ -338,7 +338,7 @@ uv sync --all-extras                                         # the hosted-arm SD
 uv run pre-commit install                                    # ruff and ty before each commit
 uv run python -m fastbrowse.evals.runner                     # local fixtures, about $0.005 a task
 uv run --extra browser-use python -m fastbrowse.evals.live                     # live head-to-head, 8 at a time
-uv run --extra browser-use python -m fastbrowse.evals.live --arms fast        # ours alone
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse        # ours alone
 uv run --extra browser-use python -m fastbrowse.evals.live --suite heldout   # the never-debugged split
 uv run ruff format . && uv run ruff check . && uv run ty check && uv run pytest
 uv run python scripts/no_slop.py && uv run vale sync && uv run vale README.md CHANGELOG.md AGENTS.md docs src scripts tests

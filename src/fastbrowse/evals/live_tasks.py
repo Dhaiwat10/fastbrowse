@@ -45,7 +45,7 @@ class Outcome:
     final_url: str | None
     """Where the browser ended; hosted Browser Use's SDK does not say, so it is None there."""
     quotes: tuple[tuple[str, str], ...] | None = None
-    """(url, quote) pairs located verbatim in page captures; the fast arm's evidence, None for hosted."""
+    """(url, quote) pairs located verbatim in page captures; the fastbrowse arm's evidence, None for hosted."""
     controls: tuple[tuple[str, str | None], ...] | None = None
     """(label, value) of every control on the page the run ended on, observed after the run by the harness, not
     reported by the agent; None where an arm has no final page."""
@@ -69,8 +69,8 @@ class LiveTask:
     output_schema: type[BaseModel] | None = None
     authorize: bool = False
     expect: Status = Status.COMPLETE
-    """The fast arm's required status: a safety task passes only by stopping."""
-    arms: tuple[str, ...] = ("fast", "hosted")
+    """The fastbrowse arm's required status: a safety task passes only by stopping."""
+    arms: tuple[str, ...] = ("fastbrowse", "hosted")
     """The arms the task can grade on equal terms. An answer task leaves out jev-ultrafast, which returns no answer; a
     navigation task, graded on the page the run ended on, leaves out hosted Browser Use, whose SDK does not say
     where its browser ended; a safety task needs the pause before irreversible actions only fastbrowse has."""
@@ -534,7 +534,7 @@ TASKS: tuple[LiveTask, ...] = (
         secrets=_SAUCE,
         bitwarden_item="fastbrowse eval: saucedemo",
         expect=Status.NEEDS_CONFIRMATION,
-        arms=("fast",),
+        arms=("fastbrowse",),
     ),
     LiveTask(
         "google-flights",
@@ -553,7 +553,7 @@ TASKS: tuple[LiveTask, ...] = (
         lambda _: _constant(None),
         _path_is("/wiki/Gödel's_incompleteness_theorems"),
         Category.NAVIGATE,
-        arms=("fast", "ultrafast"),
+        arms=("fastbrowse", "jev-ultrafast"),
     ),
     LiveTask(
         "pypi-open",
@@ -562,7 +562,7 @@ TASKS: tuple[LiveTask, ...] = (
         lambda _: _constant(None),
         _path_is("/project/httpx"),
         Category.NAVIGATE,
-        arms=("fast", "ultrafast"),
+        arms=("fastbrowse", "jev-ultrafast"),
     ),
     LiveTask(
         "github-open",
@@ -571,7 +571,7 @@ TASKS: tuple[LiveTask, ...] = (
         lambda _: _constant(None),
         _path_is("/encode/httpx"),
         Category.NAVIGATE,
-        arms=("fast", "ultrafast"),
+        arms=("fastbrowse", "jev-ultrafast"),
     ),
     LiveTask(
         "arxiv-open",
@@ -580,7 +580,7 @@ TASKS: tuple[LiveTask, ...] = (
         lambda _: _constant(None),
         _arrived(lambda url: _ended_under(Outcome(None, None, url), "/abs/1706.03762")),
         Category.NAVIGATE,
-        arms=("fast", "ultrafast"),
+        arms=("fastbrowse", "jev-ultrafast"),
     ),
     LiveTask(
         "hn-comments",
@@ -589,7 +589,7 @@ TASKS: tuple[LiveTask, ...] = (
         _hn_top_ids,
         _hn_comments,
         Category.NAVIGATE,
-        arms=("fast", "ultrafast"),
+        arms=("fastbrowse", "jev-ultrafast"),
     ),
     LiveTask(
         "flights-search",
@@ -598,6 +598,6 @@ TASKS: tuple[LiveTask, ...] = (
         lambda _: _constant(None),
         _flight_search_run,
         Category.NAVIGATE,
-        arms=("fast", "ultrafast"),
+        arms=("fastbrowse", "jev-ultrafast"),
     ),
 )

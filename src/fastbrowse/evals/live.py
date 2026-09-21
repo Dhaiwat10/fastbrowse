@@ -1,16 +1,16 @@
 """Head-to-head on live sites: fastbrowse, jev-ultrafast and hosted Browser Use, same prompts, no dollar or time caps.
 
     uv run --extra browser-use python -m fastbrowse.evals.live [--only TASK_ID ...] [--category CATEGORY ...]
-        [--arms fast ultrafast hosted] [--bitwarden] [--repeat N] [--record DIR]
+        [--arms fastbrowse jev-ultrafast hosted] [--bitwarden] [--repeat N] [--record DIR]
         [--out artifacts/evals/live.jsonl]
 
-Needs BROWSER_USE_API_KEY (every arm), and the Jev and LLM keys in fastbrowse.clients.environment (fast and
-ultrafast arms). Each run prints a WATCH line with the URL where its browser can be watched live.
+Needs BROWSER_USE_API_KEY (every arm), and the Jev and LLM keys in fastbrowse.clients.environment (fastbrowse and
+jev-ultrafast arms). Each run prints a WATCH line with the URL where its browser can be watched live.
 
-The fast and ultrafast arms each drive a fresh Browser Use Cloud browser; hosted Browser Use brings its own.
+The fastbrowse and jev-ultrafast arms each drive a fresh Browser Use Cloud browser; hosted Browser Use brings its own.
 jev-ultrafast runs as its published package in an environment of its own (see scripts/ultrafast_arm.py).
 
-Tasks and their grading live in fastbrowse.evals.live_tasks. With --bitwarden, the fast arm reads each login
+Tasks and their grading live in fastbrowse.evals.live_tasks. With --bitwarden, the fastbrowse arm reads each login
 task's credentials from its vault item (created by scripts/eval_vault.py) instead of the task. With --record,
 each run is saved as DIR/<arm>/<task>-<n>.mp4, n counting up from 1 past any video already there.
 
@@ -58,7 +58,7 @@ from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
 from fastbrowse.telemetry import TRACE
 
-ARMS = ("fast", "ultrafast", "hosted")
+ARMS = ("fastbrowse", "jev-ultrafast", "hosted")
 MAX_STEPS = 30
 LIMITS = Limits(max_steps=MAX_STEPS)
 """No arm has a dollar or time cap: a cap one arm reaches measures the budget, not the arm, so every run ends
@@ -73,7 +73,7 @@ ULTRAFAST_TEXT_MODEL = "inception/mercury-2.5"
 
 def _watch(arm: str, task: LiveTask, live_url: str | None) -> None:
     if live_url:
-        print(f"WATCH {arm:9} {task.id:18} {live_url}", flush=True)
+        print(f"WATCH {arm:13} {task.id:18} {live_url}", flush=True)
 
 
 def _secrets(task: LiveTask, bitwarden: bool) -> ScopedSecrets | None:
@@ -306,7 +306,7 @@ async def fast_arm(
 
 async def _on_fast_event(task: LiveTask, event: StepEvent | BrowserEvent) -> None:
     if isinstance(event, BrowserEvent):
-        _watch("fast", task, event.live_url)
+        _watch("fastbrowse", task, event.live_url)
 
 
 async def prepare_ultrafast() -> None:
@@ -346,7 +346,7 @@ async def ultrafast_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path
     cloud = BrowserUseCloudBrowser(load_settings().browser_key(), http=http)
     async with cloud:
         booted = time.monotonic() - started
-        _watch("ultrafast", task, cloud.connection.live_url)
+        _watch("jev-ultrafast", task, cloud.connection.live_url)
         request = {
             "start": task.start,
             "goal": task.task,
@@ -474,11 +474,11 @@ async def run_arm(
     started = time.monotonic()
     at = time.time()
     try:
-        if arm == "fast":
+        if arm == "fastbrowse":
             outcome, report = await _fast_report(
                 task, http, downloads, bitwarden=bitwarden, record=record, started=started
             )
-        elif arm == "ultrafast":
+        elif arm == "jev-ultrafast":
             outcome, report = await ultrafast_arm(task, http, record=record)
         else:
             outcome, report = await hosted_arm(task, http, record=record)
@@ -501,7 +501,7 @@ async def run_arm(
     # Right and proven are graded apart: a correct answer the agent could not back with quotes is a
     # different defect from a wrong one, and one pass/fail column hid which the suite was showing.
     correct = failure is None
-    expected = {"fast": task.expect.value, "ultrafast": "done"}.get(arm)
+    expected = {"fastbrowse": task.expect.value, "jev-ultrafast": "done"}.get(arm)
     if expected is not None and failure is None and report.status != expected:
         failure = f"status {report.status}, expected {expected}"
     return EvalRow.model_validate(
@@ -636,9 +636,9 @@ async def main(argv: list[str]) -> int:
     handler.setLevel(logging.WARNING)
     handler.setFormatter(logging.Formatter("%(levelname)-7s %(run)s %(name)s: %(message)s"))
     logging.basicConfig(level=logging.WARNING, handlers=[handler])
-    if "fast" in args.arms:
+    if "fastbrowse" in args.arms:
         print(f"PROVIDERS {load_settings().providers()}", flush=True)
-    if "ultrafast" in args.arms:
+    if "jev-ultrafast" in args.arms:
         await prepare_ultrafast()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows: list[EvalRow] = []
@@ -668,7 +668,7 @@ async def main(argv: list[str]) -> int:
                     if row.status != Status.UNAVAILABLE:
                         break
                     wait = min(30 * (retries + 1), 300)
-                    print(f"RETRY {arm:9} {task.id:20} in {wait}s: {_cause(row)}", flush=True)
+                    print(f"RETRY {arm:13} {task.id:20} in {wait}s: {_cause(row)}", flush=True)
                     await asyncio.sleep(wait)
                 row = row.model_copy(update={"concurrency": args.concurrency, "retries": retries})
                 # Trace records hold whatever a component logged, so anything JSON cannot hold is written as text.
@@ -676,7 +676,7 @@ async def main(argv: list[str]) -> int:
                 out.flush()
                 mark = "PASS" if row.passed else "FAIL"
                 print(
-                    f"{mark} {arm:9} {task.id:20} {row.seconds!s:>6}s ${row.dollars!s:<8}",
+                    f"{mark} {arm:13} {task.id:20} {row.seconds!s:>6}s ${row.dollars!s:<8}",
                     "" if row.passed else _cause(row),
                     flush=True,
                 )

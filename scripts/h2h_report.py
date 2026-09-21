@@ -21,7 +21,7 @@ from typing import cast
 
 from fastbrowse.evals.live_tasks import TASKS
 
-ARMS = {"fast": "fastbrowse", "ultrafast": "jev-ultrafast", "hosted": "Browser Use (hosted)"}
+ARMS = {"fastbrowse": "fastbrowse", "jev-ultrafast": "jev-ultrafast", "hosted": "Browser Use (hosted)"}
 CATEGORIES = ("lookup", "login", "checkout", "safety", "widget", "navigate")
 
 
