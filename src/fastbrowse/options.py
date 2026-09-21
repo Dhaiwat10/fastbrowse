@@ -20,8 +20,7 @@ def cloud(local: bool, chrome: LocalChrome, cloud_profile: str | None) -> bool:
     which only local Chrome has, whether from its flag or from FASTBROWSE_HEADED / FASTBROWSE_PROFILE.
 
     Cloud is the default: its browsers pass bot checks a fresh local Chrome fails, and they carry none of a desktop
-    Chrome's own interface. Chrome's leaked-password bubble sits outside the page, where the agent can neither see
-    nor dismiss it, and it took every click after saucedemo's sign-in.
+    Chrome's own interface (see `_quiet_password_manager`).
     """
     on_cloud = not (local or chrome.headed or chrome.profile is not None)
     if cloud_profile is not None and not on_cloud:

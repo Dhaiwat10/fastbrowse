@@ -125,6 +125,8 @@ def _quiet_password_manager(profile: Path) -> None:
         held = json.loads(preferences.read_text(encoding="utf-8"))
     except FileNotFoundError:
         held = {}
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        held = None
     if not isinstance(held, dict):
         raise BrowserError(f"{preferences} is not a Chrome preferences file")
     held["credentials_enable_service"] = False
