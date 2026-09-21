@@ -48,7 +48,7 @@ async def run_task(
                 start=base_url + task.start,
                 inputs=task.inputs,
                 output_schema=task.output_schema,
-                limits=Limits(max_steps=25, max_dollars=0.25, max_seconds=180),
+                limits=Limits(max_steps=25),
                 authorization=task.authorization,
             )
     failure = task.check(result, recorder.snapshot())

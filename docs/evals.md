@@ -29,11 +29,10 @@ uv run --extra browser-use python -m fastbrowse.evals.live --arms fast ultrafast
 uv run --extra browser-use python -m fastbrowse.evals.live --arms fast --category lookup --repeat 3
 ```
 
-The same prompts run through three arms: fastbrowse on a Browser Use Cloud browser, [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (pinned commit, run in its own environment by `scripts/ultrafast_arm.py`) on the same kind of browser, and hosted Browser Use. Default limits are $0.25 and 300s for all arms, with 30 steps for fastbrowse and jev-ultrafast; hosted Browser Use exposes no step cap. Tasks are defined in `src/fastbrowse/evals/live_tasks.py`. Truth is fetched at run time from PyPI's JSON API, the Hacker News API and GitHub's REST API, so grades follow the live site; the rest are fixed by the site (an arXiv title, a practice shop's prices). Cost includes reported model charges, estimates where only token usage is available, and the browser and proxy cost returned when the cloud browser stops; the hosted arm reports `total_cost_usd`.
+The same prompts run through three arms: fastbrowse on a Browser Use Cloud browser, [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (pinned commit, run in its own environment by `scripts/ultrafast_arm.py`) on the same kind of browser, and hosted Browser Use. No arm has a dollar or time cap, so every run ends when its agent does; fastbrowse and jev-ultrafast share a 30-step limit, and hosted Browser Use exposes none. Tasks are defined in `src/fastbrowse/evals/live_tasks.py`. Truth is fetched at run time from PyPI's JSON API, the Hacker News API and GitHub's REST API, so grades follow the live site; the rest are fixed by the site (an arXiv title, a practice shop's prices). Cost includes reported model charges, estimates where only token usage is available, and the browser and proxy cost returned when the cloud browser stops; the hosted arm reports `total_cost_usd`.
 
 Use `--suite`, `--only` and `--category` to select tasks, `--bitwarden` for vault credentials, and
-`--record DIR` for videos. `--max-dollars 0` and `--max-seconds 0` remove those caps; `--concurrency N`
-sets how many runs overlap (default 8; one at a time timed the same, see below). The current jev-ultrafast pin is `1231850a0bf1a0c0341fe408ef1668dbbfdfac46`.
+`--record DIR` for videos. `--concurrency N` sets how many runs overlap (default 8; one at a time timed the same, see below). The current jev-ultrafast pin is `1231850a0bf1a0c0341fe408ef1668dbbfdfac46`.
 
 | Category | Task | Graded on |
 |---|---|---|

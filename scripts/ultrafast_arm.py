@@ -4,7 +4,7 @@ fastbrowse.evals.live starts this with `uv run --no-project --with jev-ultrafast
 installed as published and none of its code is copied here. It reads one JSON request on stdin and prints one
 JSON result on stdout:
 
-    {"start", "goal", "cdp_ws", "max_steps", "max_dollars", "max_seconds", "record": path or null}
+    {"start", "goal", "cdp_ws", "max_steps", "record": path or null}
 
 The browser is the caller's: a Browser Use Cloud browser reached through `cdp_ws`, the same kind the fast arm
 drives, so both arms pay the same round trips. jev-ultrafast calls TypeSafe's direct API with
@@ -235,11 +235,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
                 for state in agent.run():
                     if state["status"] in {"done", "blocked"}:
                         break
-                    if (
-                        len(state["decisions"]) >= request["max_steps"]
-                        or meter.dollars > request["max_dollars"]
-                        or time.monotonic() - started > request["max_seconds"]
-                    ):
+                    if len(state["decisions"]) >= request["max_steps"]:
                         status = "budget_exceeded"
                         break
                 state = agent.snapshot()

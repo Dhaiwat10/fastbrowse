@@ -1,4 +1,4 @@
-"""Head-to-head on live sites: fastbrowse, jev-ultrafast and hosted Browser Use, same prompts and limits.
+"""Head-to-head on live sites: fastbrowse, jev-ultrafast and hosted Browser Use, same prompts, no dollar or time caps.
 
     uv run --extra browser-use python -m fastbrowse.evals.live [--only TASK_ID ...] [--category CATEGORY ...]
         [--arms fast ultrafast hosted] [--bitwarden] [--repeat N] [--record DIR]
@@ -56,23 +56,16 @@ from fastbrowse.safety import ScopedSecrets, origin_of
 from fastbrowse.telemetry import TRACE
 
 ARMS = ("fast", "ultrafast", "hosted")
-MAX_STEPS, MAX_DOLLARS, MAX_SECONDS = 30, 0.25, 300
-LIMITS = Limits(max_steps=MAX_STEPS, max_dollars=MAX_DOLLARS, max_seconds=MAX_SECONDS)
-"""Every arm's default bound. Hosted Browser Use takes the dollar cap and is stopped at the time limit, but has
-no step cap to set.
-
-`--max-dollars` and `--max-seconds` raise or remove them for a run. A cap one arm routinely reaches is a
-budget this repository chose, not a thing that arm cannot do, so a comparison meant to say what an arm is
-capable of has to be able to run without it. Which limits a row was produced under is recorded on the row.
-"""
+MAX_STEPS = 30
+LIMITS = Limits(max_steps=MAX_STEPS)
+"""No arm has a dollar or time cap: a cap one arm reaches measures the budget, not the arm, so every run ends
+when its agent does. fastbrowse and jev-ultrafast share a step limit; hosted Browser Use has none to set."""
 
 ULTRAFAST = "jev-ultrafast @ git+https://github.com/browser-use/jev-ultrafast@1231850a0bf1a0c0341fe408ef1668dbbfdfac46"
 ULTRAFAST_RUNNER = Path(__file__).resolve().parents[3] / "scripts" / "ultrafast_arm.py"
 ULTRAFAST_COMMAND = ("uv", "run", "--no-project", "--quiet", "--python", "3.14", "--with", ULTRAFAST, "python")
 ULTRAFAST_TEXT_MODEL = "inception/mercury-2.5"
 """jev-ultrafast's own configuration (.env.example): its text helper on OpenRouter, reasoning off."""
-_KILL_GRACE_SECONDS = 60
-"""The runner stops itself at the time limit; past this much longer it is killed."""
 
 
 def _watch(arm: str, task: LiveTask, live_url: str | None) -> None:
@@ -184,7 +177,6 @@ async def fast_arm(
     *,
     bitwarden: bool,
     record: Path | None,
-    limits: Limits = LIMITS,
 ) -> tuple[Outcome, RunResult, float | None]:
     _TimedRecording.ended = None
     _ObservedAgent.controls = None
@@ -199,7 +191,7 @@ async def fast_arm(
             browser_api_key=load_settings().browser_key(),
             output_schema=task.output_schema,
             secrets=_secrets(task, bitwarden),
-            limits=limits,
+            limits=LIMITS,
             authorization=Authorization(irreversible_actions=task.authorize),
             downloads=downloads,
             http=http,
@@ -262,8 +254,6 @@ async def ultrafast_arm(
             "goal": task.task,
             "cdp_ws": cloud.connection.cdp_url,
             "max_steps": MAX_STEPS,
-            "max_dollars": MAX_DOLLARS,
-            "max_seconds": MAX_SECONDS,
             "record": None if record is None else str(record),
         }
         with tempfile.TemporaryDirectory(prefix="bh-") as runtime:
@@ -275,14 +265,7 @@ async def ultrafast_arm(
                 env=_ultrafast_env(cloud.connection.cdp_url, runtime),
                 cwd=runtime,
             )
-            try:
-                stdout, _ = await asyncio.wait_for(
-                    process.communicate(json.dumps(request).encode()), MAX_SECONDS + _KILL_GRACE_SECONDS
-                )
-            except TimeoutError:
-                process.kill()
-                await process.wait()
-                raise
+            stdout, _ = await process.communicate(json.dumps(request).encode())
         lines = stdout.decode().strip().splitlines()
         if process.returncode != 0 or not lines:
             raise RuntimeError(f"the jev-ultrafast runner exited {process.returncode} without a result")
@@ -304,7 +287,7 @@ async def ultrafast_arm(
 
 
 async def hosted_arm(
-    task: LiveTask, http: httpx.AsyncClient, *, record: Path | None, limits: Limits = LIMITS
+    task: LiveTask, http: httpx.AsyncClient, *, record: Path | None
 ) -> tuple[Outcome, dict[str, object]]:
     from browser_use_sdk.v3 import AsyncBrowserUse  # an optional extra
 
@@ -312,7 +295,6 @@ async def hosted_arm(
     run = client.run(
         f"Start at {task.start}. {task.task}",
         output_schema=task.output_schema,
-        max_cost_usd=limits.max_dollars,
         proxy_country_code="us",
         sensitive_data=dict(task.secrets) or None,
         enable_recording=record is not None,
@@ -324,13 +306,7 @@ async def hosted_arm(
         await asyncio.wait({finishing}, timeout=0.2)
     if run.session_id is not None:
         _watch("hosted", task, (await client.sessions.get(run.session_id)).live_url)
-    remaining = (limits.max_seconds or MAX_SECONDS) - (time.monotonic() - started)
-    # wait, not wait_for: wait_for re-raised the SDK's schema error here, before the session's cost was read, and
-    # six capped structured sessions were recorded with no cost or status.
-    done, _ = await asyncio.wait({finishing}, timeout=max(remaining, 1))
-    timed_out = not done
-    if timed_out and run.session_id is not None:
-        await client.sessions.stop(run.session_id)
+    # gather, not await: the SDK raises on output that fails the task's schema, before the session's cost is read.
     await asyncio.gather(finishing, return_exceptions=True)
     seconds = time.monotonic() - started
     if (error := finishing.exception()) is None:
@@ -350,7 +326,7 @@ async def hosted_arm(
         outcome = Outcome(str(output) if output else None, None, None)
     cost = session.total_cost_usd
     report: dict[str, object] = {
-        "status": "timed_out" if timed_out else session.status.value,
+        "status": session.status.value,
         "seconds": round(seconds, 2),
         "dollars": None if cost is None else float(cost),
         "model": str(session.model.value if hasattr(session.model, "value") else session.model),
@@ -378,7 +354,6 @@ async def run_arm(
     *,
     bitwarden: bool,
     record: Path | None,
-    limits: Limits = LIMITS,
 ) -> dict[str, object]:
     truth = await task.truth(http)
     started = time.monotonic()
@@ -386,9 +361,7 @@ async def run_arm(
     try:
         if arm == "fast":
             with _traced() as events, shadow_counts() as would_fire:
-                outcome, result, ended = await fast_arm(
-                    task, http, downloads, bitwarden=bitwarden, record=record, limits=limits
-                )
+                outcome, result, ended = await fast_arm(task, http, downloads, bitwarden=bitwarden, record=record)
             status = result.status.value
             cost = result.cost
             row |= {
@@ -420,7 +393,7 @@ async def run_arm(
             seconds = float(cast(float, report.pop("seconds")))
             row |= report
         else:
-            outcome, report = await hosted_arm(task, http, record=record, limits=limits)
+            outcome, report = await hosted_arm(task, http, record=record)
             status = str(report.pop("status"))
             dollars = cast(float | None, report.pop("dollars"))
             seconds = float(cast(float, report.pop("seconds")))
@@ -434,7 +407,6 @@ async def run_arm(
             "dollars": None,
             "video": _video(record),
         }
-    row |= {"max_dollars": limits.max_dollars, "max_seconds": limits.max_seconds}
     failure = task.check(outcome, truth)
     # Right and proven are graded apart: a correct answer the agent could not back with quotes is a
     # different defect from a wrong one, and one pass/fail column hid which the suite was showing.
@@ -503,16 +475,6 @@ async def main(argv: list[str]) -> int:
     parser.add_argument("--record", type=Path, metavar="DIR", help="save each run as DIR/<arm>/<task>-<n>.mp4")
     parser.add_argument("--out", type=Path, default=Path("artifacts/evals/live.jsonl"))
     parser.add_argument(
-        "--max-dollars",
-        type=float,
-        default=MAX_DOLLARS,
-        help=f"per-run dollar cap (default {MAX_DOLLARS}); 0 removes it, for measuring what an arm can do "
-        "rather than what this budget allows",
-    )
-    parser.add_argument(
-        "--max-seconds", type=float, default=MAX_SECONDS, help=f"per-run time cap (default {MAX_SECONDS})"
-    )
-    parser.add_argument(
         "--concurrency",
         type=int,
         default=8,
@@ -520,7 +482,6 @@ async def main(argv: list[str]) -> int:
         "time timed the same as one at a time; compare arms only under the same setting.",
     )
     args = parser.parse_args(argv)
-    limits = Limits(max_steps=MAX_STEPS, max_dollars=args.max_dollars or None, max_seconds=args.max_seconds or None)
     tasks = [
         t
         for suite in args.suite
@@ -530,14 +491,6 @@ async def main(argv: list[str]) -> int:
     if "ultrafast" in args.arms:
         await prepare_ultrafast()
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    if args.concurrency > 1 and not set(args.arms) <= {"hosted"}:
-        # An arm that runs its own loop here reports how long it took, and neighbours on one machine make that
-        # longer. The number is then that arm's worst case rather than its time, which is worth having only
-        # when the other arm was measured the same way: a comparison has to put both under the same load.
-        print(
-            f"note: {args.concurrency} runs at once, so a locally driven arm is timing itself under load",
-            file=sys.stderr,
-        )
     rows: list[dict[str, object]] = []
     gate = asyncio.Semaphore(args.concurrency)
     with tempfile.TemporaryDirectory() as downloads, args.out.open("a", encoding="utf-8") as out:
@@ -545,9 +498,7 @@ async def main(argv: list[str]) -> int:
 
             async def one(arm: str, task: LiveTask, record: Path | None) -> dict[str, object]:
                 async with gate:
-                    row = await run_arm(
-                        arm, task, http, Path(downloads), bitwarden=args.bitwarden, record=record, limits=limits
-                    )
+                    row = await run_arm(arm, task, http, Path(downloads), bitwarden=args.bitwarden, record=record)
                 row["concurrency"] = args.concurrency
                 out.write(json.dumps(row, default=str) + "\n")
                 out.flush()
