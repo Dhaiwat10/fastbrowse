@@ -67,8 +67,16 @@ async def test_click_uses_an_exposed_point_but_never_passes_through_a_cover(
         assert effect(before, after, target).set_something
 
 
+@pytest.mark.parametrize(
+    "nested",
+    [
+        "<button>Delete</button>",
+        "<label><input type=checkbox>Archive</label>",
+        "<div role=gridcell>Cell</div>",
+    ],
+)
 async def test_exposed_edge_belonging_to_a_nested_control_is_not_the_target(
-    page: CdpPage, browser_session: BrowserSession, main_site: str
+    page: CdpPage, browser_session: BrowserSession, main_site: str, nested: str
 ) -> None:
     """A covered row whose exposed edges are its own Delete button must not have Delete pressed for it."""
     await page.navigate(f"{main_site}/dispatch.html")
@@ -78,8 +86,8 @@ async def test_exposed_edge_belonging_to_a_nested_control_is_not_the_target(
         "const row = document.createElement('div'); row.id = 'target'; row.setAttribute('role', 'option'); "
         "row.style.cssText = getComputedStyle(document.getElementById('target')).cssText; "
         "row.textContent = 'One way'; document.getElementById('target').replaceWith(row); "
-        "const del = row.appendChild(document.createElement('button')); del.id = 'delete'; "
-        "del.textContent = 'Delete'; del.style.cssText = 'position:absolute;inset:0'; "
+        f"row.insertAdjacentHTML('beforeend', {nested!r}); "
+        "row.lastElementChild.style.cssText = 'position:absolute;inset:0;margin:0'; "
         "const cover = document.getElementById('cover'); cover.style.display = 'block'; "
         "cover.style.cssText += 'left:130px;top:90px;width:40px;height:20px';",
     )
@@ -87,6 +95,24 @@ async def test_exposed_edge_belonging_to_a_nested_control_is_not_the_target(
     result = await page.act(Action(operation=Operation.CLICK, target_id=find(before, "One way").id), before)
     assert result.outcome is StepOutcome.COVERED
     assert await eval_value(browser_session, browser_session.active_session_id, "window.clicks") == []
+
+
+async def test_transparent_checkbox_filling_its_label_is_the_labels_target(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    await page.navigate(main_site)
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        'document.body.innerHTML = \'<label style="position:relative;display:inline-block;padding:12px">'
+        'Direct service<input type=checkbox style="opacity:0;position:absolute;inset:0;margin:0"></label>\'; true',
+    )
+    obs = await page.observe()
+    result = await page.act(Action(operation=Operation.CLICK, target_id=find(obs, "Direct service").id), obs)
+    assert result.outcome is StepOutcome.EXECUTED
+    assert await eval_value(
+        browser_session, browser_session.active_session_id, "document.querySelector('input').checked"
+    )
 
 
 @pytest.mark.parametrize("associated", [False, True])

@@ -71,7 +71,7 @@ _HIT_TEST_JS = (
     "const ACTIVE = 'a[href],button,input,select,textarea,summary,[contenteditable]:not([contenteditable=false]),"
     "[role=button],[role=link],[role=checkbox],[role=radio],[role=switch],[role=tab],[role=option],"
     "[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=combobox],[role=textbox],"
-    "[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem]'; "
+    "[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem],[role=gridcell]'; "
     "const hitAt = (x, y) => { "
     # Descend through open shadow roots: the document-level hit is only the outermost host.
     "let node = e, doc = e.ownerDocument; while (true) { "
@@ -80,10 +80,13 @@ _HIT_TEST_JS = (
     "let hit = doc.elementFromPoint(x, y); "
     "while (hit?.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); "
     "if (!inner || inner === hit) break; hit = inner; } "
-    # A control nested inside the target (a row's Delete button, a link inside a label) takes the click
-    # itself, so a point is the target's only when no other control sits between it and the hit.
-    "const owns = root => { if (!root.contains(hit)) return false; const own = hit.closest(ACTIVE); "
-    "return !own || own === root || !root.contains(own); }; "
+    # A control nested inside the target (a row's Delete button, a link or checkbox inside a label) takes the
+    # click itself, so a point is the target's only when no other control sits between it and the hit: one the
+    # snapshot indexed, a widget, or a label with its own input. A label and its input are one target.
+    "const same = x => x === e || x.control === e || e.control === x; "
+    "const owns = root => { if (!root.contains(hit)) return false; "
+    "for (let x = hit; x !== root; x = x.parentElement) { if (same(x)) return true; "
+    "if (x.matches(ACTIVE) || window.__fastbrowse.ids.has(x) || x.control) return false; } return true; }; "
     "if (node === e ? !owns(e) && !labels.some(owns) : !node.contains(hit)) return 'covered'; "
     "if (doc === document) break; "
     "node = view.frameElement; if (!node) return null; "
