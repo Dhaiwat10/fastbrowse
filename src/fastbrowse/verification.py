@@ -85,10 +85,7 @@ def page_state(
     try:
         state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
     except NotesTooLarge:
-        # Requirement evidence outranks the page's own text: a verdict without it is a guess, while cut text says
-        # it was cut. Controls without a value or selection state go next, and the state says how many: their
-        # labels are page text, while a "View more" list of result rows can fill the budget with them alone. Only
-        # when the stateful controls leave no room does the verdict stop.
+        # Preserve requirement evidence by cutting page text, then stateless controls, before refusing a verdict.
         page["text"] = ""
         try:
             state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)

@@ -229,15 +229,7 @@ class _ObservedState:
 
 
 def _capped(controls: list[Control], limit: int) -> list[Control]:
-    """The first `limit` controls, and past that the controls that go on with a list too: pager links and
-    load-more buttons.
-
-    Both sit at the foot, after everything the cap keeps: a catalogue of twenty books a page ran past the off-screen
-    limit, so its "next" link was never offered and a task over two pages never left the first; Google Flights'
-    "View more flights" was dropped the same way, and recovery asked for it by name while it could not be clicked.
-    The exemption stays inside the cap: a page drawing more of them than the cap allows would otherwise return
-    more controls than were asked for.
-    """
+    """Keep pagers and load-more controls within the cap so a truncated list can still be continued."""
     if len(controls) <= limit:
         return controls
     pagers = [c for c in controls if pager_link(c) or loads_more(c)][:limit]

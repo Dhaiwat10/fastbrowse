@@ -1,45 +1,58 @@
-"""The shadow counter is the only evidence for arming a tripwire, so its numbers have to be per run."""
+"""Shadow counts belong to each run even when runs overlap and INFO logging is disabled."""
 
 import asyncio
-import logging
+from collections import Counter
+from unittest.mock import AsyncMock, Mock
 
-from fastbrowse.evals.shadow import shadow_counts
+import pytest
 
-logger = logging.getLogger("fastbrowse")
-
-
-def would_fire(name: str) -> None:
-    logger.info("tripwire %s would have recovered", name, extra={"tripwire": name})
-
-
-async def one_run(name: str, hold: asyncio.Event) -> dict[str, int]:
-    with shadow_counts() as counts:
-        would_fire(name)
-        await hold.wait()
-        return dict(counts)
+from fastbrowse.agent import Agent
+from fastbrowse.config import Config, StallRules
+from fastbrowse.models import Limits, Status, StepOutcome, Tripwire, TripwireMode
+from fastbrowse.page import ActResult, Observation, Page
+from tests.test_agent import field
+from tests.test_policy import ScriptedJev, observation
+from tests.test_retrieval import ScriptedLLM
 
 
-async def test_concurrent_runs_each_count_only_their_own_tripwires() -> None:
-    """`--concurrency N` overlaps these contexts, and the handler is process-global.
+@pytest.mark.parametrize("mode", list(TripwireMode))
+async def test_concurrent_runs_report_only_their_own_shadow_tripwires(
+    mode: TripwireMode, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def observe() -> Observation:
+        await asyncio.sleep(0)
+        return observation((field(),))
 
-    Counting on the handler credited every concurrent run with every run's tripwires, and the first context
-    out restored the logger level under the others, dropping the rest of their records.
-    """
-    hold = asyncio.Event()
-    runs = [asyncio.create_task(one_run(name, hold)) for name in ("no_progress", "action_repetition")]
-    await asyncio.sleep(0)
-    hold.set()
-    first, second = await asyncio.gather(*runs)
-    assert first == {"no_progress": 1}
-    assert second == {"action_repetition": 1}
-
-
-async def test_the_level_outlives_a_run_that_finishes_while_another_is_counting() -> None:
-    previous = logger.level
-    with shadow_counts() as outer:
-        with shadow_counts():
-            pass
-        # An INFO record after the inner context closed: the level it forced must still be in place.
-        would_fire("plan_stagnation")
-    assert outer == {"plan_stagnation": 1}
-    assert logger.level == previous
+    runs = []
+    for repeated, stagnant in ((2, 10), (10, 2)):
+        page = Mock(spec=Page)
+        page.observe = AsyncMock(side_effect=observe)
+        page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=False))
+        page.artifacts = ()
+        llm = ScriptedLLM(
+            [{"requirements": [{"id": "r", "text": "Submit the form", "kind": "action"}], "answer_expected": False}]
+        )
+        agent = Agent(
+            page,
+            ScriptedJev({"operation": "fill", "fill_target": "field", "pick": "input:value"}, noul=0.0),
+            llm,
+            config=Config(
+                stall=StallRules(
+                    unchanged_actions=10,
+                    repeated_actions=repeated,
+                    stagnant_plan_steps=stagnant,
+                    max_recoveries=0,
+                    tripwires=mode,
+                )
+            ),
+        )
+        runs.append(agent.run("Fill the form", inputs={"value": "Bath"}, limits=Limits(max_steps=4)))
+    with caplog.at_level("WARNING", logger="fastbrowse"):
+        first, second = await asyncio.gather(*runs)
+    if mode is TripwireMode.SHADOW:
+        assert first.status is second.status is Status.BUDGET_EXCEEDED
+        assert Counter(first.would_fire) == {Tripwire.ACTION_REPETITION: 2}
+        assert Counter(second.would_fire) == {Tripwire.PLAN_STAGNATION: 3}
+    else:
+        assert first.status is second.status is Status.STUCK
+        assert not first.would_fire and not second.would_fire

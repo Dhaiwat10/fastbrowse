@@ -11,19 +11,9 @@ Pure: no IO, no mutation, so a would-fire evaluation costs nothing and can run o
 
 from collections import Counter
 from dataclasses import dataclass
-from enum import StrEnum
 
-from fastbrowse.models import Operation
+from fastbrowse.models import Operation, Tripwire
 from fastbrowse.policy import HistoryEntry
-
-
-class Tripwire(StrEnum):
-    NO_PROGRESS = "no_progress"
-    """The page has not changed for N actions."""
-    ACTION_REPETITION = "action_repetition"
-    """One interaction, on one target, with one value, keeps recurring."""
-    PLAN_STAGNATION = "plan_stagnation"
-    """The set of requirements still wanting evidence has not shrunk for N steps."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -79,8 +79,7 @@ def _pieces(capture: Capture, max_chars: int) -> tuple[_Piece, ...]:
     for block in capture.blocks:
         if block.kind is not BlockKind.TABLE:
             header = None
-            # One block can hold a whole results list (Google Flights' "View more" rendered 39k characters as
-            # one), and a chunk carrying it whole left the reader's notes no room at all.
+            # Split oversized blocks so the reader's prompt still has room for notes.
             if block.end - block.start <= max_chars:
                 result.append(_Piece(block=block, start=block.start, end=block.end))
             else:
@@ -270,7 +269,7 @@ class ReadOutcome(Frozen):
 
 
 def _notes_room(tokens: TokenBudget, messages: Sequence[Message], response: type[Frozen]) -> int:
-    """Characters left for the notes once the prompt and the response schema it must fit beside are counted."""
+    """Reserve room for the prompt and response schema so notes cannot exceed the input budget."""
     return tokens.remaining_chars(
         "".join(message.content for message in messages) + json.dumps(response.model_json_schema())
     )

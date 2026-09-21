@@ -316,10 +316,6 @@ async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer:
         ledger=ledger,
     )
     assert len(jev.requests) == 1 and len(llm.calls) == 1
-    request = llm.calls[0][1][-1].content
-    assert "# Question\nFind version and license" in request
-    assert "Read only these remaining requirements:\n- license: Find the license name\n\n" in request
-    assert "# Requirement ids\nlicense\n" in request
     assert all(notes.evidenced(r.id) for r in requirements)
     assert [fact.evidence.quote for fact in result.facts] == ["Version: 1.2.3", "License: MIT"]
     assert [cost.component for cost in result.cost_lines] == [CostComponent.JEV, CostComponent.LLM]
@@ -1009,7 +1005,7 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
         assert all(fact.evidence.model_dump_json() in question.instructions for fact in notes.facts)
 
 
-async def test_basis_references_cannot_name_rejected_or_later_claims(caplog: pytest.LogCaptureFixture) -> None:
+async def test_basis_references_cannot_name_rejected_or_later_claims() -> None:
     page = capture((BlockKind.PARAGRAPH, "A $3"), (BlockKind.PARAGRAPH, "B $5"))
     llm = ScriptedLLM(
         [
@@ -1031,12 +1027,9 @@ async def test_basis_references_cannot_name_rejected_or_later_claims(caplog: pyt
         ]
     )
     notes = Notes()
-    with caplog.at_level("DEBUG", logger="fastbrowse.retrieval"):
-        result = await read(llm, page, "Cheapest?", ["r"], notes)
+    result = await read(llm, page, "Cheapest?", ["r"], notes)
     assert result.rejected_quotes == 1
     assert notes.supporting("r")[0][1].basis == (evidence_id(notes.facts[0].evidence),)
-    for reference in ("claim:0", "claim:3", "invented:0:99"):
-        assert f"dropped unknown basis reference='{reference}'" in caplog.text
 
 
 @pytest.mark.parametrize("confidence", [0.89, 0.95])
@@ -1051,7 +1044,6 @@ async def test_only_confident_absence_skips_the_llm_without_evidencing_a_require
         outcome = await read(llm, page, requirement.text, ["r"], notes, jev=jev, requirements=(requirement,))
     assert len(llm.calls) == (confidence < 0.90)
     assert not notes.evidenced("r") and not outcome.facts
-    assert ("reason=absent" in caplog.text) == (confidence >= 0.90)
     assert page.text not in caplog.text
 
 

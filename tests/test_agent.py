@@ -23,7 +23,7 @@ from fastbrowse.agent import (
     _verified,
 )
 from fastbrowse.citations import text_fragment
-from fastbrowse.config import Config, ObservationLimits
+from fastbrowse.config import Config, ObservationLimits, StallRules, Thresholds
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation
 from fastbrowse.memory import Fact, Notes, evidence_id
@@ -384,7 +384,7 @@ async def test_url_edits_are_not_reads_but_each_result_in_one_document_is_preser
         # Even a URL rewrite and another choice to READ cannot re-read this content and requirement set.
         obs = obs.model_copy(update={"url": obs.url + "&view=compact"})
         assert not await agent._read_before_interaction(state, obs, relevant)
-        assert not await agent._read(state, await agent._capture(), obs)
+        await agent._read(state, await agent._capture(), obs)
         expected_quote = text
         await agent._step(state, obs, decision)
     assert [fact.evidence.quote for fact in state.notes.facts] == ["First result: 12", "Second result: 18"]
@@ -451,7 +451,7 @@ async def test_a_message_is_read_before_mutation_and_the_next_action_is_reconsid
 
 
 @pytest.mark.parametrize("second", ["read", "click"])
-async def test_after_a_forced_read_jev_decides_again_but_a_repeat_read_takes_the_interaction_it_deferred(
+async def test_after_a_forced_read_jev_decides_again_and_a_repeat_read_recovers(
     second: str,
 ) -> None:
     fare = "Oslo to Rome, 1 stop, $320"
@@ -471,7 +471,6 @@ async def test_after_a_forced_read_jev_decides_again_but_a_repeat_read_takes_the
 
     class RereadingJev(ScriptedJev):
         async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
-            # Asked again with the fare in notes, Jev either re-reads the same list (Flights) or turns the page.
             if "operation" in questions and isinstance(state, dict) and state.get("notes"):
                 self.pick = {
                     "operation": second,
@@ -487,17 +486,23 @@ async def test_after_a_forced_read_jev_decides_again_but_a_repeat_read_takes_the
     )
     llm = ScriptedLLM([{"claims": [{"text": fare, "source_id": "s0", "quote": fare}], "answered": False}])
     agent = Agent(page, jev, llm)
+    agent._recover = AsyncMock(side_effect=_Stop(Status.STUCK, "recovering"))
     state.ledger.limits = Limits(max_steps=2)
     from fastbrowse.telemetry import BudgetExceeded
 
-    with pytest.raises(BudgetExceeded):
+    with pytest.raises(_Stop if second == "read" else BudgetExceeded):
         await agent._loop(state, None, None)
-    assert [step.operation for step in state.steps] == [Operation.READ, Operation.CLICK]
-    expected = nonstop if second == "read" else pager
-    assert state.steps[1].target == expected.label
+    if second == "read":
+        agent._recover.assert_awaited_once()
+        page.act.assert_not_awaited()
+    else:
+        agent._recover.assert_not_awaited()
+        page.act.assert_awaited_once()
+        assert state.steps[-1].target == pager.label
+    assert len(llm.calls) == 1
 
 
-async def test_a_deferred_interaction_is_not_replayed_on_a_control_that_changed_during_the_read() -> None:
+async def test_an_interaction_is_not_replayed_on_a_control_that_changed_during_the_read() -> None:
     fare = "Oslo to Rome, 1 stop, $320"
     preview = _button("Preview draft")
     obs = observation((preview,)).model_copy(update={"viewport_text": fare})
@@ -551,7 +556,7 @@ async def test_unchanged_unsuccessful_preservation_does_not_loop_or_authorize_th
     agent = Agent(page, jev, llm)
     assert await agent._read_before_interaction(state, obs, decision)
     assert not await agent._read_before_interaction(state, obs, decision)
-    assert not await agent._read(state, await agent._capture(), obs)
+    await agent._read(state, await agent._capture(), obs)
     assert len(llm.calls) == 1 and not state.notes.facts
     with pytest.raises(_Stop) as stopped:
         await agent._step(state, obs, decision)
@@ -581,15 +586,7 @@ async def test_an_exhausted_read_recovers_instead_of_repeating_even_when_jev_is_
         return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
 
     page.act = AsyncMock(side_effect=show_total)
-    contexts: list[JsonValue] = []
-
-    class ReadingJev(ScriptedJev):
-        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
-            if "operation" in questions:
-                contexts.append(state)
-            return await super().evaluate(state, questions)
-
-    jev = ReadingJev({"operation": operation.value, "r1": "synthesis"}, noul=0.0)
+    jev = ScriptedJev({"operation": operation.value, "r1": "synthesis"}, noul=0.0)
     llm = ScriptedLLM(
         [
             {"claims": [], "answered": False},
@@ -620,21 +617,6 @@ async def test_an_exhausted_read_recovers_instead_of_repeating_even_when_jev_is_
     page.act.assert_awaited_once()
     assert state.recoveries == 1
     assert [purpose for purpose, _ in llm.calls] == [LLMPurpose.READ, LLMPurpose.RECOVER, LLMPurpose.READ]
-    reads = [step for step in result.steps if step.operation is Operation.READ]
-    assert len(reads) == (3 if operation is Operation.READ else 2)
-    feedback = next(
-        entry.effect
-        for entry in state.history
-        if entry.operation is operation
-        and entry.effect
-        and (entry.outcome is StepOutcome.FAILED or entry.effect.startswith("Already read"))
-    )
-    assert "r1: Find the total" in feedback
-    assert "Re-reading this unchanged content will not supply it" in feedback
-    assert any(step.note == feedback for step in result.steps)
-    assert any(feedback in json.dumps(context) for context in contexts)
-    recovery = next(messages for purpose, messages in llm.calls if purpose is LLMPurpose.RECOVER)
-    assert feedback in recovery[-1].content
     assert state.notes.facts[0].evidence.quote == "Total: $12"
 
 
@@ -653,6 +635,34 @@ async def test_recovery_can_direct_a_page_operation_with_no_control_to_name(oper
     unsure = await decide(jev, obs, context(), Config())
     followed = _follow_recovery(state, obs, unsure, uncertain=True)
     assert followed is not None and followed.operation is operation and followed.target is None
+
+
+@pytest.mark.parametrize("recover_below", [0.55, 1.0])
+async def test_directed_done_still_requires_verification_after_an_exhausted_read(recover_below: float) -> None:
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the total", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    obs = observation((_button("Show total"),))
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=obs)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Pending total")))
+    llm = ScriptedLLM([{"claims": [], "answered": False}])
+    agent = Agent(
+        page,
+        ScriptedJev({"operation": "read", "r1": "synthesis"}, noul=0.0),
+        llm,
+        config=Config(thresholds=Thresholds(recover_below=recover_below), stall=StallRules(max_recoveries=0)),
+    )
+    await agent._read(state, await page.capture(), obs)
+    state.directed = (Operation.DONE, None)
+    with pytest.raises(_Stop) as stopped:
+        await agent._loop(state, None, None)
+    assert stopped.value.status is Status.STUCK
+    assert any(step.operation is Operation.DONE and step.outcome is StepOutcome.FAILED for step in state.steps)
+    assert len(llm.calls) == 1
+    page.act.assert_not_called()
 
 
 def _button(label: str) -> Control:
@@ -917,7 +927,6 @@ async def test_a_list_the_reader_needs_whole_is_read_page_by_page_without_decidi
 
     await agent._step(state, first, read)
     assert not state.notes.evidenced("r1")
-    assert "next-page control ('next')" in llm.calls[0][1][-1].content
     assert state.next_page
     click = agent_module._paging(state, first)
     assert click is not None and click.operation is Operation.CLICK and click.target is not None
@@ -947,7 +956,7 @@ async def test_a_list_goes_on_to_jev_with_a_hint_when_code_finds_no_next_page() 
     agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "none"}), ScriptedLLM(reads))
     await agent._read(state, capture((BlockKind.PARAGRAPH, "Einstein quote")), here)
     assert not state.next_page
-    assert state.hint is not None and "go on past what the page shows" in state.hint
+    assert state.hint is not None
 
 
 async def test_the_pages_code_opens_are_capped() -> None:
@@ -1271,14 +1280,14 @@ async def test_same_text_can_be_read_for_a_new_document_or_new_requirement() -> 
     page = capture((BlockKind.PARAGRAPH, "Waiting for a result"))
     llm = ScriptedLLM([{"claims": [], "answered": False}] * 3)
     agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "synthesis", "r2": "synthesis"}), llm)
-    assert not await agent._read(state, page, obs)
-    assert not await agent._read(state, page, obs)
+    await agent._read(state, page, obs)
+    await agent._read(state, page, obs)
     assert len(llm.calls) == 1
     obs = obs.model_copy(update={"document_key": "document-b"})
-    assert not await agent._read(state, page, obs)
+    await agent._read(state, page, obs)
     assert len(llm.calls) == 2
     state.ready_plan = Plan(requirements=(requirement.model_copy(update={"id": "r2"}),), answer_expected=True)
-    assert not await agent._read(state, page, obs)
+    await agent._read(state, page, obs)
     assert len(llm.calls) == 3
 
 

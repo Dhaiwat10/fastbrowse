@@ -42,6 +42,15 @@ class TripwireMode(StrEnum):
     """Send the run to recovery, as the unchanged-page count already does."""
 
 
+class Tripwire(StrEnum):
+    NO_PROGRESS = "no_progress"
+    """The page has not changed for N actions."""
+    ACTION_REPETITION = "action_repetition"
+    """One interaction, on one target, with one value, keeps recurring."""
+    PLAN_STAGNATION = "plan_stagnation"
+    """The set of requirements still wanting evidence has not shrunk for N steps."""
+
+
 class Operation(StrEnum):
     CLICK = "click"
     HOVER = "hover"
@@ -223,6 +232,8 @@ class RunResult(Frozen):
     error: str | None = None
     final_url: str | None = None
     """Where the browser was last observed; what a caller checks when the task was to arrive somewhere."""
+    would_fire: tuple[Tripwire, ...] = ()
+    """Shadow tripwires retain each occurrence so eval counts do not depend on logging configuration."""
 
     @property
     def succeeded(self) -> bool:

@@ -11,6 +11,7 @@ import json
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 import httpx
@@ -22,7 +23,6 @@ from fastbrowse.browser import BrowserSession, CdpPage
 from fastbrowse.clients.environment import Settings, load_settings
 from fastbrowse.config import Config
 from fastbrowse.evals.local import Recorder, fixture_server
-from fastbrowse.evals.shadow import shadow_counts
 from fastbrowse.evals.tasks import TASKS, LocalTask
 from fastbrowse.models import BrowserConnection, Limits
 
@@ -40,22 +40,21 @@ async def run_task(
     config = Config()
     jev, llm = settings.jev(http), settings.llm(http)
     started = time.monotonic()
-    with shadow_counts() as would_fire:
-        async with BrowserSession(connection, sink) as session:
-            page = CdpPage(session, config)
-            result = await Agent(page, jev, llm, config=config).run(
-                task.task,
-                start=base_url + task.start,
-                inputs=task.inputs,
-                output_schema=task.output_schema,
-                limits=Limits(max_steps=25),
-                authorization=task.authorization,
-            )
+    async with BrowserSession(connection, sink) as session:
+        page = CdpPage(session, config)
+        result = await Agent(page, jev, llm, config=config).run(
+            task.task,
+            start=base_url + task.start,
+            inputs=task.inputs,
+            output_schema=task.output_schema,
+            limits=Limits(max_steps=25),
+            authorization=task.authorization,
+        )
     failure = task.check(result, recorder.snapshot())
     return {
         "task": task.id,
         "passed": failure is None,
-        "would_fire": dict(would_fire),
+        "would_fire": dict(Counter(tripwire.value for tripwire in result.would_fire)),
         "failure": failure,
         "status": result.status.value,
         "seconds": round(time.monotonic() - started, 1),

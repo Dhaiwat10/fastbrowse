@@ -102,10 +102,7 @@ _REPEATS_BEFORE_CYCLE = 2
 """Times one action may be taken from one page and still count as progress. Scrolling is exempt: a long page
 takes many scrolls, each of which shows something new."""
 _PAGE_OPERATIONS = frozenset({Operation.READ, Operation.SCROLL, Operation.BACK, Operation.ESCAPE, Operation.DONE})
-"""Operations on the page rather than a control, which recovery can direct without naming one. A long table's
-answer was off screen, recovery said to read the page twice, and with no control to name the advice was dropped
-and Jev scrolled on until the run stopped stuck. DONE is the same: a Flights run holding every answer was told
-twice to finish, and each time Jev decided again and stalled; `_finish` still judges a directed DONE."""
+"""Recovery can direct page operations without a control; directed DONE still requires verification."""
 _CYCLE_SHOWN = 4
 """Actions named when a run arrives back at a page state, the most recent last."""
 _IDLE_CHECKED = frozenset({Operation.CLICK, Operation.ENTER})
@@ -121,7 +118,7 @@ type _Prepared = ComposedAnswer | asyncio.Task[Generation[ComposedAnswer]] | Non
 """An answer ready before conclusion: the reader's facts Jev accepted as written, or a composer in flight."""
 
 type ReadKey = tuple[str, str, tuple[str, ...]]
-type Signature = tuple[Operation, str | None, str | ReadKey]
+type Signature = tuple[Operation, str | None, str]
 """One action on one target, from one page state: the key both the cycle count and the no-op memory are kept by."""
 
 
@@ -187,6 +184,7 @@ class _RunState:
     planning: asyncio.Task[Generation[Plan]]
     notes: Notes = field(default_factory=Notes)
     steps: list[StepResult] = field(default_factory=list[StepResult])
+    would_fire: list[Tripwire] = field(default_factory=list[Tripwire])
     history: list[HistoryEntry] = field(default_factory=list[HistoryEntry])
     hint: str | None = None
     directed: tuple[Operation, str | None] | None = None
@@ -216,8 +214,6 @@ class _RunState:
     """Page states where an unsure pick has been acted on instead of recovering; the next one there recovers."""
     reads: set[ReadKey] = field(default_factory=set)
     """Attempted reads by document, exact content and outstanding requirements, independent of URL edits."""
-    deferred: tuple[ReadKey, Decision] | None = None
-    """The interaction a forced read went before, with the content it read, offered again for one decision."""
     next_page: bool = False
     """Open this page's next page, set when the reader says a list the run needs goes on past the page it read."""
     paged_from: str | None = None
@@ -339,7 +335,8 @@ class Agent:
             # decision Jev has not made yet, and the page it opens is judged on the next turn. The confidence gates
             # judge Jev's uncertainty, and there is none to judge here.
             if (paging := _paging(state, observation)) is not None:
-                await self._step(state, observation, paging, Decider.CODE)
+                if await self._step(state, observation, paging, Decider.CODE):
+                    await self._recover(state, observation, _read_exhausted(state))
                 continue
             raw = self._raw_observation or observation
             origin = origin_of(raw.url)
@@ -368,31 +365,9 @@ class Agent:
                 raise _Stop(Status.NEEDS_LOGIN, f"sign-in required at {origin}")
             uncertain = decision.confidence < self._config.thresholds.recover_below
             decided_by = Decider.JEV
-            capture = None
-            read_key = None
-            exhausted = False
-            if decision.operation in _NOT_ACTING and _unread(await state.await_plan(), state.notes):
-                capture = await self._capture()
-                read_key = _read_key(state, observation, capture)
-                exhausted = read_key in state.reads
-            deferred, state.deferred = state.deferred, None
-            if (
-                deferred is not None
-                and exhausted
-                and decision.operation is Operation.READ
-                and read_key == deferred[0]
-                and (deferred[1].target is None or deferred[1].target in observation.controls)
-            ):
-                # Asked again after the forced read, Jev chose to read the list it had just read: on Flights the
-                # unfiltered list could not show the cheapest nonstop fare, the skipped re-read ended the run stuck,
-                # and the "Nonstop" filter it had chosen was never applied. Nothing on the page changed, so the
-                # interaction still applies to it; its control must be unchanged too, or authorization would judge
-                # a button whose label changed under it ("Preview" become "Send") by its old label.
-                decision = deferred[1]
-                uncertain = decision.confidence < self._config.thresholds.recover_below
-            attempted = state.attempts.get(_signature(decision, observation, read_key))
-            idle = exhausted and (decision.operation is Operation.DONE or (attempted is not None and attempted.idle))
-            if (directed := _follow_recovery(state, observation, decision, uncertain=uncertain or idle)) is not None:
+            if (uncertain or decision.operation not in _NOT_ACTING) and (
+                directed := _follow_recovery(state, observation, decision, uncertain=uncertain)
+            ) is not None:
                 decision, uncertain, decided_by = directed, False, Decider.LLM
             if await self._read_before_interaction(state, observation, decision):
                 continue
@@ -417,14 +392,23 @@ class Agent:
                 await state.await_plan()
                 continue
             if decision.operation in _NOT_ACTING:
-                operation = Operation.DONE
                 if _unread(await state.await_plan(), state.notes):
-                    capture = capture or await self._capture()
-                    read_key = _read_key(state, observation, capture)
-                    # Turning every premature DONE into READ hid the missing requirements and sent Flights
-                    # around the same exhausted capture until the stall budget ran out.
-                    operation = decision.operation if read_key in state.reads else Operation.READ
-                decision = decision.model_copy(update={"operation": operation, "target": None})
+                    reading = decision.model_copy(update={"operation": Operation.READ, "target": None})
+                    if not await self._step(state, observation, reading, decided_by):
+                        state.directed = None
+                        continue
+                    directed = (
+                        decision
+                        if decision.directed
+                        else _follow_recovery(state, observation, decision, uncertain=True)
+                    )
+                    if directed is None:
+                        await self._recover(state, observation, _read_exhausted(state))
+                        continue
+                    decision, uncertain, decided_by = directed, False, Decider.LLM
+                else:
+                    state.directed = None
+                    decision = decision.model_copy(update={"operation": Operation.DONE, "target": None})
             # The confidence gate exists to stop the agent acting on a page it does not understand. READ and DONE
             # do not act: a read changes nothing, and DONE is judged again by `_finish`. Jev splitting DONE from
             # READ on the page that shows the answer sent every such run to recovery, and one spent the whole
@@ -439,22 +423,19 @@ class Agent:
                 if result is not None:
                     return result
                 continue
-            attempted = state.attempts.get(_signature(decision, observation, read_key))
+            attempted = state.attempts.get(_signature(decision, observation))
             if attempted is not None and attempted.idle:
                 # The same click from the same page already did nothing; taking it again is the loop #12 names,
                 # Done and Search clicked three times each on a form that would not submit. Recovery is told so once:
                 # a click can also do nothing because the page had not wired it up yet, and a retry it asks for stands.
-                # A reader already saw this exact content; retrying it cannot acquire different evidence.
-                if decision.operation is not Operation.READ:
-                    attempted.idle = False
+                attempted.idle = False
                 named = _describe(decision.target) if decision.target else decision.tab_id
                 reason = f"{decision.operation.value} {named or ''} already did nothing here".strip()
-                if decision.operation is Operation.READ:
-                    reason += f". {_read_exhausted(state)}"
                 await self._recover(state, observation, reason)
                 continue
             try:
-                await self._step(state, observation, decision, decided_by, capture=capture)
+                if await self._step(state, observation, decision, decided_by):
+                    await self._recover(state, observation, _read_exhausted(state))
             except _Unsure as unsure:
                 await self._recover(state, observation, str(unsure))
 
@@ -551,7 +532,8 @@ class Agent:
         decided_by: Decider = Decider.JEV,
         *,
         capture: Capture | None = None,
-    ) -> None:
+    ) -> bool:
+        """Return whether a duplicate read was skipped, so callers can recover or continue the interaction."""
         started = time.monotonic()
         facts_before = len(state.notes.facts)
         reason = state.hint if decided_by is Decider.LLM else None
@@ -559,20 +541,14 @@ class Agent:
         typed: str | None = None
         effect_now: str | None = None
         if decision.operation is Operation.READ:
-            capture = capture or await self._capture()
-            # A script-built page can be captured before it draws: a PyPI search read an empty page three times,
-            # recovered, and went round until the time limit. Wait for it to draw, as an unsure step does.
-            if not capture.text.strip() and await self._outwait(observation):
-                capture = await self._capture()
-            await state.await_plan()
-            read_key = _read_key(state, observation, capture)
-            skipped = read_key in state.reads
-            progressed, changed = await self._read(state, capture, observation), False
+            progressed, skipped = await self._read(state, capture or await self._capture(), observation)
             state.read_here = True
-            effect_now = "Already read this content; no new evidence." if skipped else "Read this content."
+            if skipped:
+                return True
+            changed = False
+            effect_now = "Read this content."
             if _unread(state.plan, state.notes):
                 effect_now += f" {_read_exhausted(state)}"
-            state.attempts.setdefault(_signature(decision, observation, read_key), _Attempts()).idle = skipped
             act = ActResult(outcome=StepOutcome.EXECUTED, page_changed=False, detail=effect_now)
         else:
             action = await self._action(state, observation, decision, decided_by)
@@ -646,29 +622,23 @@ class Agent:
             state.hint = None
         else:
             state.unchanged += 1
-        # Only a step that got nowhere on the page can count towards plan stagnation. Filling a form is four
-        # steps that evidence nothing -- the requirement resolves on submit -- and counting those fired this
-        # tripwire on every healthy contact-form run in the local suite. `progressed` is the same notion the
-        # unchanged count already uses, so setup work is excluded by the definition already in the loop.
+        # Progress breaks the stagnation streak even when setup work has not evidenced a requirement yet.
         if progressed:
-            # A step that got somewhere breaks the streak, the way it already resets `unchanged`. Without this
-            # the marks were append-only, so four scattered no-progress steps read as a stalled plan however
-            # much the run achieved between them -- and the successful read that resolved the LAST requirement
-            # still emitted the tripwire, because a productive step never touched the marks it would clear.
             state.plan_marks.clear()
         else:
             state.plan_marks.append(self._plan_mark(state))
         for tripped in self._tripwires(state):
             if tripped.tripwire is Tripwire.NO_PROGRESS or self._config.stall.tripwires is TripwireMode.ARMED:
                 await self._recover(state, observation, str(tripped))
-                return
-            # Shadow: the run is unchanged, and the log is the evidence for whether arming this would help.
+                return False
+            state.would_fire.append(tripped.tripwire)
             logger.info(
                 "tripwire %s would have recovered on step %d",
                 tripped,
                 len(state.steps),
                 extra={"tripwire": tripped.tripwire.value},
             )
+        return False
 
     async def _act_on_twin(self, action: Action, observation: Observation, target: Control) -> ActResult | None:
         """Act on the one control now standing where `target` stood, if the page redrew it since it was observed.
@@ -819,27 +789,8 @@ class Agent:
 
     @staticmethod
     def _edit_progress(decision: Decision, action: Action) -> bool | None:
-        """Whether a value edit was progress, or None when this operation is not one and `changed` decides.
-
-        Writing a value a field already holds cannot be progress, whatever the page did. That is an invariant,
-        not a threshold, so it needs no budget -- and it is read off the field the action is about to write,
-        never remembered, because every remembered form of it has been wrong in a different direction.
-
-        Keyed on target and cleared on page change, it was defeated by the action's own cosmetic side effect:
-        `_fill` clicks the field before typing on purpose, so that pointer handlers run, and on a search box
-        that opens the autocomplete list, which IS a page change. A PyPI run filled the same box with the same
-        word five times, each fill clearing the set so the identical next one was a "first" edit again.
-
-        Keyed on target, value and never cleared, it fired on values a run legitimately writes twice: the same
-        name and city into a billing form and then into a fresh shipping form beside it, where the second write
-        is the whole point. The field's own value separates those two cases and the key cannot.
-
-        UPLOAD is excluded rather than compared: a file input's value is not the file, so every upload after the
-        first looked like a rewrite of the same nothing. `changed` decides those.
-
-        It VETOES progress and never grants it: `False` or `None`, never `True`. A write into an empty field is
-        not evidence of anything on its own -- three fills of the PyPI results box, each changing nothing, were
-        credited as progress by a version that returned `True` here, and the run ground on for four more steps.
+        """Rewriting the observed field value vetoes progress even when the page changes.
+        Other edits, including uploads, return None so the page's effect decides.
         """
         if decision.operation not in {Operation.FILL, Operation.SELECT} or decision.target is None:
             return None
@@ -856,6 +807,33 @@ class Agent:
             return
         # Taken from the page the step acted on, before the next observation moves it on.
         await self._on_event(StepEvent(step=step, frame=await self._frame() if self._config.step_frames else None))
+
+    async def _record_failure(
+        self,
+        state: _RunState,
+        observation: Observation,
+        operation: Operation,
+        reason: str,
+        *,
+        target: str | None = None,
+        confidence: float | None = None,
+        page_changed: bool | None = None,
+    ) -> None:
+        await self._record_step(
+            state,
+            StepResult(
+                index=len(state.steps),
+                operation=operation,
+                decided_by=Decider.CODE,
+                outcome=StepOutcome.FAILED,
+                url=observation.url,
+                target=target,
+                confidence=confidence,
+                note=reason,
+                page_changed=page_changed,
+                duration_ms=0,
+            ),
+        )
 
     async def _frame(self) -> bytes | None:
         """A PNG of the page as it is now, or None while a resolved secret is showing on it.
@@ -982,20 +960,14 @@ class Agent:
             if unsure
             else f"{what} needs confirmation"
         )
-        await self._record_step(
+        await self._record_failure(
             state,
-            StepResult(
-                index=len(state.steps),
-                operation=decision.operation,
-                decided_by=Decider.CODE,
-                outcome=StepOutcome.FAILED,
-                url=observation.url,
-                target=self._redactor.redact(label),
-                confidence=None if decision.directed else decision.confidence,
-                note=self._redactor.redact(reason),
-                page_changed=False,
-                duration_ms=0,
-            ),
+            observation,
+            decision.operation,
+            self._redactor.redact(reason),
+            target=self._redactor.redact(label),
+            confidence=None if decision.directed else decision.confidence,
+            page_changed=False,
         )
         if unsure:
             raise _Unsure(reason)
@@ -1178,36 +1150,31 @@ class Agent:
         plan = await state.await_plan()
         if not _unread(plan, state.notes):
             return False
-        capture = await self._capture()
-        key = _read_key(state, observation, capture)
-        if key in state.reads:
-            return False
-        # A dismissal can remove the answer without committing anything. Read first, then reconsider with
-        # the evidence in notes; the next decision still passes the ordinary authorization gate.
-        await self._step(state, observation, _code_decision(Operation.READ, None), Decider.CODE, capture=capture)
-        state.deferred = (key, decision)
-        return True
+        # An interaction can remove evidence, so read first and reconsider before authorizing the next action.
+        return not await self._step(state, observation, _code_decision(Operation.READ, None), Decider.CODE)
 
     async def _read(
         self, state: _RunState, capture: Capture | None = None, observation: Observation | None = None
-    ) -> bool:
-        """Return whether reading added evidence, which is the only progress a read can make.
-
-        With the `observation` the page was read from, a list the reader says goes on past it is followed.
-        """
+    ) -> tuple[bool, bool]:
+        """Return (added evidence, skipped duplicate), since only new evidence makes a read progress."""
         capture = capture or await self._capture()
         plan = await state.await_plan()
+        wanted = [r for r in state.notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION]
         if observation is not None:
-            key = _read_key(state, observation, capture)
+            key = observation.document_key, capture.sha256, tuple(r.id for r in wanted)
             if key in state.reads:
                 trace("read_skipped", reason="unchanged_content_and_requirements")
-                return False
+                return False, True
             state.reads.add(key)
-        wanted = [r for r in state.notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION]
         if not capture.text.strip():
+            # An empty page may still be rendering; only new content warrants another read.
+            if observation is not None and await self._outwait(observation):
+                drawn = await self._capture()
+                if drawn.text.strip():
+                    return await self._read(state, drawn, observation)
             # Nothing on the page can evidence anything, so the reader is not asked.
             trace("read", url=self._redactor.redact(capture.url), chars=0, wanted=[r.id for r in wanted])
-            return False
+            return False, False
         # Unresolved requirements may refer to an earlier one; keep the task's constraints in every read.
         question = state.task + "\n\nRequirements still to evidence:\n" + "\n".join(f"- {r.text}" for r in wanted)
         following = _next_page_control(observation) if observation is not None else None
@@ -1255,7 +1222,7 @@ class Agent:
         )
         if observation is not None:
             self._follow_pages(state, continues, following)
-        return progressed
+        return progressed, False
 
     def _follow_pages(self, state: _RunState, continues: Sequence[str], following: Control | None) -> None:
         """Arrange for the rest of a list the reader says it needs: the next page by code, or a word to Jev."""
@@ -1276,11 +1243,7 @@ class Agent:
 
     async def _recover(self, state: _RunState, observation: Observation, reason: str) -> None:
         state.recoveries += 1
-        # Every tripwire's evidence is spent here, not just the unchanged-page count. The other two read
-        # monotone state -- `history` never shrinks, and `plan_marks` grows only on a step that got nowhere --
-        # so a threshold crossed once stays crossed, and an armed tripwire would recover on every subsequent
-        # step until `max_recoveries` returned STUCK. It also keeps the shadow rates honest: they are supposed
-        # to say how often arming WOULD have fired, not how many steps ran after the first crossing.
+        # Recovery spends every tripwire's evidence so the same threshold crossing cannot trigger it again.
         state.unchanged = 0
         state.recovered_at = len(state.history)
         state.plan_marks.clear()
@@ -1455,8 +1418,6 @@ class Agent:
                 requirements = {r.id: r.text for r in state.plan.requirements}
                 unmet = "; ".join(f"{key}: {requirements.get(key, key)}" for key in check.unmet)
                 reason = f"DONE rejected: {unmet or 'completion not confirmed'}"
-                if _unread(state.plan, state.notes) and _read_key(state, fresh, await self._capture()) in state.reads:
-                    reason += f". {_read_exhausted(state)}"
                 reason = self._redactor.redact(reason)
                 state.history.append(
                     HistoryEntry(
@@ -1467,20 +1428,7 @@ class Agent:
                         effect=reason,
                     )
                 )
-                await self._record_step(
-                    state,
-                    StepResult(
-                        index=len(state.steps),
-                        operation=Operation.DONE,
-                        decided_by=Decider.CODE,
-                        outcome=StepOutcome.FAILED,
-                        url=observation.url,
-                        target=None,
-                        confidence=None,
-                        note=reason,
-                        duration_ms=0,
-                    ),
-                )
+                await self._record_failure(state, observation, Operation.DONE, reason)
                 await self._recover(state, observation, reason)
                 return None
             handed, drafting = drafting, None
@@ -1692,6 +1640,7 @@ class Agent:
             artifacts=self._page.artifacts[self._artifact_start :],
             final_url=self._redactor.redact(state.last_page[0]) if state and state.last_page else None,
             error=error,
+            would_fire=tuple(state.would_fire) if state else (),
         )
 
 
@@ -1715,11 +1664,6 @@ def _answered(plan: Plan, notes: Notes) -> bool:
 def _drew_something(observation: Observation) -> bool:
     """Whether this page has anything on it for a run to act on or read."""
     return bool(observation.controls or observation.viewport_text.strip())
-
-
-def _read_key(state: _RunState, observation: Observation, capture: Capture) -> ReadKey:
-    wanted = tuple(r.id for r in state.notes.unresolved(state.plan) if r.kind is RequirementKind.INFORMATION)
-    return observation.document_key, capture.sha256, wanted
 
 
 def _read_exhausted(state: _RunState) -> str:
@@ -1777,10 +1721,9 @@ def _controls_text(observation: Observation) -> str:
     )
 
 
-def _signature(decision: Decision, observation: Observation, read_key: ReadKey | None = None) -> Signature:
+def _signature(decision: Decision, observation: Observation) -> Signature:
     label = _describe(decision.target) if decision.target else decision.tab_id
-    key = read_key if decision.operation is Operation.READ and read_key is not None else state_key(observation)
-    return decision.operation, label, key
+    return decision.operation, label, state_key(observation)
 
 
 def _next_page_control(observation: Observation) -> Control | None:

@@ -50,7 +50,6 @@ from fastbrowse.browser.recording import Recording
 from fastbrowse.clients.environment import load_settings
 from fastbrowse.evals.live_tasks import TASKS, Category, LiveTask, Outcome
 from fastbrowse.evals.more_tasks import DEV, HELDOUT
-from fastbrowse.evals.shadow import shadow_counts
 from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, StepEvent
 from fastbrowse.page import Observation
 from fastbrowse.run import run_task
@@ -491,7 +490,7 @@ async def run_arm(
 async def _fast_report(
     task: LiveTask, http: httpx.AsyncClient, downloads: Path, *, bitwarden: bool, record: Path | None, started: float
 ) -> tuple[Outcome, ArmReport]:
-    with _traced() as events, shadow_counts() as would_fire:
+    with _traced() as events:
         outcome, result, seen = await fast_arm(task, http, downloads, bitwarden=bitwarden, record=record)
     cost = result.cost
     return outcome, ArmReport(
@@ -501,7 +500,7 @@ async def _fast_report(
         dollars=None if cost.has_unknown else cost.known_dollars,
         # A shadow tripwire only earns arming on evidence from LIVE sites: the local fixtures never
         # grind and never spin, so a zero there says nothing about the rate that matters.
-        would_fire=dict(would_fire),
+        would_fire=dict(Counter(tripwire.value for tripwire in result.would_fire)),
         error=result.error,
         citations=[citation.model_dump(mode="json") for citation in result.citations],
         trace=[f"{s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in result.steps],
