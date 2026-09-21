@@ -98,6 +98,8 @@ class ServerConfig:
     bitwarden: tuple[str, ...] = ()
     downloads: Path | None = None
     max_concurrent: int = 1
+    mcp_token: str | None = None
+    """Bearer token every HTTP request but `/healthz` must carry. `None` is allowed only on loopback."""
 
 
 FieldType = Literal["string", "integer", "number", "boolean", "date"]
@@ -129,10 +131,10 @@ class Download(BaseModel):
 
 class BrowseResult(BaseModel):
     status: Status
-    """`complete` is the only status whose answer is fully backed by quotes from the pages."""
+    """Only `complete` reports verified task completion."""
     answer: str | None
     data: JsonValue | None
-    """The requested `fields`, each copied from the page; None when none were asked for or they could not be."""
+    """The requested `fields`, supported by page evidence; None when none were asked for or extraction failed."""
     citations: list[Citation]
     next_step: str | None
     """What a caller can do about a status other than `complete`."""
@@ -151,7 +153,7 @@ def next_step(status: Status, *, allow_authorize: bool) -> str | None:
         case Status.COMPLETE:
             return None
         case Status.UNVERIFIED:
-            return "The answer could not be backed by quotes from the page. Treat it as unconfirmed."
+            return "The run could not verify every requirement or answer claim. Treat it as unconfirmed."
         case Status.NEEDS_CONFIRMATION:
             if allow_authorize:
                 return "Stopped before an irreversible action. Confirm with the user, then call again with authorize."
@@ -171,7 +173,10 @@ def next_step(status: Status, *, allow_authorize: bool) -> str | None:
                 "server's --profile."
             )
         case Status.NEEDS_INPUT:
-            return "A field needs a value the task did not give. Put the value in the task and call again."
+            return (
+                "A required value or file is missing, or an upload exceeds its size limit; see error. "
+                "Add missing text to the task and call again. This tool cannot supply file attachments."
+            )
         case Status.BUDGET_EXCEEDED:
             return (
                 "A limit was reached. Call again with a higher max_steps, max_dollars or max_seconds (up to the "
@@ -272,9 +277,9 @@ def _description(config: ServerConfig) -> str:
         "value stops the run at needs_input rather than being made up. Pass `fields` to get typed data back "
         "as well as the answer.",
         "",
-        "Statuses: complete (every claim quoted from a page), unverified, needs_confirmation, needs_login, blocked, "
-        "needs_input, stuck, budget_exceeded, observation_limit, error. A result other than complete carries "
-        "next_step.",
+        "Statuses: complete (task verified, answer claims supported by quotes), unverified, needs_confirmation, "
+        "needs_login, blocked, needs_input, stuck, budget_exceeded, observation_limit, error. "
+        "A result other than complete carries next_step.",
     ]
     if config.allow_authorize:
         lines += [
@@ -347,7 +352,7 @@ def build_server(
         ] = None,
         fields: Annotated[
             dict[str, OutputField] | None,
-            Field(description="Typed values to return in `data`, by name, each copied verbatim from a page."),
+            Field(description="Typed values to return in `data`, by name, supported by page evidence."),
         ] = None,
         authorize: Annotated[
             bool, Field(description="Go through irreversible actions. Needs the server's --allow-authorize.")
@@ -468,22 +473,15 @@ def is_loopback(host: str) -> bool:
 
 
 def _secret(value: str) -> tuple[str, str, str]:
-    """`NAME=ENV_VAR@ORIGIN`: the CLI's pair, plus the one origin this server will type it on.
+    """`NAME=ENV_VAR@ORIGIN`, where the origin is required: a server has no start page to fall back to.
 
-    The name is taken first: a secret may be named for the account it belongs to, and `user@example.com=PW@...`
-    has an `@` in its name before the one that introduces the origin.
+    One call's start page cannot supply it either. The server holds these secrets across every call, so a
+    scope taken from whichever page a call opened would hand the next caller a credential declared for
+    somebody else's site.
     """
-    named, equals, rest = value.partition("=")
-    variable, at, origin = rest.partition("@")
-    parts = urlsplit(origin)
-    try:
-        name, variable = options.env_secret(f"{named}{equals}{variable}")
-    except argparse.ArgumentTypeError:
-        raise argparse.ArgumentTypeError(f"expected NAME=ENV_VAR@https://host, got {value!r}") from None
-    if not at or parts.scheme not in ("http", "https") or not parts.hostname:
+    name, variable, origin = options.scoped_secret(value)
+    if origin is None:
         raise argparse.ArgumentTypeError(f"expected NAME=ENV_VAR@https://host, got {value!r}")
-    if parts.path not in ("", "/") or parts.query or parts.fragment:
-        raise argparse.ArgumentTypeError(f"{origin!r} is not an origin: drop everything after the host")
     return name, variable, origin_of(origin)
 
 
@@ -526,7 +524,7 @@ async def configure(args: argparse.Namespace, settings: Settings, environ: Mappi
         raise ConfigurationError("Chrome was not found: install it, name it in FASTBROWSE_CHROME, or use --cloud")
     if not args.cloud and chrome.profile is not None and args.max_concurrent > 1:
         raise ConfigurationError("a --profile can be open in one Chrome at a time: drop --max-concurrent or --profile")
-    if missing := options.unset_variables([(name, variable) for name, variable, _ in args.secret], environ):
+    if missing := options.unset_variables(args.secret, environ):
         raise ConfigurationError(f"--secret names unset variables: {', '.join(missing)}")
     secrets = tuple(DeclaredSecret(name, environ[variable], origin) for name, variable, origin in args.secret)
     seen: set[tuple[str, str]] = set()
@@ -539,6 +537,9 @@ async def configure(args: argparse.Namespace, settings: Settings, environ: Mappi
     settings.openrouter_key()
     async with httpx.AsyncClient() as http:
         settings.jev(http)
+    token = settings.mcp_token.get_secret_value() if settings.mcp_token is not None else None
+    if args.transport == "http" and token is None and not is_loopback(args.host):
+        raise ConfigurationError(f"set {TOKEN_VARIABLE} to serve on {args.host}; without it only loopback is allowed")
     return ServerConfig(
         browser_api_key=options.browser_key(settings, args.cloud),
         chrome=chrome,
@@ -549,6 +550,7 @@ async def configure(args: argparse.Namespace, settings: Settings, environ: Mappi
         bitwarden=tuple(dict.fromkeys(args.bitwarden)),
         downloads=args.downloads,
         max_concurrent=args.max_concurrent,
+        mcp_token=token,
     )
 
 
@@ -557,12 +559,9 @@ async def serve(args: argparse.Namespace, config: ServerConfig) -> None:
     if args.transport == "stdio":
         await server.run_stdio_async()
         return
-    token = os.environ.get(TOKEN_VARIABLE) or None
-    if token is None and not is_loopback(args.host):
-        raise ConfigurationError(f"set {TOKEN_VARIABLE} to serve on {args.host}; without it only loopback is allowed")
     app: ASGIApp = server.streamable_http_app()
-    if token is not None:
-        app = BearerAuth(app, token)
+    if config.mcp_token is not None:
+        app = BearerAuth(app, config.mcp_token)
     print(f"fastbrowse-mcp: serving on http://{args.host}:{args.port}/mcp", file=sys.stderr)
     await uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")).serve()
 

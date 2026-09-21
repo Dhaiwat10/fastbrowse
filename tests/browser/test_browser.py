@@ -333,7 +333,9 @@ async def test_observation_limits_can_exceed_old_javascript_caps(
     )
     default = await loaded_page.observe()
     assert len(default.controls) == 40 and default.omitted_controls == 20
-    assert len(default.viewport_text) == 6000
+    assert default.viewport_text == (
+        "x" * 6000 + "\n[Viewport text cut: 2000 characters omitted; read the page for the rest]"
+    )
 
     page = CdpPage(
         browser_session,
@@ -341,7 +343,9 @@ async def test_observation_limits_can_exceed_old_javascript_caps(
     )
     expanded = await page.observe()
     assert len(expanded.controls) == 55 and expanded.omitted_controls == 5
-    assert len(expanded.viewport_text) == 7500
+    assert expanded.viewport_text == (
+        "x" * 7500 + "\n[Viewport text cut: 500 characters omitted; read the page for the rest]"
+    )
 
 
 async def test_page_exception_is_typed_and_does_not_echo_page_text(

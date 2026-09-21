@@ -18,19 +18,19 @@ def control(label: str, *, role: str = "button", href: str | None = None, input_
 
 
 @pytest.mark.parametrize(
-    ("target", "asked"),
+    "target",
     [
-        # No keyword and no submit type: a button is still asked about, because its script can commit anything.
-        (control("Place your order"), True),
-        (control("Erase"), True),
-        (control("Next"), True),
-        (control("Search", input_type="submit"), True),
-        (control("Delete account", role="link", href="/account/delete"), True),
-        (control("Documentation", role="link", href="/docs"), False),
+        control("Place your order"),
+        control("Yes, I'm sure", role="link", href="/unsubscribe?token=1"),
+        # A message box with no form sends on Enter through the page's own script.
+        control("Send message", role="textbox"),
+        control("Search", input_type="submit"),
     ],
 )
-def test_every_button_is_asked_about_and_plain_navigation_is_not(target: Control, asked: bool) -> None:
-    assert may_be_irreversible(Operation.CLICK, target) is asked
+def test_every_click_and_every_enter_is_asked_about(target: Control) -> None:
+    assert may_be_irreversible(Operation.CLICK, target) is True
+    assert may_be_irreversible(Operation.ENTER, target) is True
+    assert may_be_irreversible(Operation.FILL, target) is False
 
 
 def test_a_secret_is_caught_in_every_encoding_a_page_or_log_carries_it_in() -> None:

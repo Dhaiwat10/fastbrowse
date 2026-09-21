@@ -39,6 +39,7 @@ page_module = importlib.import_module("fastbrowse.browser.page")
 class CdpTransport:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.calls: list[str] = []
+        self.requests: list[tuple[str, Any, str | None]] = []
         self.failures: dict[str, BaseException] = {}
         self.blocked: dict[str, asyncio.Event] = {}
         self.finished: set[str] = set()
@@ -49,6 +50,7 @@ class CdpTransport:
 
     async def send(self, method: str, params: Any = None, session_id: str | None = None) -> dict[str, Any]:
         self.calls.append(method)
+        self.requests.append((method, params, session_id))
         if method in self.failures:
             raise self.failures[method]
         if queued := self.results.get(method):

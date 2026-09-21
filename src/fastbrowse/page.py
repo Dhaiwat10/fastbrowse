@@ -4,6 +4,7 @@ The browser layer produces `Observation` (bounded, for Jev's action choice) and 
 and executes `Action`s. Nothing above this seam touches CDP.
 """
 
+import json
 import re
 from datetime import datetime
 from enum import StrEnum
@@ -14,11 +15,42 @@ from pydantic import Field
 from fastbrowse.models import Artifact, Attachment, Frozen, Operation, StepOutcome
 
 
+def cut_marker(omitted_chars: int) -> str:
+    return f"\n[Viewport text cut: {omitted_chars} characters omitted; read the page for the rest]"
+
+
+def cut_text(text: str, max_chars: int, *, json_encoded: bool = False) -> str:
+    """`text` within `max_chars`, ending with how much was cut so a model knows the page goes on."""
+
+    def size(value: str) -> int:
+        # A JSON state escapes quotes and newlines; its budget must count those extra characters.
+        return len(json.dumps(value)) - len('""') if json_encoded else len(value)
+
+    if size(text) <= max_chars:
+        return text
+
+    def fits(keep: int) -> bool:
+        return size(text[:keep] + cut_marker(len(text) - keep)) <= max_chars
+
+    # The longest prefix that fits with its marker. Escaping makes one character cost up to six, so an excess
+    # measured in encoded characters cannot be subtracted from a count of source characters.
+    low, high = 0, min(len(text), max_chars)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(middle):
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low] + cut_marker(len(text) - low) if low > 0 and fits(low) else ""
+
+
 class Control(Frozen):
     id: str
     """Kept across observations for as long as the same DOM node survives."""
     frame_id: str | None
     frame_origin: str | None = None
+    retarget_key: str | None = Field(default=None, exclude=True)
+    """Browser guard without node ids, tying a replacement to the same semantics and receiving document."""
     role: str
     label: str
     context: str | None = None
@@ -56,6 +88,18 @@ def pages_forward(control: Control) -> bool:
     an icon, so the label is only the fallback.
     """
     return bool(control.next_page) or _NEXT_PAGE.fullmatch(" ".join(control.label.split())) is not None
+
+
+_LOAD_MORE = re.compile(r"(?:show|view|load|see)(?: \d+)? more(?: [\w-]+){0,3}", re.IGNORECASE)
+
+
+def loads_more(control: Control) -> bool:
+    """Whether a control is labelled as loading more of the list it ends: "View more flights", "Show 20 more".
+
+    It sits at the foot of the list like a pager does, past what the off-screen cap keeps, and may carry no
+    mark but its words: Google Flights' button has only its label. "Learn more" and the like do not match.
+    """
+    return Operation.CLICK in control.operations and _LOAD_MORE.fullmatch(" ".join(control.label.split())) is not None
 
 
 def pager_link(control: Control) -> bool:
@@ -175,5 +219,9 @@ class Page(Protocol):
         ...
 
     async def screenshot(self) -> bytes: ...
+
+    def withhold_frames(self, withheld: bool) -> None:
+        """Hold back live and recorded frames while the page may show a secret, which pixels cannot mask."""
+        ...
 
     async def origin(self) -> str: ...

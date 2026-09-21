@@ -11,6 +11,7 @@ import json
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 import httpx
@@ -46,13 +47,14 @@ async def run_task(
             start=base_url + task.start,
             inputs=task.inputs,
             output_schema=task.output_schema,
-            limits=Limits(max_steps=25, max_dollars=0.25, max_seconds=180),
+            limits=Limits(max_steps=25),
             authorization=task.authorization,
         )
     failure = task.check(result, recorder.snapshot())
     return {
         "task": task.id,
         "passed": failure is None,
+        "would_fire": dict(Counter(tripwire.value for tripwire in result.would_fire)),
         "failure": failure,
         "status": result.status.value,
         "seconds": round(time.monotonic() - started, 1),

@@ -18,7 +18,7 @@ from typing import Any, Self, cast
 
 from cdp_use.cdp.fetch.events import RequestPausedEvent
 from cdp_use.cdp.fetch.types import RequestPattern
-from cdp_use.cdp.page.events import JavascriptDialogOpeningEvent
+from cdp_use.cdp.page.events import JavascriptDialogOpeningEvent, ScreencastFrameEvent
 from cdp_use.cdp.target.events import (
     AttachedToTargetEvent,
     DetachedFromTargetEvent,
@@ -28,9 +28,13 @@ from cdp_use.cdp.target.events import (
 )
 from cdp_use.client import CDPClient
 
-from fastbrowse.models import Artifact, ArtifactKind, ArtifactSink
+from fastbrowse.models import Artifact, ArtifactKind, ArtifactSink, FrameHandler
 from fastbrowse.models import BrowserConnection as BrowserConnectionModel
 from fastbrowse.page import BrowserError, Dialog, Tab
+
+logger = logging.getLogger(__name__)
+
+_SCREENCAST_COMMAND_SECONDS = 0.5
 
 # Response-stage interception is enough: fastbrowse only needs the bytes of a save-as download, never to
 # rewrite a request. Chrome also classifies download-attribute anchors as Document; intercepting Other
@@ -65,6 +69,13 @@ def _browser_error(method: str, cause: Exception) -> BrowserError:
         if type(code) is int:
             detail = f"CDP {code}"
     return BrowserError(f"{method} failed ({detail})")
+
+
+@dataclass(frozen=True, slots=True)
+class _Frame:
+    data: str
+    ack_id: int
+    session_id: str | None
 
 
 class _BrowserClient(CDPClient):
@@ -111,6 +122,7 @@ class BrowserSession:
         max_download_bytes: int = 200 * 1024 * 1024,
         *,
         refuse_cookie_banners: bool = True,
+        on_frame: FrameHandler | None = None,
     ) -> None:
         self._connection = connection
         self._artifact_sink = artifact_sink
@@ -122,6 +134,13 @@ class BrowserSession:
         self._tabs: dict[str, _TabState] = {}
         self._owned: set[str] = set()
         self._active_target_id = ""
+        self._on_frame = on_frame
+        # Set while the page may show a secret: frames are still acked, so the cast keeps pace, but not delivered.
+        self.frames_withheld = False
+        self._screencast_session_id: str | None = None
+        self._screencast_lock = asyncio.Lock()
+        self._pending_frame: _Frame | None = None
+        self._frame_scheduled = False
         self._frame_sessions: dict[str, str] = {}
         """OOPIF frame_id -> session_id, keyed by target id per the plan's `frameId/targetId` guidance."""
         self._frame_parents: dict[str, str] = {}
@@ -229,6 +248,9 @@ class BrowserSession:
             task.cancel()
         # Download finalizers still need the socket to release intercepted requests.
         await asyncio.gather(*background, return_exceptions=True)
+        if self._screencast_session_id is not None:
+            await self._screencast_command("Page.stopScreencast", None, self._screencast_session_id)
+            self._screencast_session_id = None
         for target_id in list(self._owned):
             with contextlib.suppress(Exception):  # best-effort teardown; the browser may already be gone
                 await self.client.send.Target.closeTarget(params={"targetId": target_id})
@@ -243,7 +265,7 @@ class BrowserSession:
     async def switch_tab(self, target_id: str) -> None:
         if target_id not in self._tabs:
             raise ValueError(f"Unknown tab {target_id}")
-        self._active_target_id = target_id
+        self._set_active_target(target_id)
         await self.client.send.Target.activateTarget(params={"targetId": target_id})
 
     async def _open_owned_tab(self, url: str) -> str:
@@ -258,8 +280,16 @@ class BrowserSession:
         await self.client.send.Target.activateTarget(params={"targetId": target_id})
         await self._prepare_session(session_id)
         self._tabs[target_id] = _TabState(target_id=target_id, session_id=session_id, url=url)
-        self._active_target_id = target_id
+        self._set_active_target(target_id)
         return target_id
+
+    def _set_active_target(self, target_id: str) -> None:
+        self._active_target_id = target_id
+        if self._pending_frame is not None:
+            self._ack(self._pending_frame)
+            self._pending_frame = None
+        if self._on_frame is not None:
+            self._spawn(self._update_screencast())
 
     async def _prepare_session(self, session_id: str) -> None:
         # These domains are independent, but all must be ready before the session can be used.
@@ -296,6 +326,8 @@ class BrowserSession:
         client.register.Target.targetInfoChanged(self._on_target_info_changed)
         client.register.Target.targetDestroyed(self._on_target_destroyed)
         client.register.Page.javascriptDialogOpening(self._on_dialog)
+        if self._on_frame is not None:
+            client.register.Page.screencastFrame(self._on_screencast_frame)
         client.register.Fetch.requestPaused(self._on_request_paused)
 
     def _spawn(self, coro: Coroutine[None, None, None]) -> None:
@@ -357,8 +389,79 @@ class BrowserSession:
         target_id = event["targetId"]
         self._tabs.pop(target_id, None)
         self._owned.discard(target_id)
-        if target_id == self._active_target_id and self._tabs:
-            self._active_target_id = next(iter(self._tabs))
+        if target_id == self._active_target_id:
+            self._set_active_target(next(iter(self._tabs), ""))
+
+    # -- Live frames ---------------------------------------------------------------------------------
+
+    async def _screencast_command(self, method: str, params: dict[str, object] | None, session_id: str | None) -> None:
+        try:
+            async with asyncio.timeout(_SCREENCAST_COMMAND_SECONDS):
+                await self.client.send_raw(method, params, session_id)
+        except Exception as exc:
+            # Transport and consumer exceptions may contain credentials or page text.
+            logger.warning("%s failed (%s)", method, type(exc).__name__)
+
+    async def _update_screencast(self) -> None:
+        # A tab can switch again while Chrome is answering the previous start or stop.
+        async with self._screencast_lock:
+            active = self._tabs.get(self._active_target_id)
+            session_id = active.session_id if active is not None else None
+            if self._closing or session_id == self._screencast_session_id:
+                return
+            if self._screencast_session_id is not None:
+                await self._screencast_command("Page.stopScreencast", None, self._screencast_session_id)
+                self._screencast_session_id = None
+            active = self._tabs.get(self._active_target_id)
+            if active is not None and not self._closing:
+                self._screencast_session_id = active.session_id
+                await self._screencast_command(
+                    "Page.startScreencast",
+                    {"format": "jpeg", "quality": 60, "maxWidth": 1280, "maxHeight": 800},
+                    active.session_id,
+                )
+
+    def _on_screencast_frame(self, event: ScreencastFrameEvent, session_id: str | None) -> None:
+        frame = _Frame(event["data"], event["sessionId"], session_id)
+        active = self._tabs.get(self._active_target_id)
+        if self._on_frame is None or self._closing or active is None or session_id != active.session_id:
+            self._ack(frame)
+            return
+        # Chrome sends the next frame only once this one is acked, so acking after delivery paces the cast to
+        # what the consumer can take, with no fixed rate. Latest wins: a frame superseded while one is being
+        # delivered is acked unseen rather than dropped unacked, because an unacked frame stalls the cast.
+        if self._pending_frame is not None:
+            self._ack(self._pending_frame)
+        self._pending_frame = frame
+        if not self._frame_scheduled:
+            self._frame_scheduled = True
+            self._spawn(self._deliver_frames())
+
+    def _ack(self, frame: _Frame) -> None:
+        self._spawn(self._screencast_command("Page.screencastFrameAck", {"sessionId": frame.ack_id}, frame.session_id))
+
+    async def _deliver_frames(self) -> None:
+        try:
+            while (frame := self._pending_frame) is not None and not self._closing:
+                self._pending_frame = None
+                try:
+                    active = self._tabs.get(self._active_target_id)
+                    if (
+                        self._on_frame is not None
+                        and not self.frames_withheld
+                        and active is not None
+                        and frame.session_id == active.session_id
+                    ):
+                        await self._on_frame(base64.b64decode(frame.data, validate=True))
+                finally:
+                    self._ack(frame)
+        except Exception as exc:
+            logger.warning("Live frame delivery failed (%s)", type(exc).__name__)
+        finally:
+            self._frame_scheduled = False
+            if self._pending_frame is not None:
+                self._ack(self._pending_frame)
+                self._pending_frame = None
 
     # -- Dialogs ------------------------------------------------------------------------------------
 

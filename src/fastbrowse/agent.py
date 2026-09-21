@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -15,14 +16,16 @@ from urllib.parse import urljoin, urlsplit
 
 from pydantic import BaseModel, Field, JsonValue
 
+from fastbrowse.citations import text_fragment
 from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.effects import SETTING_ROLES, effect, state_key
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, LLMError, Message
-from fastbrowse.memory import Notes
+from fastbrowse.memory import Fact, Notes, NotesTooLarge
 from fastbrowse.models import (
     Attachment,
     Authorization,
+    Citation,
     CostComponent,
     Decider,
     EventHandler,
@@ -35,8 +38,10 @@ from fastbrowse.models import (
     SecretResolver,
     Status,
     StepEvent,
+    StepFact,
     StepOutcome,
     StepResult,
+    TripwireMode,
     UntilCheck,
 )
 from fastbrowse.page import (
@@ -51,7 +56,15 @@ from fastbrowse.page import (
     pages_forward,
 )
 from fastbrowse.planner import Plan, RequirementKind, make_plan
-from fastbrowse.policy import Decision, HistoryEntry, ObservationTooLarge, Reduction, StepContext, decide
+from fastbrowse.policy import (
+    Decision,
+    HistoryEntry,
+    ObservationTooLarge,
+    ReadAssessment,
+    Reduction,
+    StepContext,
+    decide,
+)
 from fastbrowse.retrieval import ComposedAnswer, compose, draft_answer, read
 from fastbrowse.safety import (
     Redactor,
@@ -63,6 +76,7 @@ from fastbrowse.safety import (
 )
 from fastbrowse.shortcut import Shortcut, accept, accept_start, propose_shortcut, propose_start
 from fastbrowse.telemetry import BudgetExceeded, Ledger, trace
+from fastbrowse.tripwires import Tripped, Tripwire, repeated_action, stagnant_plan
 from fastbrowse.verification import (
     DoneVerdict,
     Extraction,
@@ -87,23 +101,23 @@ _NOT_ACTING = frozenset({Operation.READ, Operation.DONE})
 _REPEATS_BEFORE_CYCLE = 2
 """Times one action may be taken from one page and still count as progress. Scrolling is exempt: a long page
 takes many scrolls, each of which shows something new."""
-_PAGE_OPERATIONS = frozenset({Operation.READ, Operation.SCROLL, Operation.BACK, Operation.ESCAPE})
-"""Operations on the page rather than a control, which recovery can direct without naming one. A long table's
-answer was off screen, recovery said to read the page twice, and with no control to name the advice was dropped
-and Jev scrolled on until the run stopped stuck."""
+_PAGE_OPERATIONS = frozenset({Operation.READ, Operation.SCROLL, Operation.BACK, Operation.ESCAPE, Operation.DONE})
+"""Recovery can direct page operations without a control; directed DONE still requires verification."""
 _CYCLE_SHOWN = 4
 """Actions named when a run arrives back at a page state, the most recent last."""
-_LEAVING = frozenset({Operation.CLICK, Operation.ENTER, Operation.BACK})
-"""Operations that can take the run off the page it is on."""
 _IDLE_CHECKED = frozenset({Operation.CLICK, Operation.ENTER})
 """Operations not taken twice from a page state where they changed nothing. A hover can reveal content through CSS
 alone, which leaves the DOM as it was, so it is not judged by the DOM."""
 
 logger = logging.getLogger(__name__)
 
+# A cited claim's link as the composer writes it: `[3](<https://page#:~:text=...>)`.
+_ANSWER_LINK = re.compile(r"\]\(<([^>]*)>\)")
+
 type _Prepared = ComposedAnswer | asyncio.Task[Generation[ComposedAnswer]] | None
 """An answer ready before conclusion: the reader's facts Jev accepted as written, or a composer in flight."""
 
+type ReadKey = tuple[str, str, tuple[str, ...]]
 type Signature = tuple[Operation, str | None, str]
 """One action on one target, from one page state: the key both the cycle count and the no-op memory are kept by."""
 
@@ -170,13 +184,19 @@ class _RunState:
     planning: asyncio.Task[Generation[Plan]]
     notes: Notes = field(default_factory=Notes)
     steps: list[StepResult] = field(default_factory=list[StepResult])
+    would_fire: list[Tripwire] = field(default_factory=list[Tripwire])
     history: list[HistoryEntry] = field(default_factory=list[HistoryEntry])
     hint: str | None = None
     directed: tuple[Operation, str | None] | None = None
     """The operation and control id recovery named, taken when Jev is still unsure of the next step."""
     unchanged: int = 0
     recoveries: int = 0
-    edited: set[tuple[Operation, str | None]] = field(default_factory=set[tuple[Operation, str | None]])
+    recovered_at: int = 0
+    """`len(history)` when a tripwire last recovered the run. Evidence a recovery already acted on is
+    spent: `history` only grows, so a repetition count that reached the limit once would hold forever and
+    re-enter recovery on every later step, whatever the run did next."""
+    plan_marks: list[str] = field(default_factory=list[str])
+    """One fingerprint of the still-unevidenced requirements per step, for `stagnant_plan`."""
     attempts: dict[Signature, _Attempts] = field(default_factory=dict[Signature, "_Attempts"])
     """What became of each action taken from each page state, which is how a cycle is told from progress."""
     last_page: tuple[str, str] | None = None
@@ -192,10 +212,8 @@ class _RunState:
     """This page has been read since it last changed."""
     tried_unsure: set[str] = field(default_factory=set[str])
     """Page states where an unsure pick has been acted on instead of recovering; the next one there recovers."""
-    read_urls: set[str] = field(default_factory=set[str])
-    """Pages read on the way out of them, each read once."""
-    leaving: list[asyncio.Task[bool]] = field(default_factory=list[asyncio.Task[bool]])
-    """Reads of pages an action is leaving, run alongside it; awaited before DONE is judged."""
+    reads: set[ReadKey] = field(default_factory=set)
+    """Attempted reads by document, exact content and outstanding requirements, independent of URL edits."""
     next_page: bool = False
     """Open this page's next page, set when the reader says a list the run needs goes on past the page it read."""
     paged_from: str | None = None
@@ -207,10 +225,6 @@ class _RunState:
     continuing: set[str] = field(default_factory=set[str])
     """Requirements the reader said range over a list that goes on past the page it read. A scalar choice cannot
     answer one of those, so it is not asked about them again on the next page."""
-
-    async def settle_reads(self) -> None:
-        pending, self.leaving = self.leaving, []
-        await asyncio.gather(*pending)
 
     @property
     def plan(self) -> Plan:
@@ -295,7 +309,7 @@ class Agent:
             return self._result(state, ledger, Status.BUDGET_EXCEEDED, error=limit)
         except BudgetExceeded as error:
             return self._result(state, ledger, Status.BUDGET_EXCEEDED, error=str(error))
-        except ObservationTooLarge as error:
+        except (ObservationTooLarge, NotesTooLarge) as error:
             return self._result(state, ledger, Status.OBSERVATION_LIMIT, error=str(error))
         except (JevError, LLMError, BrowserError) as error:
             return self._result(state, ledger, Status.ERROR, error=self._redactor.redact(str(error))[:500])
@@ -303,8 +317,6 @@ class Agent:
             # A run can end before it ever needed the plan, and a plan still being written would bill it.
             if planning is not None:
                 await _discard(planning)
-            for leaving in state.leaving if state is not None else ():
-                await _discard(leaving)
 
     async def _loop(
         self, state: _RunState, output_schema: type[BaseModel] | None, until: UntilCheck | None
@@ -319,11 +331,12 @@ class Agent:
                 continue
             # Walking a list is dispatched before Jev is asked, because not asking is the point: the link is
             # already found and a decision would buy nothing. It therefore passes none of the gates below, which
-            # is safe only because of what it can be. A CLICK still goes through `_action`, so the irreversible
-            # gate stands. The login check needs a decision Jev has not made yet, and the page it opens is judged
-            # on the next turn. The confidence gates judge Jev's uncertainty, and there is none to judge here.
+            # is safe only because of what it can be: a pager link to another address. The login check needs a
+            # decision Jev has not made yet, and the page it opens is judged on the next turn. The confidence gates
+            # judge Jev's uncertainty, and there is none to judge here.
             if (paging := _paging(state, observation)) is not None:
-                await self._step(state, observation, paging, Decider.CODE)
+                if await self._step(state, observation, paging, Decider.CODE):
+                    await self._recover(state, observation, _read_exhausted(state))
                 continue
             raw = self._raw_observation or observation
             origin = origin_of(raw.url)
@@ -352,8 +365,12 @@ class Agent:
                 raise _Stop(Status.NEEDS_LOGIN, f"sign-in required at {origin}")
             uncertain = decision.confidence < self._config.thresholds.recover_below
             decided_by = Decider.JEV
-            if (directed := _follow_recovery(state, observation, decision, uncertain=uncertain)) is not None:
+            if (uncertain or decision.operation not in _NOT_ACTING) and (
+                directed := _follow_recovery(state, observation, decision, uncertain=uncertain)
+            ) is not None:
                 decision, uncertain, decided_by = directed, False, Decider.LLM
+            if await self._read_before_interaction(state, observation, decision):
+                continue
             if decision.operation is Operation.CLICK and decision.target is not None and pages_forward(decision.target):
                 plan = await state.await_plan()
                 if _answered(plan, state.notes):
@@ -375,13 +392,23 @@ class Agent:
                 await state.await_plan()
                 continue
             if decision.operation in _NOT_ACTING:
-                await state.settle_reads()
-                unread = _unread(await state.await_plan(), state.notes)
-                # DONE cannot hold while the plan still needs information nobody has read; reading is the move.
-                # And a read with nothing left to find only restates the page: after a checkout, runs read the
-                # confirmation six times over, each "progress", so neither DONE nor the stall budget came.
-                operation = Operation.READ if unread else Operation.DONE
-                decision = decision.model_copy(update={"operation": operation, "target": None})
+                if _unread(await state.await_plan(), state.notes):
+                    reading = decision.model_copy(update={"operation": Operation.READ, "target": None})
+                    if not await self._step(state, observation, reading, decided_by):
+                        state.directed = None
+                        continue
+                    directed = (
+                        decision
+                        if decision.directed
+                        else _follow_recovery(state, observation, decision, uncertain=True)
+                    )
+                    if directed is None:
+                        await self._recover(state, observation, _read_exhausted(state))
+                        continue
+                    decision, uncertain, decided_by = directed, False, Decider.LLM
+                else:
+                    state.directed = None
+                    decision = decision.model_copy(update={"operation": Operation.DONE, "target": None})
             # The confidence gate exists to stop the agent acting on a page it does not understand. READ and DONE
             # do not act: a read changes nothing, and DONE is judged again by `_finish`. Jev splitting DONE from
             # READ on the page that shows the answer sent every such run to recovery, and one spent the whole
@@ -403,12 +430,12 @@ class Agent:
                 # a click can also do nothing because the page had not wired it up yet, and a retry it asks for stands.
                 attempted.idle = False
                 named = _describe(decision.target) if decision.target else decision.tab_id
-                await self._recover(
-                    state, observation, f"{decision.operation.value} {named or ''} already did nothing here".strip()
-                )
+                reason = f"{decision.operation.value} {named or ''} already did nothing here".strip()
+                await self._recover(state, observation, reason)
                 continue
             try:
-                await self._step(state, observation, decision, decided_by)
+                if await self._step(state, observation, decision, decided_by):
+                    await self._recover(state, observation, _read_exhausted(state))
             except _Unsure as unsure:
                 await self._recover(state, observation, str(unsure))
 
@@ -498,31 +525,47 @@ class Agent:
         return False
 
     async def _step(
-        self, state: _RunState, observation: Observation, decision: Decision, decided_by: Decider = Decider.JEV
-    ) -> None:
+        self,
+        state: _RunState,
+        observation: Observation,
+        decision: Decision,
+        decided_by: Decider = Decider.JEV,
+        *,
+        capture: Capture | None = None,
+    ) -> bool:
+        """Return whether a duplicate read was skipped, so callers can recover or continue the interaction."""
         started = time.monotonic()
+        facts_before = len(state.notes.facts)
+        reason = state.hint if decided_by is Decider.LLM else None
         label = _describe(decision.target) if decision.target else decision.tab_id
         typed: str | None = None
         effect_now: str | None = None
         if decision.operation is Operation.READ:
-            capture = await self._capture()
-            # A script-built page can be captured before it draws: a PyPI search read an empty page three times,
-            # recovered, and went round until the time limit. Wait for it to draw, as an unsure step does.
-            if not capture.text.strip() and await self._outwait(observation):
-                capture = await self._capture()
-            progressed, changed = await self._read(state, capture, observation), False
+            progressed, skipped = await self._read(state, capture or await self._capture(), observation)
             state.read_here = True
-            act = ActResult(outcome=StepOutcome.EXECUTED, page_changed=False)
+            if skipped:
+                return True
+            changed = False
+            effect_now = "Read this content."
+            if _unread(state.plan, state.notes):
+                effect_now += f" {_read_exhausted(state)}"
+            act = ActResult(outcome=StepOutcome.EXECUTED, page_changed=False, detail=effect_now)
         else:
-            action = await self._action(state, observation, decision)
-            await self._read_before_leaving(state, observation, decision)
+            action = await self._action(state, observation, decision, decided_by)
+            if action.secret:
+                # Held from the keystrokes on: a page may mirror the value, and only the next reading shows it.
+                self._page.withhold_frames(True)
             act = await self._page.act(action, self._raw_observation or observation)
             if act.outcome is StepOutcome.STALE and decision.target is not None:
                 act = await self._act_on_twin(action, observation, decision.target) or act
             if act.outcome is StepOutcome.EXECUTED and action.text is not None:
                 typed = "<secret>" if action.secret else self._redactor.mask(action.text)
             changed = act.page_changed
-            progressed = act.outcome is StepOutcome.EXECUTED and (changed or self._first_edit(state, decision, label))
+            # A value edit answers "was this progress" itself, and its answer beats `changed`: the popup a fill
+            # draws IS a page change, so `changed` alone kept crediting the identical re-fill even once the
+            # written-value check had stopped doing so. `changed` decides every other operation.
+            edit = self._edit_progress(decision, action)
+            progressed = act.outcome is StepOutcome.EXECUTED and (changed if edit is None else edit)
             # Moving between two pages changes the page every time, and a run went round "open the author,
             # back to the list" to its step limit with its stall budget reset at every hop. The same action
             # from the same page a third time is going round, not forward.
@@ -546,7 +589,6 @@ class Agent:
                 effect_now = done.summary
             attempt.idle = act.outcome is StepOutcome.EXECUTED and not effective and decision.operation in _IDLE_CHECKED
         if changed:
-            state.edited.clear()
             state.read_here = False
         state.history.append(
             HistoryEntry(
@@ -565,8 +607,9 @@ class Agent:
             outcome=act.outcome,
             url=observation.url,
             target=label,
-            confidence=decision.confidence,
-            note=self._redactor.redact(act.detail) if act.detail else None,
+            confidence=decision.confidence if decided_by is Decider.JEV else None,
+            note=self._redactor.redact("\n".join(part for part in (reason, act.detail) if part)) or None,
+            facts=tuple(self._public_fact(fact) for fact in state.notes.facts[facts_before:]),
             page_changed=None if decision.operation is Operation.READ else changed,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
@@ -579,21 +622,46 @@ class Agent:
             state.hint = None
         else:
             state.unchanged += 1
-        if state.unchanged >= self._config.stall.unchanged_actions:
-            await self._recover(state, observation, f"{state.unchanged} actions without visible progress")
+        # Progress breaks the stagnation streak even when setup work has not evidenced a requirement yet.
+        if progressed:
+            state.plan_marks.clear()
+        else:
+            state.plan_marks.append(self._plan_mark(state))
+        for tripped in self._tripwires(state):
+            if tripped.tripwire is Tripwire.NO_PROGRESS or self._config.stall.tripwires is TripwireMode.ARMED:
+                await self._recover(state, observation, str(tripped))
+                return False
+            state.would_fire.append(tripped.tripwire)
+            logger.info(
+                "tripwire %s would have recovered on step %d",
+                tripped,
+                len(state.steps),
+                extra={"tripwire": tripped.tripwire.value},
+            )
+        return False
 
     async def _act_on_twin(self, action: Action, observation: Observation, target: Control) -> ActResult | None:
         """Act on the one control now standing where `target` stood, if the page redrew it since it was observed.
 
         A date picker redraws its days and its Done button as it animates, so a click chosen a moment earlier finds
         its element gone, and deciding again costs a full model call to pick the same control. A control that is
-        the only one matching the target in frame, role, label, context and link, on the same address, is taken to
-        be that control.
+        the only one retaining its guard and semantics in the same document can inherit that decision. A new
+        document at the same address, or a changed form, has not passed the original authorization gate.
         """
         fresh = await self._observe()
-        if fresh.url != observation.url:
+        if (
+            not observation.document_key
+            or not target.retarget_key
+            or fresh.document_key != observation.document_key
+            or fresh.url != observation.url
+            or fresh.title != observation.title
+        ):
             return None
-        twins = [control for control in fresh.controls if _identity(control) == _identity(target)]
+        twins = [
+            control
+            for control in fresh.controls
+            if control.model_copy(update={"id": target.id, "offscreen": target.offscreen}) == target
+        ]
         if len(twins) != 1:
             return None
         trace("retarget", target=self._redactor.redact(target.label))
@@ -647,7 +715,7 @@ class Agent:
         """Every observation models see has resolved secret values blanked, wherever the page echoes them."""
         observation = await self._page.observe()
         self._raw_observation = observation
-        self._secret_on_screen = self._redactor.reveals(observation.model_dump_json())
+        self._secret_on_screen = self._reveals(observation)
         mask = self._redactor.mask
         controls = tuple(
             control.model_copy(
@@ -720,15 +788,17 @@ class Agent:
         return tuple(ref.name for ref in self._secrets.available() if secret_allowed(ref, origin))
 
     @staticmethod
-    def _first_edit(state: _RunState, decision: Decision, label: str | None) -> bool:
-        """A value edit is progress once per target per page state; re-filling the same field is a loop."""
-        if decision.operation not in {Operation.FILL, Operation.SELECT, Operation.UPLOAD}:
-            return False
-        key = (decision.operation, label)
-        if key in state.edited:
-            return False
-        state.edited.add(key)
-        return True
+    def _edit_progress(decision: Decision, action: Action) -> bool | None:
+        """Rewriting the observed field value vetoes progress even when the page changes.
+        Other edits, including uploads, return None so the page's effect decides.
+        """
+        if decision.operation not in {Operation.FILL, Operation.SELECT} or decision.target is None:
+            return None
+        if action.text is None:
+            return None
+        # A secret's value never leaves the page; only its length is observed, so that is what to compare.
+        held = "\u2022" * len(action.text) if action.secret else action.text
+        return False if decision.target.value == held else None
 
     async def _record_step(self, state: _RunState, step: StepResult) -> None:
         state.steps.append(step)
@@ -738,6 +808,33 @@ class Agent:
         # Taken from the page the step acted on, before the next observation moves it on.
         await self._on_event(StepEvent(step=step, frame=await self._frame() if self._config.step_frames else None))
 
+    async def _record_failure(
+        self,
+        state: _RunState,
+        observation: Observation,
+        operation: Operation,
+        reason: str,
+        *,
+        target: str | None = None,
+        confidence: float | None = None,
+        page_changed: bool | None = None,
+    ) -> None:
+        await self._record_step(
+            state,
+            StepResult(
+                index=len(state.steps),
+                operation=operation,
+                decided_by=Decider.CODE,
+                outcome=StepOutcome.FAILED,
+                url=observation.url,
+                target=target,
+                confidence=confidence,
+                note=reason,
+                page_changed=page_changed,
+                duration_ms=0,
+            ),
+        )
+
     async def _frame(self) -> bytes | None:
         """A PNG of the page as it is now, or None while a resolved secret is showing on it.
 
@@ -746,15 +843,26 @@ class Agent:
         action may be the one that put the secret there. A field a page mirrors into ordinary text would
         otherwise reach the caller as pixels, which is the one thing a frame must never carry.
         """
-        if self._redactor.reveals((await self._page.observe()).model_dump_json()):
+        if self._reveals(await self._page.observe()):
             return None
         return await self._page.screenshot()
 
-    async def _action(self, state: _RunState, observation: Observation, decision: Decision) -> Action:
+    def _reveals(self, observation: Observation) -> bool:
+        """Whether a resolved secret shows on the page; live and recorded frames are held back while one does."""
+        revealed = self._redactor.reveals(observation.model_dump_json())
+        self._page.withhold_frames(revealed)
+        return revealed
+
+    async def _action(
+        self, state: _RunState, observation: Observation, decision: Decision, decided_by: Decider
+    ) -> Action:
         target = decision.target
         match decision.operation:
             case Operation.CLICK | Operation.ENTER:
-                await self._gate_irreversible(state, observation, decision)
+                # Code only ever clicks a pager link to another address (`_next_page_control`), which opens a page
+                # and commits nothing, so asking Jev would buy a call per page and nothing else.
+                if decided_by is not Decider.CODE:
+                    await self._gate_irreversible(state, observation, decision)
                 return Action(operation=decision.operation, target_id=target.id if target else None)
             case Operation.FILL:
                 text = await self._text(state, observation, _require(target))
@@ -829,8 +937,10 @@ class Agent:
     ) -> None:
         thresholds = self._config.thresholds
         authorized = state.authorization.irreversible_actions
-        # Authorized and confident proceeds whatever Jev would say about the action, so it is not asked.
-        if authorized and decision.confidence >= thresholds.sensitive_act_from:
+        # Authorized and confident proceeds whatever Jev would say about the action, so it is not asked. Only Jev's
+        # own confidence counts: a directed action carries the score of the action Jev chose instead, and a
+        # confident READ would otherwise wave recovery's click through unasked.
+        if authorized and not decision.directed and decision.confidence >= thresholds.sensitive_act_from:
             return
         state.ledger.reserve(CostComponent.JEV)
         # Only the address goes with the question: the page's own text is what would argue a harmful action
@@ -844,9 +954,24 @@ class Agent:
             return
         what = f"{decision.operation.value} {label!r}"
         # An unsure pick that may commit something is more likely the wrong pick than the step to confirm.
-        if authorized or decision.confidence < thresholds.recover_below:
-            raise _Unsure(f"unsure {what} is the irreversible action the task means ({decision.confidence:.2f})")
-        raise _Stop(Status.NEEDS_CONFIRMATION, f"{what} needs confirmation")
+        unsure = authorized or decision.confidence < thresholds.recover_below
+        reason = (
+            f"unsure {what} is the irreversible action the task means ({decision.confidence:.2f})"
+            if unsure
+            else f"{what} needs confirmation"
+        )
+        await self._record_failure(
+            state,
+            observation,
+            decision.operation,
+            self._redactor.redact(reason),
+            target=self._redactor.redact(label),
+            confidence=None if decision.directed else decision.confidence,
+            page_changed=False,
+        )
+        if unsure:
+            raise _Unsure(reason)
+        raise _Stop(Status.NEEDS_CONFIRMATION, reason)
 
     async def _text(self, state: _RunState, observation: Observation, target: Control) -> str:
         secrets = tuple(ref.name for ref in self._secrets.available()) if self._secrets else ()
@@ -916,11 +1041,14 @@ class Agent:
             "page": {
                 "url": observation.url,
                 "title": observation.title,
-                "text": observation.viewport_text[:6000],
+                "text": observation.viewport_text,
                 "date": observation.captured_at.date().isoformat(),
             },
-            "recent_actions": [entry.model_dump(mode="json", exclude_none=True) for entry in state.history[-6:]],
-            "notes": state.notes.render(6000),
+            "recent_actions": [
+                entry.model_dump(mode="json", exclude_none=True)
+                for entry in _history(state.history, self._config.observation)
+            ],
+            "notes": state.notes.render(self._config.observation.working_notes_chars),
         }
         messages = [
             Message(role="system", content=_FIELD_WRITER),
@@ -959,18 +1087,17 @@ class Agent:
 
     async def _value_absent(self, state: _RunState, observation: Observation, target: Control) -> bool:
         state.ledger.reserve(CostComponent.JEV)
+        question = NoulQuestion(
+            instructions=(
+                f"# Task\n{state.task}\n\nThe agent must fill the field labelled {target.label!r}. "
+                "Do the task or the notes give what belongs in it?"
+            ),
+            true="The task or the notes state that value, or state something it is a part of.",
+            false="Neither the task nor the notes say it; filling the field would mean inventing one.",
+        )
         evaluation = await self._jev.evaluate(
-            page_state(observation, state.notes),
-            {
-                "stated": NoulQuestion(
-                    instructions=(
-                        f"# Task\n{state.task}\n\nThe agent must fill the field labelled {target.label!r}. "
-                        "Do the task or the notes give what belongs in it?"
-                    ),
-                    true="The task or the notes state that value, or state something it is a part of.",
-                    false="Neither the task nor the notes say it; filling the field would mean inventing one.",
-                )
-            },
+            page_state(observation, state.notes, self._config.tokens, questions=[question.model_dump_json()]),
+            {"stated": question},
         )
         state.ledger.record(evaluation.cost)
         answer = evaluation.answers.get("stated")
@@ -990,9 +1117,10 @@ class Agent:
         self, state: _RunState, observation: Observation, question: str, criteria: Mapping[str, JsonValue]
     ) -> str:
         state.ledger.reserve(CostComponent.JEV)
+        choice = ChoiceQuestion(instructions=f"# Task\n{state.task}\n\n{question}", criteria=criteria)
         evaluation = await self._jev.evaluate(
-            page_state(observation, state.notes),
-            {"pick": ChoiceQuestion(instructions=f"# Task\n{state.task}\n\n{question}", criteria=criteria)},
+            page_state(observation, state.notes, self._config.tokens, questions=[choice.model_dump_json()]),
+            {"pick": choice},
         )
         state.ledger.record(evaluation.cost)
         answer = evaluation.answers["pick"]
@@ -1016,47 +1144,37 @@ class Agent:
         )
         return choice == "accept"
 
-    async def _read_before_leaving(self, state: _RunState, observation: Observation, decision: Decision) -> None:
-        # A shop totals the order on the page before Finish and not after it, so a run that submits first can
-        # never prove the total: the checkout eval finished, found no total, and went round the cart again.
-        # The capture is taken now and read alongside the action, so a submit waits only for the capture.
-        # Only an authorized run commits: without authorization the gate stops before any page is lost.
-        committing = state.authorization.irreversible_actions and may_be_irreversible(
-            decision.operation, decision.target
-        )
-        # The results of a search the run typed are where the answer most often is, and Jev moved on to the
-        # next search without reading them: a comparison of two packages read the second one's page four
-        # times and never had the first one's date. Read those once, whatever the action.
-        answering = (
-            decision.operation in _LEAVING
-            and observation.url not in state.read_urls
-            and _answers_input(state, observation)
-        )
-        if (
-            state.read_here
-            or not (committing or answering)
-            or state.ready_plan is None
-            or not _unread(state.ready_plan, state.notes)
-        ):
-            return
-        state.read_here = True
-        state.read_urls.add(observation.url)
-        state.leaving.append(asyncio.create_task(self._read(state, await self._capture())))
+    async def _read_before_interaction(self, state: _RunState, observation: Observation, decision: Decision) -> bool:
+        if decision.read_assessment is not ReadAssessment.EVIDENCE or decision.operation in _NOT_ACTING:
+            return False
+        plan = await state.await_plan()
+        if not _unread(plan, state.notes):
+            return False
+        # An interaction can remove evidence, so read first and reconsider before authorizing the next action.
+        return not await self._step(state, observation, _code_decision(Operation.READ, None), Decider.CODE)
 
     async def _read(
         self, state: _RunState, capture: Capture | None = None, observation: Observation | None = None
-    ) -> bool:
-        """Return whether reading added evidence, which is the only progress a read can make.
-
-        With the `observation` the page was read from, a list the reader says goes on past it is followed.
-        """
+    ) -> tuple[bool, bool]:
+        """Return (added evidence, skipped duplicate), since only new evidence makes a read progress."""
         capture = capture or await self._capture()
         plan = await state.await_plan()
         wanted = [r for r in state.notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION]
+        if observation is not None:
+            key = observation.document_key, capture.sha256, tuple(r.id for r in wanted)
+            if key in state.reads:
+                trace("read_skipped", reason="unchanged_content_and_requirements")
+                return False, True
+            state.reads.add(key)
         if not capture.text.strip():
+            # An empty page may still be rendering; only new content warrants another read.
+            if observation is not None and await self._outwait(observation):
+                drawn = await self._capture()
+                if drawn.text.strip():
+                    return await self._read(state, drawn, observation)
             # Nothing on the page can evidence anything, so the reader is not asked.
             trace("read", url=self._redactor.redact(capture.url), chars=0, wanted=[r.id for r in wanted])
-            return False
+            return False, False
         # Unresolved requirements may refer to an earlier one; keep the task's constraints in every read.
         question = state.task + "\n\nRequirements still to evidence:\n" + "\n".join(f"- {r.text}" for r in wanted)
         following = _next_page_control(observation) if observation is not None else None
@@ -1083,6 +1201,7 @@ class Agent:
             question,
             [r.id for r in wanted],
             state.notes,
+            tokens=self._config.tokens,
             ledger=state.ledger,
             jev=self._jev,
             requirements=wanted,
@@ -1097,12 +1216,13 @@ class Agent:
             chars=len(capture.text),
             wanted=[r.id for r in wanted],
             facts_added=len(state.notes.facts) - before,
+            rejected_quotes=outcome.rejected_quotes,
             evidenced=[r.id for r in wanted if state.notes.evidenced(r.id)],
             continues=continues,
         )
         if observation is not None:
             self._follow_pages(state, continues, following)
-        return progressed
+        return progressed, False
 
     def _follow_pages(self, state: _RunState, continues: Sequence[str], following: Control | None) -> None:
         """Arrange for the rest of a list the reader says it needs: the next page by code, or a word to Jev."""
@@ -1113,28 +1233,46 @@ class Agent:
             # Deciding each hop costs a Jev call to pick a link code has already found, on every page of the list.
             state.next_page = True
             return
+        # "Otherwise finish" was a dead end: the reader withholds a list it has not seen the end of, so the done check
+        # refused every such finish, and Flights runs spent their recoveries finding "View more flights" instead.
         state.hint = (
-            "The reader saw the list this task needs go on past this page. If a next page or load-more "
-            "control shows the rest, open it and READ it; otherwise finish with what was read."
+            "The reader saw the list this task needs go on past what the page shows, so what was read cannot settle "
+            "it. Show the rest and READ it: open the control that loads or pages through more of the list, or narrow "
+            "the list with the page's own filter or sort so the answer is in view."
         )
 
     async def _recover(self, state: _RunState, observation: Observation, reason: str) -> None:
         state.recoveries += 1
+        # Recovery spends every tripwire's evidence so the same threshold crossing cannot trigger it again.
         state.unchanged = 0
+        state.recovered_at = len(state.history)
+        state.plan_marks.clear()
         if state.recoveries > self._config.stall.max_recoveries:
             raise _Stop(Status.STUCK, reason)
         steps = "\n".join(
             f"- {h.operation.value if h.operation else 'open'} {h.target or ''} -> {h.outcome.value}"
             + (f": {h.effect}" if h.effect else "")
-            for h in state.history[-10:]
+            for h in _history(state.history, self._config.observation)
         )
         # Without the names, a sign-in page reads as a wall the user must pass: a run with a stored login gave up
         # saying no credentials were given.
         stored = self._secret_names(origin_of(observation.url))
         # Without the notes, a run that had read the answer was told to scroll down "to see the remaining
         # books" three times, and stopped stuck with the answer in hand.
+        # Without the reader's word that a list goes on, a note holding the best record SO FAR reads as the answer:
+        # a run with the cheapest of the first few flights noted was sent to finish, and the done check refused.
         open_requirements = (
-            "\n".join(f"- {r.text}" for r in state.notes.unresolved(state.ready_plan)) if state.ready_plan else ""
+            "\n".join(
+                f"- {r.text}"
+                + (
+                    " (the reader saw the list this ranges over go on past what the page shows: load the rest first)"
+                    if r.id in state.continuing
+                    else ""
+                )
+                for r in state.notes.unresolved(state.ready_plan)
+            )
+            if state.ready_plan
+            else ""
         )
         secrets = (
             f"\n\n## Stored secrets\n{', '.join(stored)}. Filling a field with one types its hidden value."
@@ -1165,9 +1303,10 @@ class Agent:
                         f"## Task\n{state.task}\n\n## Problem\n{reason}\n\n## Recent steps\n{steps}\n\n"
                         f"## Current date\n{observation.captured_at.date().isoformat()}\n\n"
                         f"## Controls\n{_controls_text(observation)}\n\n"
-                        f"## Page\n{observation.url}\n{observation.viewport_text[:4000]}{secrets}\n\n"
+                        f"## Page\n{observation.url}\n{observation.viewport_text}{secrets}\n\n"
                         f"## Still to find\n{open_requirements or 'nothing'}\n\n"
-                        f"## Notes read so far\n{state.notes.render(3000) or 'none'}"
+                        "## Notes read so far\n"
+                        f"{state.notes.render(self._config.observation.working_notes_chars) or 'none'}"
                     ),
                     images=await self._screenshots(),
                 ),
@@ -1201,7 +1340,9 @@ class Agent:
                 url=observation.url,
                 target=None,
                 confidence=None,
-                note=self._redactor.redact(generation.data.next_subgoal),
+                note=self._redactor.redact(
+                    "\n".join((reason, generation.data.diagnosis, generation.data.next_subgoal))
+                ),
                 duration_ms=0,
             ),
         )
@@ -1218,7 +1359,16 @@ class Agent:
         state.ledger.reserve(CostComponent.JEV)
         await state.await_plan()
         draft = draft_answer(state.plan, state.notes) if state.plan.answer_expected else None
-        check = await check_done(self._jev, state.task, state.plan, fresh, state.notes, self._config.thresholds, draft)
+        check = await check_done(
+            self._jev,
+            state.task,
+            state.plan,
+            fresh,
+            state.notes,
+            self._config.thresholds,
+            draft,
+            tokens=self._config.tokens,
+        )
         trace(
             "done_check",
             verdict=check.verdict.value,
@@ -1239,7 +1389,14 @@ class Agent:
                 # one discarded call on the branch that was going back to work anyway.
                 if state.plan.answer_expected and check.answer is None:
                     drafting = asyncio.create_task(
-                        compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
+                        compose(
+                            self._llm,
+                            state.task,
+                            state.plan,
+                            state.notes,
+                            tokens=self._config.tokens,
+                            ledger=state.ledger,
+                        )
                     )
                 verdict = await llm_verify(
                     self._llm,
@@ -1249,6 +1406,7 @@ class Agent:
                     await self._screenshots(),
                     state.notes,
                     state.steps,
+                    config=self._config,
                     ledger=state.ledger,
                 )
                 state.ledger.record(verdict.cost)
@@ -1257,8 +1415,21 @@ class Agent:
             if accepted and until is not None:
                 accepted = await until((self._raw_observation or fresh).url)
             if not accepted:
-                unmet = ", ".join(check.unmet) or "completion not confirmed"
-                await self._recover(state, observation, f"DONE rejected: {unmet}")
+                requirements = {r.id: r.text for r in state.plan.requirements}
+                unmet = "; ".join(f"{key}: {requirements.get(key, key)}" for key in check.unmet)
+                reason = f"DONE rejected: {unmet or 'completion not confirmed'}"
+                reason = self._redactor.redact(reason)
+                state.history.append(
+                    HistoryEntry(
+                        operation=Operation.DONE,
+                        target=None,
+                        outcome=StepOutcome.FAILED,
+                        page_changed=False,
+                        effect=reason,
+                    )
+                )
+                await self._record_failure(state, observation, Operation.DONE, reason)
+                await self._recover(state, observation, reason)
                 return None
             handed, drafting = drafting, None
             return await self._conclude(state, output_schema, check.answer or handed)
@@ -1266,28 +1437,43 @@ class Agent:
             if drafting is not None:
                 await _discard(drafting)
 
-    async def _answer(self, state: _RunState, prepared: _Prepared) -> tuple[str, bool]:
+    async def _answer(self, state: _RunState, prepared: _Prepared) -> tuple[ComposedAnswer, bool]:
         """The answer and whether its claims held, composing only when nothing prepared survives the check."""
         if isinstance(prepared, ComposedAnswer):
             if (held := await self._holds(state, prepared)) is not None:
-                return self._redactor.redact(held.answer), True
+                return held, True
             # Jev took the reader's facts as the answer and then doubted a claim in them, which is what
             # the composer exists for.
             prepared = None
-        composed = await (
-            prepared
-            if prepared is not None
-            else compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
-        )
-        held = await self._holds(state, composed.data)
-        if held is None and (facts := draft_answer(state.plan, state.notes)) is not None:
+        facts = draft_answer(state.plan, state.notes)
+        try:
+            composed = (
+                await (
+                    prepared
+                    if prepared is not None
+                    else compose(
+                        self._llm, state.task, state.plan, state.notes, tokens=self._config.tokens, ledger=state.ledger
+                    )
+                )
+            ).data
+        except LLMError:
+            # A composer that fails (one looped to its output cap) leaves the reader's facts, each with its quote,
+            # which is an answer the claim check can still pass; failing the run over it threw away read evidence.
+            if facts is None:
+                raise
+            logger.warning("The composer failed; offering the reader's facts to the claim check", exc_info=True)
+            composed, facts = facts, None
+        held = await self._holds(state, composed)
+        if held is None and facts is not None:
             # A list of forty records came back as one claim citing one quote, which no claim check should pass. The
             # reader's own facts each carry the quote that shows them, so they are offered to the same check.
             held = await self._holds(state, facts)
-        return self._redactor.redact((held or composed.data).answer), held is not None
+        return held or composed, held is not None
 
     async def _holds(self, state: _RunState, answer: ComposedAnswer) -> ComposedAnswer | None:
-        return await check_claims(self._jev, answer, state.notes, self._config.thresholds, ledger=state.ledger)
+        return await check_claims(
+            self._jev, answer, state.notes, self._config.thresholds, tokens=self._config.tokens, ledger=state.ledger
+        )
 
     async def _extraction(self, state: _RunState, output_schema: type[BaseModel]) -> Extraction:
         """The caller's schema, filled from a capture taken inside this branch so it overlaps the answer."""
@@ -1298,6 +1484,7 @@ class Agent:
             await self._capture(),
             output_schema,
             notes=state.notes,
+            tokens=self._config.tokens,
             ledger=state.ledger,
         )
 
@@ -1308,6 +1495,8 @@ class Agent:
         prepared: _Prepared = None,
     ) -> RunResult:
         answer: str | None = None
+        composed: ComposedAnswer | None = None
+        citations: tuple[Citation, ...] = ()
         data: JsonValue | None = None
         evidence: list[Evidence] = [fact.evidence for fact in state.notes.facts]
         verified = True
@@ -1318,7 +1507,7 @@ class Agent:
         if answering is not None and extracting is not None:
             first, second = asyncio.create_task(answering), asyncio.create_task(extracting)
             try:
-                (answer, verified), extraction = await asyncio.gather(first, second)
+                (composed, verified), extraction = await asyncio.gather(first, second)
             finally:
                 # gather reports the first failure and leaves its sibling running, which would go on
                 # calling a model after the run had already failed or hit its budget.
@@ -1326,10 +1515,12 @@ class Agent:
                     if not task.done():
                         await _discard(task)
         elif answering is not None:
-            answer, verified = await answering
+            composed, verified = await answering
             extraction = None
         else:
             extraction = await extracting if extracting is not None else None
+        if composed is not None:
+            answer, citations = self._public_answer(composed)
         if extraction is not None:
             data = extraction.data
             evidence.extend(extraction.evidence)
@@ -1340,21 +1531,90 @@ class Agent:
         cited: dict[tuple[str, str], Evidence] = {}
         for item in evidence:
             cited.setdefault((item.url, item.quote), item)
-        return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(cited.values()))
+        return self._result(
+            state, state.ledger, status, answer=answer, data=data, evidence=tuple(cited.values()), citations=citations
+        )
+
+    def _public_fact(self, fact: Fact) -> StepFact:
+        redact = self._redactor.redact
+        url, quote = redact(fact.evidence.url), redact(fact.evidence.quote)
+        return StepFact(
+            text=redact(fact.text),
+            requirement_id=redact(fact.requirement_id) if fact.requirement_id is not None else None,
+            quote=quote,
+            url=url,
+            reader=fact.reader,
+            deep_link=text_fragment(url, quote),
+        )
+
+    def _public_answer(self, composed: ComposedAnswer) -> tuple[str, tuple[Citation, ...]]:
+        """The answer and its citations with secrets redacted, links included.
+
+        A link percent-encodes its quote, where redacting the text cannot see a secret, so each link is rebuilt
+        from the redacted quote and swapped into the answer before the answer itself is redacted.
+        """
+        redact = self._redactor.redact
+        citations = []
+        links: dict[str, str] = {}
+        for citation in composed.citations:
+            url, quote = redact(citation.url), redact(citation.quote)
+            public = citation.model_copy(
+                update={
+                    "text": redact(citation.text),
+                    "url": url,
+                    "quote": quote,
+                    "deep_link": text_fragment(url, quote),
+                }
+            )
+            links[citation.deep_link] = public.deep_link
+            citations.append(public)
+        # Every link destination in one pass. Replacing one link at a time rewrote the start of any longer link
+        # sharing its prefix, which then no longer matched and kept its percent-encoded secret.
+        answer = _ANSWER_LINK.sub(lambda link: f"](<{links[link.group(1)]}>)", composed.linked_answer)
+        return redact(answer), tuple(citations)
+
+    def _plan_mark(self, state: _RunState) -> str:
+        """What the plan still wants. Requirement ids, not model prose: this asks whether the run resolved
+        anything, and a plan the agent cannot influence by rewording is the only honest way to ask it."""
+        if state.ready_plan is None:
+            return ""
+        return ",".join(sorted(r.id for r in state.notes.unresolved(state.ready_plan)))
+
+    def _tripwires(self, state: _RunState) -> list[Tripped]:
+        """Every grinding signal that holds right now, the long-standing unchanged-page count first."""
+        stall = self._config.stall
+        tripped: list[Tripped] = []
+        if state.unchanged >= stall.unchanged_actions:
+            tripped.append(Tripped(Tripwire.NO_PROGRESS, state.unchanged))
+        repeated = repeated_action(state.history[state.recovered_at :], stall.repeated_actions)
+        if repeated is not None:
+            tripped.append(repeated)
+        # An empty mark means the plan was not written yet, and every step before it would look identical.
+        if state.ready_plan is not None:
+            stagnant = stagnant_plan([mark for mark in state.plan_marks if mark], stall.stagnant_plan_steps)
+            if stagnant is not None:
+                tripped.append(stagnant)
+        return tripped
 
     def _context(
         self, state: _RunState, secrets: tuple[str, ...], *, check_login: bool, check_bot: bool
     ) -> StepContext:
+        unread = None
+        if (plan := state.ready_plan) is not None:
+            unread = tuple(r.text for r in state.notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION)
+            if not unread and _unread(plan, state.notes):
+                unread = (state.task,)
         return StepContext(
             task=state.task,
             subgoal=state.hint,
             requirements=tuple(r.text for r in state.ready_plan.requirements) if state.ready_plan else (),
-            notes=state.notes.render(4000),
+            notes=state.notes.render(self._config.observation.working_notes_chars),
             history=_history(state.history, self._config.observation),
             check_login=check_login,
             check_bot=check_bot,
             has_attachments=bool(state.attachments),
             secrets=secrets,
+            unread_requirements=unread,
         )
 
     def _result(
@@ -1366,6 +1626,7 @@ class Agent:
         answer: str | None = None,
         data: JsonValue | None = None,
         evidence: tuple[Evidence, ...] = (),
+        citations: tuple[Citation, ...] = (),
         error: str | None = None,
     ) -> RunResult:
         return RunResult(
@@ -1373,11 +1634,13 @@ class Agent:
             answer=answer,
             data=data,
             evidence=evidence,
+            citations=citations,
             steps=tuple(state.steps) if state else (),
             cost=ledger.breakdown(),
             artifacts=self._page.artifacts[self._artifact_start :],
             final_url=self._redactor.redact(state.last_page[0]) if state and state.last_page else None,
             error=error,
+            would_fire=tuple(state.would_fire) if state else (),
         )
 
 
@@ -1403,15 +1666,14 @@ def _drew_something(observation: Observation) -> bool:
     return bool(observation.controls or observation.viewport_text.strip())
 
 
-def _answers_input(state: _RunState, observation: Observation) -> bool:
-    """Whether the run reached this page from the one before by submitting text it typed there."""
-    steps, end = state.steps, len(state.steps)
-    while end and steps[end - 1].url == observation.url:
-        end -= 1
-    start = end
-    while start and steps[start - 1].url == steps[end - 1].url:
-        start -= 1
-    return any(step.operation is Operation.FILL for step in steps[start:end])
+def _read_exhausted(state: _RunState) -> str:
+    missing = "; ".join(
+        f"{r.id}: {r.text}" for r in state.notes.unresolved(state.plan) if r.kind is RequirementKind.INFORMATION
+    )
+    return (
+        f"Still missing evidence for {missing or state.task}. "
+        "Re-reading this unchanged content will not supply it; find additional content."
+    )
 
 
 def _describe(control: Control) -> str:
@@ -1539,7 +1801,7 @@ def _try_unsure(state: _RunState, observation: Observation) -> bool:
 def _follow_recovery(
     state: _RunState, observation: Observation, decision: Decision, *, uncertain: bool
 ) -> Decision | None:
-    """The action recovery named, when Jev is still unsure and the control still offers it. Used once either way.
+    """The action recovery named, when Jev is unsure or repeats a failed read and the control still offers it.
 
     Recovery names one action on one control, or on the page itself. Handed back to Jev only as a hint, it left
     Jev choosing between two Search buttons at 0.49 until the recovery budget ran out, the named action never taken.
@@ -1549,9 +1811,11 @@ def _follow_recovery(
         return None
     operation, control_id = directed
     if control_id is None:
-        return decision.model_copy(update={"operation": operation, "target": None})
+        return decision.model_copy(update={"operation": operation, "target": None, "directed": True})
     target = next((c for c in observation.controls if c.id == control_id and operation in c.operations), None)
-    return None if target is None else decision.model_copy(update={"operation": operation, "target": target})
+    if target is None:
+        return None
+    return decision.model_copy(update={"operation": operation, "target": target, "directed": True})
 
 
 async def _discard[T](task: asyncio.Task[T]) -> None:
@@ -1562,10 +1826,6 @@ async def _discard[T](task: asyncio.Task[T]) -> None:
     """
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
-
-
-def _identity(control: Control) -> tuple[str | None, str, str, str | None, str | None]:
-    return control.frame_id, control.role, control.label, control.context, control.href
 
 
 def _require(target: Control | None) -> Control:

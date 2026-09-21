@@ -20,6 +20,7 @@ from fastbrowse.page import Control, Observation
 from fastbrowse.policy import (
     HistoryEntry,
     ObservationTooLarge,
+    ReadAssessment,
     Reduction,
     StepContext,
     _element,
@@ -103,6 +104,27 @@ async def test_picks_target_for_chosen_operation() -> None:
     decision = await decide(jev, observation(tuple(button(i) for i in range(5))), context(history=history), Config())
     assert (decision.operation, decision.target and decision.target.id) == (Operation.CLICK, "b3")
     assert decision.login_required is None
+
+
+@pytest.mark.parametrize("assessment", list(ReadAssessment))
+async def test_read_assessment_is_independent_of_the_chosen_action(assessment: ReadAssessment) -> None:
+    jev = ScriptedJev({"operation": "click", "click_target": "b0", "read_assessment": assessment.value})
+    decision = await decide(
+        jev, observation((button(0),)), context(unread_requirements=("Report why login failed",)), Config()
+    )
+    assert decision.operation is Operation.CLICK and decision.read_assessment is assessment
+    assert len(jev.requests) == 1
+    question = jev.requests[0]["read_assessment"]
+    assert isinstance(question, ChoiceQuestion)
+    assert set(question.criteria) == {assessment.value for assessment in ReadAssessment}
+    assert "untrusted data" in question.instructions
+
+
+async def test_evidenced_requirements_do_not_ask_for_preservation() -> None:
+    jev = ScriptedJev({"operation": "click", "click_target": "b0"})
+    decision = await decide(jev, observation((button(0),)), context(unread_requirements=()), Config())
+    assert "read_assessment" not in jev.requests[0]
+    assert decision.read_assessment is ReadAssessment.ABSENT
 
 
 async def test_too_many_candidates_go_group_then_element() -> None:

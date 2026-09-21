@@ -3,7 +3,7 @@
 import json
 from collections.abc import Iterable
 
-from fastbrowse.models import Evidence, Frozen
+from fastbrowse.models import Evidence, FactReader, Frozen
 from fastbrowse.planner import Plan, Requirement
 
 
@@ -11,6 +11,19 @@ class Fact(Frozen):
     requirement_id: str | None = None
     text: str
     evidence: Evidence
+    basis: tuple[str, ...] = ()
+    """Evidence ids of the facts this conclusion counts or compares."""
+    reader: FactReader
+    """Which reader verified the quote; citations are built from it."""
+
+
+class NotesTooLarge(RuntimeError):
+    """A verdict cannot fit its requirement evidence without losing facts."""
+
+
+class RenderedNotes(Frozen):
+    text: str
+    evidence_ids: tuple[str, ...]
 
 
 def evidence_id(evidence: Evidence) -> str:
@@ -39,6 +52,11 @@ class Notes:
         if fact.requirement_id is not None:
             requirements.add(fact.requirement_id)
         if key in self._facts:
+            previous = self._facts[key]
+            basis = tuple(dict.fromkeys((*previous.basis, *fact.basis)))
+            # A winner can quote a row already collected as context; its answer must survive that reuse.
+            kept = fact if previous.requirement_id is None and fact.requirement_id is not None else previous
+            self._facts[key] = kept.model_copy(update={"basis": basis})
             return False
         self._facts[key] = fact
         return True
@@ -50,25 +68,74 @@ class Notes:
         """The facts citing a requirement, keyed by evidence id, in the order they were read."""
         return tuple((key, self._facts[key]) for key, ids in self._requirements.items() if requirement_id in ids)
 
+    def expand_evidence_ids(self, keys: Iterable[str]) -> tuple[str, ...]:
+        """Cited facts and their transitive basis, once each in read order.
+
+        An id no fact has is kept, after the known ones: dropping it would pass a claim whose citation the claim
+        check must see fail.
+        """
+        cited = tuple(dict.fromkeys(keys))
+        pending = list(cited)
+        seen: set[str] = set()
+        while pending:
+            key = pending.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            if key in self._facts:
+                pending.extend(self._facts[key].basis)
+        return (*(key for key in self._facts if key in seen), *(key for key in cited if key not in self._facts))
+
     def unresolved(self, plan: Plan) -> tuple[Requirement, ...]:
         return tuple(requirement for requirement in plan.requirements if not self.evidenced(requirement.id))
 
-    def render(self, max_chars: int) -> str:
-        """Only include whole cited facts. A budget too small to report its omissions is invalid."""
+    def render(self, max_chars: int, *, preserve_requirements: bool = False, json_encoded: bool = False) -> str:
+        return self.render_with_ids(
+            max_chars, preserve_requirements=preserve_requirements, json_encoded=json_encoded
+        ).text
+
+    def render_with_ids(
+        self, max_chars: int, *, preserve_requirements: bool = False, json_encoded: bool = False
+    ) -> RenderedNotes:
+        """Every fact in read order when they all fit; otherwise unrelated context is dropped before requirement
+        evidence and its basis, each group kept in read order.
+
+        Read order is what the composer weighs: listing requirement facts first put a reader's one-quote
+        conclusion ("X is the most expensive") above the prices it compared, and the answer cited only that.
+        Verdicts must fail when requirement evidence cannot fit, rather than decide without it.
+        """
         if max_chars < 0:
             raise ValueError("max_chars must be nonnegative")
-        lines = [
-            f"[{key}] {json.dumps(fact.text, ensure_ascii=False)} "
-            f"requirements={','.join(sorted(self._requirements[key])) or '-'} "
-            f"source={json.dumps(fact.evidence.source_id)} url={json.dumps(fact.evidence.url)} "
-            f"quote={json.dumps(fact.evidence.quote, ensure_ascii=False)}"
-            for key, fact in self._facts.items()
-        ]
-        complete = "\n".join(lines)
-        if len(complete) <= max_chars:
-            return complete
+
+        def line(key: str, fact: Fact) -> str:
+            return (
+                f"[{key}] {json.dumps(fact.text, ensure_ascii=False)} "
+                f"requirements={','.join(sorted(self._requirements[key])) or '-'} "
+                f"source={json.dumps(fact.evidence.source_id)} url={json.dumps(fact.evidence.url)} "
+                f"quote={json.dumps(fact.evidence.quote, ensure_ascii=False)}"
+                + (f" basis={json.dumps(fact.basis)}" if fact.basis else "")
+            )
+
+        def size(text: str) -> int:
+            # A JSON state escapes quotes and newlines; its notes budget must count those extra characters.
+            return len(json.dumps(text)) - len('""') if json_encoded else len(text)
+
+        complete = "\n".join(line(key, fact) for key, fact in self._facts.items())
+        if size(complete) <= max_chars:
+            return RenderedNotes(text=complete, evidence_ids=tuple(self._facts))
+        required = set(self.expand_evidence_ids(key for key, ids in self._requirements.items() if ids))
+        ordered = sorted(self._facts.items(), key=lambda item: item[0] not in required)
+        lines = [line(key, fact) for key, fact in ordered]
+        keys = tuple(key for key, _ in ordered)
         for count in range(len(lines) - 1, -1, -1):
+            if preserve_requirements and count < len(required):
+                raise NotesTooLarge(f"Requirement evidence exceeds the {max_chars} character notes budget")
+            kept = set(keys[:count])
+            if any(set(fact.basis) - kept for _, fact in ordered[:count]):
+                continue
             result = "\n".join([*lines[:count], f"[{len(lines) - count} facts omitted]"])
-            if len(result) <= max_chars:
-                return result
+            if size(result) <= max_chars:
+                return RenderedNotes(text=result, evidence_ids=keys[:count])
+        if preserve_requirements:
+            raise NotesTooLarge(f"The {max_chars} character notes budget cannot report omitted facts")
         raise ValueError("max_chars is too small to report omitted citations")

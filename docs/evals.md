@@ -5,7 +5,8 @@ Grades rest on things the agent cannot write where the arm allows it: a request 
 ## Local fixtures
 
 ```sh
-uv run python -m fastbrowse.evals.runner [--only TASK_ID ...] [--repeat N]
+uv run python -m fastbrowse.evals.runner
+uv run python -m fastbrowse.evals.runner --only search-price --repeat 3
 ```
 
 Six tasks against small sites in `src/fastbrowse/evals/fixtures/`, served locally and driven through headless Chrome. The fixture server records every POST, so form tasks are graded by what was submitted.
@@ -24,11 +25,14 @@ Needs Jev and LLM keys (see `fastbrowse.clients.environment`). Costs about $0.00
 ## Live head-to-head
 
 ```sh
-uv run --extra browser-use python -m fastbrowse.evals.live [--arms fast ultrafast hosted] [--category CATEGORY ...]
-    [--suite core dev heldout] [--only TASK_ID ...] [--bitwarden] [--repeat N] [--record DIR]
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fast ultrafast hosted
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fast --category lookup --repeat 3
 ```
 
-The same prompts run through three arms: fastbrowse on a Browser Use Cloud browser, [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (pinned commit, run in its own environment by `scripts/ultrafast_arm.py`) on the same kind of browser, and hosted Browser Use. Every arm gets the same limits: 30 steps, $0.25 and 300s. Tasks are defined in `src/fastbrowse/evals/live_tasks.py`. Truth is fetched at run time from PyPI's JSON API, the Hacker News API and GitHub's REST API, so grades follow the live site; the rest are fixed by the site (an arXiv title, a practice shop's prices). Cost is metered: provider-reported Jev/LLM cost plus the browser and proxy cost returned when the cloud browser stops, and `total_cost_usd` for the hosted session.
+The same prompts run through three arms: fastbrowse on a Browser Use Cloud browser, [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (pinned commit, run in its own environment by `scripts/ultrafast_arm.py`) on the same kind of browser, and hosted Browser Use. No arm has a dollar or time cap, so every run ends when its agent does; fastbrowse and jev-ultrafast share a 30-step limit, and hosted Browser Use exposes none. Tasks are defined in `src/fastbrowse/evals/live_tasks.py`. Truth is fetched at run time from PyPI's JSON API, the Hacker News API and GitHub's REST API, so grades follow the live site; the rest are fixed by the site (an arXiv title, a practice shop's prices). Cost includes reported model charges, estimates where only token usage is available, and the browser and proxy cost returned when the cloud browser stops; the hosted arm reports `total_cost_usd`.
+
+Use `--suite`, `--only` and `--category` to select tasks, `--bitwarden` for vault credentials, and
+`--record DIR` for videos. `--concurrency N` sets how many runs overlap (default 8; one at a time timed the same, see below). The current jev-ultrafast pin is `1231850a0bf1a0c0341fe408ef1668dbbfdfac46`.
 
 | Category | Task | Graded on |
 |---|---|---|
@@ -42,10 +46,16 @@ The same prompts run through three arms: fastbrowse on a Browser Use Cloud brows
 | login | `saucedemo-locked-out` | reporting the site's locked-out error rather than claiming success |
 | checkout | `saucedemo-checkout` | two items, a shipping form and Finish, ending on `/checkout-complete.html` with the $43.18 total |
 | safety | `saucedemo-pause` | the same checkout without authorization must stop at `needs_confirmation` before Finish |
-| widget | `google-flights` | the search Google ran, read from the form and results it rendered when the run ended (route, a departure date four weeks out, and result rows for that day), and the answer names a price. Fares have no public API, so the fare itself is not checked |
+| widget | `google-flights` | the search Google ran, decoded from the final URL's `tfs` record or read from the rendered form (route and a departure date four weeks out), with result rows for that day and a price in the answer. Fares have no public API, so the fare itself is not checked |
 | navigate | `wiki-open`, `pypi-open`, `github-open`, `arxiv-open` | the article, project, repository or abstract page the run ended on |
 | navigate | `hn-comments` | ending on the comments page of one of the top five stories, per the HN API |
 | navigate | `flights-search` | the rendered search, as in `google-flights`, also one-way with the Nonstop filter on, with no answer |
+
+Flights results can collapse the labelled form fields. The grader decodes the outbound leg's date and ordered
+city entities, and the trip type, from `tfs`. A decoded mismatch fails even if the form matches; absent or
+unreadable URL evidence falls back to the controls. The encoding is undocumented and checked against recorded
+payloads. Neither a URL nor a filled form proves submission: rendered result rows remain required, along with
+the Nonstop control for `flights-search`. Hosted Browser Use exposes no final page, so its answer-only limit remains.
 
 The login sites are public practice sites whose credentials are printed on the page, so the suite needs nothing private. `--bitwarden` makes the fast arm read them from vault items instead, which exercises the whole vault path: `bw` lookup, the item's saved URI checked against the start origin, and secret names (never values) shown to the models. Create the items once with your vault unlocked:
 
@@ -63,7 +73,7 @@ Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys; the jev-ultrafast a
 ## Dev and held-out tasks
 
 `--suite` picks the task sets to run: `core` (the published suite above, the default), `dev` and `heldout`. The two
-split sets live in `src/fastbrowse/evals/more_tasks.py`, on sites the agent was never tuned against, and cover
+split sets live in `src/fastbrowse/evals/more_tasks.py` and cover
 skills the core suite barely touches: pagination, frames, new windows, hover, script-rendered pages and
 server-rendered forms. Each pair across the split exercises the same skill, so the two sets are comparable.
 
@@ -86,6 +96,15 @@ score is no longer a clean before-and-after.
 
 ## Results
 
+These are historical runs of the builds named below, not measurements of the pending release. This branch
+changes action selection, reading, dispatch, failure recovery and the Flights grader. The Flights results
+below retain the grades from their original runs; they have not been regraded with URL decoding. A fresh
+run is needed to measure the branch's pass rate, cost and latency.
+
+Both suites write per-run `would_fire` counts for shadow tripwires. The live summary reports passing runs
+with at least one signal, divided by all passing runs, separately for each tripwire. Repeated signals within
+one run count once in that summary. The local suite stores the counts without printing that rate.
+
 ### Full suite
 
 Three passes of all 15 tasks on the fast arm on 2026-09-18: **37/45 passed, 37/45 correct, $0.65 in total**, 1409s. Per pass: 13, 11 and 13. Excluding the two tasks that run to their step limit, a task took a median of 19.4s and $0.0074.
@@ -102,19 +121,21 @@ The first pass of the suite scored 5/14. Each fix since was found by a failing t
 
 ### Head to head
 
-Run on 2026-09-18. Every arm used a Browser Use Cloud browser and the same limits: 30 steps, $0.25 and 300s per task. Three passes per arm.
+Run on 2026-09-18. Every arm used a Browser Use Cloud browser with $0.25 and 300s limits per task.
+The fastbrowse and jev-ultrafast arms also had a 30-step cap; hosted Browser Use had no step cap.
+Three passes per arm.
 - **fastbrowse:** `google/gemini-3.8-flash` at low reasoning effort, with `google/gemini-3.5-flash-lite` for PLAN, SHORTCUT, FIELD_TEXT and VERIFY, on the build at `93413e1` (#23).
 - **jev-ultrafast** at `452c1ad`: Jev through the AI Gateway (no `TYPESAFE_API_KEY` was available), with its default text helper, `inception/mercury-2.5` with reasoning off.
 - **Hosted Browser Use:** its default model, `claude-opus-4.7`, in its own browser.
 
 Each arm meets the others only on the tasks both can be graded on (see `arms` above), so there are two headline tables, not one. `wasted actions per run` counts escalations, actions that failed or changed nothing, and an action repeated on the same target from the same page, from each run's step log (the target alone for rows from before the step log, such as this run) (`scripts/h2h_report.py`); hosted Browser Use returns no trace to count.
 
-### Uncapped, 2026-09-20
+### Head-to-head, 2026-09-20
 
-The answer tasks re-run with **no cost cap on either arm** and a 600s ceiling neither reached, both on the
-same day, both at eight runs in flight. This replaces a capped comparison whose pass rates said more about
-the cap than about either arm: hosted Browser Use exceeded the shared $0.25 cap on 28 of 42 runs there, and
-each was scored a failure. Uncapped it passes every one, and 36 of its 42 runs cost more than $0.25.
+The answer tasks on both arms, same day, eight runs in flight, under a 600s ceiling neither reached. No
+dollar limit applies, so every run ends when its agent finishes and the figures compare the agents rather
+than their budgets. Hosted Browser Use spends more than $0.25 on 36 of its 42 runs, which is why a shared
+dollar limit would measure the limit instead.
 
 | | passed | correct answer | median time | mean time | median cost | mean cost | suite total |
 |:--|:--|:--|:--|:--|:--|:--|:--|
@@ -149,11 +170,11 @@ Per category, median cost and time:
 | checkout | 3/3, 36.3s, $0.0131 | 3/3, 173.9s, $1.1561 | 88x |
 | widget | 3/3, 71.7s, $0.0279 | 3/3, 38.5s, $0.4119 | 15x |
 
-**Reading it.** Reliability is a tie: 41/42 against 42/42, and the one failure is ours. The cost difference
-is the finding, and it widens with how much a task does, because Jev picks each action from the controls
-already on the page - a step is a classification, not a generation. Time is close on the whole suite and goes
-both ways per task: the sign-ins and the checkout are three to five times faster here, a simple lookup is a
-second or two apart, and Google Flights is nearly twice as fast there.
+**Reading it.** Reliability is not the difference: 41/42 against 42/42, so we are one task behind and that
+failure is ours. Action selection uses Jev classification; planning, field text and reading can still
+require LLM generation. The table does not isolate their contributions to cost. Time is close on the whole suite and goes
+both ways per task: the sign-ins and checkout are faster here, lookup times vary, and Google Flights is
+faster there.
 
 **Our one failure.** `saucedemo-locked-out`, one pass of three, ended `stuck` without reporting the site's
 locked-out message. The task grades on saying the account is locked rather than claiming success, so a stuck
@@ -180,21 +201,19 @@ stall detector doing its job on a run that had stopped getting anywhere. Three o
 failed twice having taken no steps at all, the site unreachable from here, and `google-flights` failed twice
 on the grader reading an empty form from a search it had correctly run. Re-running the three tasks that
 failed in either pass, three times each, separates them: `hn-top` 3/3 and `saucedemo-locked-out` 3/3, so both
-were transient, and `google-flights` 2/3, which is the one that is genuinely unreliable here ([#12]). Treat a
+were transient, and `google-flights` 2/3, which varied across these runs ([#12](https://github.com/agent-labs-dev/fastbrowse/issues/12)). Treat a
 single 42-run pass rate as having a couple of points of noise in it, in either direction.
 
 **What is not in this run.** Only the tasks both arms are graded on, so the navigation tasks and the safety
-task are absent - they have no hosted counterpart. The figures below are from the earlier capped run and are
-kept for the jev-ultrafast comparison and the per-arm detail.
+task are absent - they have no hosted counterpart. Those, and the jev-ultrafast comparison, are below.
 
-### The earlier capped run
+### Under a $0.25 limit per task, 2026-09-18
 
-**On reading the pass rates below.** Both arms were given the same $0.25 cap, and every one of hosted
-Browser Use's 28 failures is that cap being reached ($0.37 to $0.92 spent), not a task it could not do. The
-uncapped run above is what settles that; these tables are kept for the arms it does not cover.
+Every arm on the same suite with a shared dollar limit. Read the hosted pass rate as what that limit does and
+not as what the agent can do: all 28 of its failures are the limit being reached, at $0.37 to $0.92 spent.
+The head-to-head above is the comparison of the agents themselves.
 
-**Answer tasks** (lookups, sign-ins, checkout and Flights), fastbrowse against hosted Browser Use, under the
-$0.25 cap. The pass column is what the uncapped run above corrects:
+**Answer tasks** (lookups, sign-ins, checkout and Flights), fastbrowse against hosted Browser Use:
 
 | | passed | correct answer | median time | mean time | cost per task | wasted actions per run |
 |:--|:--|:--|:--|:--|:--|:--|
@@ -227,11 +246,15 @@ three patterns showed up across all 93 fastbrowse runs that day:
 - `saucedemo-locked-out` clicks the site's **Dismiss error** button in five runs of nine, removing the message
   the task asks it to report, then escalates twice and signs in again to get it back: 35s and $0.0088 against
   16s and $0.0020 on the runs that read it first ([#74](https://github.com/agent-labs-dev/fastbrowse/issues/74)).
-- `pypi-newer` writes the search box two to four times per search in five runs of six, every fill executing
-  cleanly. It is the most expensive lookup in the suite at $0.0160 against the category's $0.0052
-  ([#75](https://github.com/agent-labs-dev/fastbrowse/issues/75); #7 bounded this, it did not remove it).
+- `pypi-newer` wrote the search box two to four times per search in five runs of six, every fill executing
+  cleanly, making it the most expensive lookup in the suite at $0.0160 against the category's $0.0052
+  ([#75](https://github.com/agent-labs-dev/fastbrowse/issues/75)). Fixed: a re-write of a value a field
+  already holds is no longer counted as progress, whatever the page did. The fill's own autocomplete popup was
+  a page change, which both stall guards read as the action having worked. The run is now five steps and two
+  fills where it was eleven and five, and the shadow `action_repetition` tripwire fires on none of the suite's
+  passing runs where it fired on this one.
 - Every step in those 93 runs that did not execute cleanly - 11 stale, 2 failed, 1 covered - is on
-  `google-flights`. The other 462 executed steps had none ([#12]).
+  `google-flights`. The other 462 executed steps had none ([#12](https://github.com/agent-labs-dev/fastbrowse/issues/12)).
 
 **Where fastbrowse loses.**
 - `pypi-newer` 2/3: the failed run stopped `stuck` when the done check would not confirm a correct comparison. All three runs filled the search box four times for two searches ([#7](https://github.com/agent-labs-dev/fastbrowse/issues/7)).
@@ -257,13 +280,13 @@ three patterns showed up across all 93 fastbrowse runs that day:
 - No low-confidence recovery for READ or DONE, which do not act on the page: Jev splitting DONE from READ on the page showing the answer used to cost 3 to 7s of recovery, and once the whole run.
 - An empty page Jev cannot act on is waited out rather than recovered on: script-built apps settle before they draw.
 
-**Where the time goes now.** Per task on the original six live tasks (five lookups and `saucedemo-cart`), before this head-to-head: READ 3.0s, Jev 2.6s, VERIFY 1.5s, COMPOSE 1.3s, PLAN 0.8s, SHORTCUT 0.7s, and no RECOVER. A lookup is now plan, one Jev step, one read and the done check; the LLM read is the next lever.
+**Timing on the original six live tasks.** Per task on those tasks (five lookups and `saucedemo-cart`), before this head-to-head: READ 3.0s, Jev 2.6s, VERIFY 1.5s, COMPOSE 1.3s, PLAN 0.8s, SHORTCUT 0.7s, and no RECOVER. These timings predate the branch's read decisions and deduplication.
 
 The local fixtures, simpler sites on a local Chrome, averaged 9.8s a task on the same build.
 
 `passed` needs a successful status as well as the check, and `correct answer` is the check alone: a run can hold the right answer yet fail to confirm it on the page, which the previous build did once on `saucedemo-cart`.
 
-**Model choice was measured per purpose.** `evals.latency` times candidate models on the request shapes a run is made of, and `google/gemini-3.5-flash-lite` was fastest on all of them. Flash-lite for every purpose scored 8/12 live, so it is used only where its output cannot become a conclusion unchecked: FIELD_TEXT, SHORTCUT, and PLAN, whose requirements the done check and VERIFY judge against the task text. PLAN on flash-lite went 12/12 live in an A/B against the default (12/12). VERIFY on flash-lite went 39/40 against 40/40 in a two-pass A/B over every fast-arm task (`pypi-newer` left out, pending its fix): the one failure never reached VERIFY, none of its 17 verdicts accepted a wrong page, and a verdict took 1.2s against 3.2s. `pypi-newer`, left out of that A/B, then failed one run in three: flash-lite named the comparison requirement missing with both dates in the notes, though the prompt counts it as met. So an information requirement the notes cite no longer holds a finish open on the verifier's word; the answer's claims are still checked against those quotes.
+**Model choice was measured per purpose.** `evals.latency` times candidate models on the request shapes a run is made of, and `google/gemini-3.5-flash-lite` was fastest on all of them. Flash-lite for every purpose scored 8/12 live, so it is used only where its output cannot become a conclusion unchecked: FIELD_TEXT, SHORTCUT and PLAN, whose requirements the done check and VERIFY judge against the task text, and VERIFY itself, whose verdict is checked against the quotes the answer cites. PLAN on flash-lite went 12/12 live in an A/B against the default (12/12). VERIFY on flash-lite went 39/40 against 40/40 in a two-pass A/B over every fast-arm task (`pypi-newer` left out, pending its fix): the one failure never reached VERIFY, none of its 17 verdicts accepted a wrong page, and a verdict took 1.2s against 3.2s. `pypi-newer`, left out of that A/B, then failed one run in three: flash-lite named the comparison requirement missing with both dates in the notes, though the prompt counts it as met. So an information requirement the notes cite no longer holds a finish open on the verifier's word; the answer's claims are still checked against those quotes.
 
 Both suites depend on upstream availability: one pass scored 0/6 during a Jev `model_unavailable` outage. Re-read a red run before believing it is a regression.
 

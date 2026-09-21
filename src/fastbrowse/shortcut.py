@@ -16,6 +16,9 @@ from fastbrowse.models import Frozen, LLMPurpose
 from fastbrowse.safety import origin_of
 from fastbrowse.telemetry import Ledger
 
+# A shortcut returns one URL or null; a prose-sized response would spend tokens on an invalid answer.
+_URL_OUTPUT_TOKENS = 200
+
 
 class Shortcut(Frozen):
     url: str | None = Field(
@@ -75,7 +78,7 @@ async def propose_start(llm: LLMClient, task: str, *, ledger: Ledger | None = No
         LLMPurpose.SHORTCUT,
         [_START_INSTRUCTIONS, Message(role="user", content=f"# Task\n{task}")],
         StartPage,
-        max_output_tokens=200,
+        max_output_tokens=_URL_OUTPUT_TOKENS,
         ledger=ledger,
     )
 
@@ -96,7 +99,7 @@ async def propose_shortcut(
         LLMPurpose.SHORTCUT,
         [_INSTRUCTIONS, Message(role="user", content=f"# Task\n{task}\n\n# Start page\n{start}")],
         Shortcut,
-        max_output_tokens=200,
+        max_output_tokens=_URL_OUTPUT_TOKENS,
         ledger=ledger,
     )
 

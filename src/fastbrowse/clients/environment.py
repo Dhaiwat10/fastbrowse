@@ -1,8 +1,9 @@
 """Settings from the environment and `.env`, and the default Jev and LLM clients built from them.
 
-Jev: TYPESAFE_API_KEY (direct) or AI_GATEWAY_API_KEY (Vercel AI Gateway); with both set, direct wins
-unless FASTBROWSE_JEV_SOURCE picks one (typesafe or gateway). FASTBROWSE_JEV_BASE_URL points either at a
-proxy or another host serving the same API, and FASTBROWSE_JEV_MODEL pins a direct-API model version.
+Jev: TYPESAFE_API_KEY (direct) or AI_GATEWAY_API_KEY (Vercel AI Gateway); with both set, direct starts
+unless FASTBROWSE_JEV_SOURCE picks one (typesafe or gateway), with the other as backup.
+FASTBROWSE_JEV_BASE_URL points either at a proxy or another host serving the same API, and
+FASTBROWSE_JEV_MODEL pins a direct-API model version. A custom endpoint or model disables automatic failover.
 LLM: OPENROUTER_API_KEY.
 Cloud browser: BROWSER_USE_API_KEY. FASTBROWSE_LLM_MODEL overrides every purpose at once, and
 FASTBROWSE_LLM_MODEL_<PURPOSE> (PLAN, READ, FIELD_TEXT, RECOVER, COMPOSE, VERIFY, SHORTCUT) overrides one.
@@ -19,6 +20,7 @@ import httpx
 from pydantic import AliasChoices, Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from fastbrowse.clients.failover import FailoverJevClient
 from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM, ReasoningEffort
 from fastbrowse.clients.typesafe import TYPESAFE_URL, TypeSafeJevClient
 from fastbrowse.clients.vercel import GATEWAY_URL, VercelGatewayJevClient
@@ -68,6 +70,9 @@ class Settings(BaseSettings):
     ai_gateway_api_key: SecretStr | None = _key("AI_GATEWAY_API_KEY")
     openrouter_api_key: SecretStr | None = _key("OPENROUTER_API_KEY")
     browser_use_api_key: SecretStr | None = _key("BROWSER_USE_API_KEY")
+    mcp_token: SecretStr | None = None
+    """Bearer token for `fastbrowse-mcp --transport http`. A declared field rather than a bare
+    `os.environ` read, because `.env.example` tells you to put it in `.env` and only a field reads that."""
     jev_source: JevSource | None = None
     jev_base_url: str | None = None
     jev_model: str = JEV_MODEL
@@ -114,11 +119,12 @@ class Settings(BaseSettings):
 
     def jev(self, http: httpx.AsyncClient) -> JevClient:
         source = self.jev_source or (JevSource.TYPESAFE if self.typesafe_api_key else JevSource.GATEWAY)
+        primary: JevClient
         match source:
             case JevSource.TYPESAFE:
                 if not self.typesafe_api_key:
                     raise ConfigurationError("set TYPESAFE_API_KEY for Jev, or AI_GATEWAY_API_KEY for the gateway")
-                return TypeSafeJevClient(
+                primary = TypeSafeJevClient(
                     self.typesafe_api_key.get_secret_value(),
                     http=http,
                     base_url=self.jev_base_url or TYPESAFE_URL,
@@ -127,11 +133,20 @@ class Settings(BaseSettings):
             case JevSource.GATEWAY:
                 if not self.ai_gateway_api_key:
                     raise ConfigurationError("set AI_GATEWAY_API_KEY for Jev, or TYPESAFE_API_KEY for the direct API")
-                return VercelGatewayJevClient(
+                primary = VercelGatewayJevClient(
                     self.ai_gateway_api_key.get_secret_value(), http=http, base_url=self.jev_base_url or GATEWAY_URL
                 )
             case _:
                 assert_never(source)
+        # A proxy may be a routing boundary, and the gateway cannot honour a direct-API model pin.
+        if self.jev_base_url or self.jev_model != JEV_MODEL or not (self.typesafe_api_key and self.ai_gateway_api_key):
+            return primary
+        backup = (
+            VercelGatewayJevClient(self.ai_gateway_api_key.get_secret_value(), http=http)
+            if source is JevSource.TYPESAFE
+            else TypeSafeJevClient(self.typesafe_api_key.get_secret_value(), http=http)
+        )
+        return FailoverJevClient(primary, backup)
 
     def llm(self, http: httpx.AsyncClient) -> LLMClient:
         return OpenAICompatibleLLM(

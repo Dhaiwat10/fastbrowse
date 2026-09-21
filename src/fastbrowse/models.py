@@ -26,13 +26,29 @@ class Status(StrEnum):
     """A bot check (a CAPTCHA, or a browser verification that never clears) stands in the way. Not a sign-in:
     no credential passes it, and a person is needed only if they choose to solve it."""
     NEEDS_INPUT = "needs_input"
-    """A field needs a value the caller did not supply and the LLM must not invent."""
+    """A required value or file is missing, or an upload exceeds the configured size limit."""
     STUCK = "stuck"
     """Recovery was exhausted without progress."""
     BUDGET_EXCEEDED = "budget_exceeded"
     OBSERVATION_LIMIT = "observation_limit"
-    """The page could not be represented within Jev's input limits even after reduction."""
+    """The page or requirement evidence could not fit the configured input budgets."""
     ERROR = "error"
+
+
+class TripwireMode(StrEnum):
+    SHADOW = "shadow"
+    """Evaluate and log what would have fired; change nothing about the run."""
+    ARMED = "armed"
+    """Send the run to recovery, as the unchanged-page count already does."""
+
+
+class Tripwire(StrEnum):
+    NO_PROGRESS = "no_progress"
+    """The page has not changed for N actions."""
+    ACTION_REPETITION = "action_repetition"
+    """One interaction, on one target, with one value, keeps recurring."""
+    PLAN_STAGNATION = "plan_stagnation"
+    """The set of requirements still wanting evidence has not shrunk for N steps."""
 
 
 class Operation(StrEnum):
@@ -83,6 +99,32 @@ class Evidence(Frozen):
     start: int = Field(ge=0)
     end: int = Field(ge=0)
     quote: str
+    heading_path: tuple[str, ...] = ()
+    """The headings the quote sits under on the page: which record a bare "£10.69" is the price of."""
+
+
+class Citation(Frozen):
+    id: int = Field(ge=1)
+    """The number used by this fact's links in the answer, stable within a run."""
+    text: str
+    requirement_id: str | None = None
+    url: str
+    quote: str
+    deep_link: str
+
+
+class FactReader(StrEnum):
+    JEV_CHOICE = "jev_choice"
+    LLM = "llm"
+
+
+class StepFact(Frozen):
+    text: str
+    requirement_id: str | None = None
+    quote: str
+    url: str
+    reader: FactReader
+    deep_link: str
 
 
 class ArtifactKind(StrEnum):
@@ -171,6 +213,8 @@ class StepResult(Frozen):
     """Human-readable label of the chosen element; never contains a secret value."""
     confidence: float | None = Field(default=None, ge=0, le=1)
     note: str | None = None
+    facts: tuple[StepFact, ...] = ()
+    """Facts added to the notes by this step, with resolved secrets redacted."""
     page_changed: bool | None = None
     """Whether the page's fingerprint changed; None for steps that do not act (read, escalate)."""
     duration_ms: int = Field(ge=0)
@@ -184,9 +228,12 @@ class RunResult(Frozen):
     steps: tuple[StepResult, ...]
     cost: CostBreakdown
     artifacts: tuple[Artifact, ...]
+    citations: tuple[Citation, ...] = ()
     error: str | None = None
     final_url: str | None = None
     """Where the browser was last observed; what a caller checks when the task was to arrive somewhere."""
+    would_fire: tuple[Tripwire, ...] = ()
+    """Shadow tripwires retain each occurrence so eval counts do not depend on logging configuration."""
 
     @property
     def succeeded(self) -> bool:
@@ -272,5 +319,6 @@ class BrowserEvent(Frozen):
 
 
 type EventHandler = Callable[[StepEvent | BrowserEvent], Awaitable[None]]
+type FrameHandler = Callable[[bytes], Awaitable[None]]
 type UntilCheck = Callable[[str], Awaitable[bool]]
 """Caller assertion over the final page URL; COMPLETE requires it to return True when supplied."""

@@ -17,14 +17,15 @@ from collections.abc import Coroutine
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, assert_never, cast
+from typing import Literal, assert_never
 
 from cdp_use.cdp.input.commands import DispatchMouseEventParameters
 from cdp_use.cdp.page.commands import CaptureScreenshotParameters
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from fastbrowse.browser.session import BrowserSession
 from fastbrowse.config import Config
-from fastbrowse.models import TARGETED, Artifact, Attachment, Operation, StepOutcome
+from fastbrowse.models import TARGETED, Artifact, Attachment, Frozen, Operation, StepOutcome
 from fastbrowse.page import (
     Action,
     ActResult,
@@ -36,6 +37,8 @@ from fastbrowse.page import (
     Dialog,
     Observation,
     Page,
+    cut_marker,
+    loads_more,
     pager_link,
 )
 
@@ -79,6 +82,7 @@ _HIT_TEST_JS = (
 # A deadline, not a wait: a field with no editor to open settles on the first frame.
 _HANDOFF_SECONDS = 0.6
 _HANDOFF_QUIET_SECONDS = 0.1
+_TARGET_STABILITY_SECONDS = 1.0
 _PRESENTED_JS = (
     "new Promise(done => { const t = setTimeout(done, 100); "
     "requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); done(); })); })"
@@ -88,44 +92,105 @@ _PRESENTED_JS = (
 # A field that opens an editor over itself when clicked (a search overlay, an airport picker) moves focus to
 # that editor; typing into the original, now hidden behind it, reaches no suggestion list. A person types
 # where focus went, so the fill follows focus to an editable field in the same document that covers the
-# spot ours occupied, and otherwise keeps the id it was given. The editor can take focus a frame or a timer
+# spot saved before the click, even if the original was detached. The editor can take focus a frame or a timer
 # after the click, so the check waits for the click's DOM changes to go quiet, briefly, first.
 _HANDED_FOCUS_JS = (
-    "(id => new Promise(resolve => { const r = window.__fastbrowse, e = r?.nodes.get(id); "
-    "if (!e?.isConnected) { resolve(id); return; } "
-    "const decide = () => { const a = e.getRootNode().activeElement; "
-    "if (!e.isConnected || !a || a === e || e.contains(a)) return id; "
+    "((id, secret) => new Promise(resolve => { const r = window.__fastbrowse, e = r?.nodes.get(id), was = r?.handoff; "
+    "if (!e || !was) { resolve(null); return; } "
+    "const decide = () => { "
+    "if (e.ownerDocument !== was.doc || was.doc.defaultView?.document !== was.doc) return null; "
+    "const a = was.root.activeElement; "
+    "if (!a || a === e || e.contains(a) || secret) return e.isConnected ? id : null; "
     "const text = a.isContentEditable || a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && "
     "!['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']"
-    ".includes(a.type)); if (!text || a.disabled || a.readOnly) return id; "
-    "const was = e.getBoundingClientRect(), now = a.getBoundingClientRect(); "
-    "const x = was.x + was.width / 2, y = was.y + was.height / 2; "
-    "if (x < now.left || x > now.right || y < now.top || y > now.bottom) return id; "
+    ".includes(a.type)); if (!text || !a.isConnected || a.disabled || a.readOnly || a.ownerDocument !== was.doc || "
+    'a.closest(\'[aria-disabled="true"],[aria-readonly="true"],[inert]\') || '
+    "!a.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return e.isConnected ? id : null; "
+    "const now = a.getBoundingClientRect(); "
+    "if (was.x < now.left || was.x > now.right || was.y < now.top || was.y > now.bottom) "
+    "return e.isConnected ? id : null; "
     "if (!r.ids.has(a)) r.ids.set(a, r.next++); const n = r.ids.get(a); r.nodes.set(n, a); return n; }; "
     f"const deadline = performance.now() + {_HANDOFF_SECONDS * 1000}; "
-    "const poll = () => { if (performance.now() - (r.lastMutation ?? 0) >= "
-    f"{_HANDOFF_QUIET_SECONDS * 1000} || performance.now() >= deadline) resolve(decide()); "
+    "const poll = () => { const choice = decide(); "
+    "if ((choice !== null && performance.now() - (r.lastMutation ?? 0) >= "
+    f"{_HANDOFF_QUIET_SECONDS * 1000}) || performance.now() >= deadline) resolve(choice); "
     "else setTimeout(poll, 20); }; "
     # Chrome can hold a cross-origin frame's animation frames indefinitely, and CI hung in pytest for an hour
     # awaiting one; the timer starts the poll anyway once the deadline has passed.
     "let started = false; const start = () => { if (!started) { started = true; poll(); } }; "
     f"setTimeout(start, {_HANDOFF_SECONDS * 1000}); "
-    "if (e.ownerDocument.hidden) start(); else requestAnimationFrame(() => setTimeout(start, 0)); }))"
+    "if (was.doc.hidden) start(); else requestAnimationFrame(() => setTimeout(start, 0)); }))"
 )
 type _Point = tuple[float, float] | Literal["covered"] | None
+_TARGET_STATE = TypeAdapter(tuple[str, list[object] | None, _Point])
+"""[fingerprint, live guard, hit-test point] from the pre-action check."""
+_SETTLED = TypeAdapter(tuple[bool, str | None])
+_NODE_ID = TypeAdapter(int | None)
 
-_BLOCK_KIND = {
-    "heading": BlockKind.HEADING,
-    "paragraph": BlockKind.PARAGRAPH,
-    "list_item": BlockKind.LIST_ITEM,
-    "table": BlockKind.TABLE,
-    "code": BlockKind.CODE,
-    "link": BlockKind.LINK,
-}
+
+class _SnapshotControl(Frozen):
+    """One control as snapshot.js reports it; `id` is the frame-local node id."""
+
+    id: int
+    frame_path: str | None = None
+    frame_origin: str | None = None
+    role: str
+    label: str
+    context: str | None = None
+    operations: frozenset[Operation]
+    value: str | None = None
+    href: str | None = None
+    options: tuple[str, ...] = ()
+    input_type: str | None = None
+    submit_semantics: str | None = None
+    checked: bool | None = None
+    selected: bool | None = None
+    expanded: bool | None = None
+    sensitive: bool = False
+    offscreen: bool = False
+    blocking: bool | None = None
+    next_page: bool | None = None
+
+
+class _FrameText(Frozen):
+    url: str
+    title: str
+    inaccessible_frames: int = 0
+
+
+class _Snapshot(_FrameText):
+    """snapshot.js output for one frame."""
+
+    viewport_text: str
+    document_key: str
+    controls: tuple[_SnapshotControl, ...]
+    page_key: str
+    guards: dict[str, list[object] | None]
+    """Freshness guard per control, keyed by the control's local id as a string (a JSON object key)."""
+
+
+class _SnapshotBlock(Frozen):
+    kind: BlockKind
+    text: str
+    heading_path: tuple[str, ...] = ()
+    frame_path: str | None = None
+    source_path: str = ""
+    href: str | None = None
+
+
+class _CaptureSnapshot(_FrameText):
+    """capture.js output for one frame."""
+
+    blocks: tuple[_SnapshotBlock, ...]
+
 
 _SETTLE_SECONDS = 5.0
 _SETTLE_POLL_SECONDS = 0.1
 _SETTLE_QUIET_SECONDS = 0.2
+# A visible loading indicator outranks a quiet DOM, because a spinner settles the fingerprint while the page it
+# is waiting for does not exist yet. Its own budget, inside `_SETTLE_SECONDS`, is what keeps a page that spins
+# forever from paying the whole settle budget on every action: past it, quiet and ready decide alone.
+_SETTLE_LOADING_SECONDS = 1.5
 _SCREENSHOT_WAIT_SECONDS = 1.0
 _NAVIGATE_ATTEMPTS = 2
 _NAVIGATE_RETRY_SECONDS = 1.0
@@ -143,12 +208,12 @@ _MAIN = "main"
 """Frame key used for the top frame; OOPIF frames key on their CDP target id, per the browser session."""
 
 
-class _FrameObservation:
-    """Raw snapshot.js output for one frame, tagged with how to reach it again."""
+class _FrameObservation[T: _FrameText]:
+    """One frame's page-script output, tagged with how to reach that frame again."""
 
     __slots__ = ("frame_id", "raw", "session_id")
 
-    def __init__(self, frame_id: str | None, session_id: str, raw: dict[str, Any]) -> None:
+    def __init__(self, frame_id: str | None, session_id: str, raw: T) -> None:
         self.frame_id = frame_id
         self.session_id = session_id
         self.raw = raw
@@ -164,16 +229,10 @@ class _ObservedState:
 
 
 def _capped(controls: list[Control], limit: int) -> list[Control]:
-    """The first `limit` controls, and past that the pager links too.
-
-    A listing's pager sits at the foot, after everything the cap keeps: a catalogue of twenty books a page ran
-    past the off-screen limit, so its "next" link was never offered and a task over two pages never left the first.
-    The exemption stays inside the cap: a page drawing more pager links than the cap allows would otherwise return
-    more controls than were asked for.
-    """
+    """Keep pagers and load-more controls within the cap so a truncated list can still be continued."""
     if len(controls) <= limit:
         return controls
-    pagers = [c for c in controls if pager_link(c)][:limit]
+    pagers = [c for c in controls if pager_link(c) or loads_more(c)][:limit]
     keep = {c.id for c in pagers}
     room = max(0, limit - len(keep))
     keep.update(c.id for c in [c for c in controls if c.id not in keep][:room])
@@ -190,6 +249,9 @@ class CdpPage(Page):
     def artifacts(self) -> tuple[Artifact, ...]:
         return self._session.artifacts
 
+    def withhold_frames(self, withheld: bool) -> None:
+        self._session.frames_withheld = withheld
+
     # -- observe / capture -------------------------------------------------------------------------
 
     async def observe(self) -> Observation:
@@ -202,14 +264,12 @@ class CdpPage(Page):
         controls: list[Control] = []
         control_state: dict[str, tuple[str, str, int, list[object] | None]] = {}
         for frame_key, frame in frames.items():
-            raw = frame.raw
-            for c in raw["controls"]:
-                local_id = int(c["id"])
-                control_id = f"{frame_key}:{local_id}"
-                fid = f"{frame_key}/{c['frame_path']}" if c.get("frame_path") else frame.frame_id
-                controls.append(_control_from_raw(control_id, fid, c))
-                guard = cast("list[object] | None", frame.raw["guards"].get(str(local_id)))
-                control_state[control_id] = (frame.session_id, frame_key, local_id, guard)
+            for c in frame.raw.controls:
+                control_id = f"{frame_key}:{c.id}"
+                fid = f"{frame_key}/{c.frame_path}" if c.frame_path else frame.frame_id
+                guard = frame.raw.guards.get(str(c.id))
+                controls.append(_control_from_raw(control_id, fid, c, guard))
+                control_state[control_id] = (frame.session_id, frame_key, c.id, guard)
 
         limits = self._config.observation
         onscreen = [c for c in controls if not c.offscreen]
@@ -219,17 +279,20 @@ class CdpPage(Page):
         omitted += len(onscreen) + len(offscreen) - len(kept)
         control_state = {c.id: control_state[c.id] for c in kept}
 
-        page_key = _combine_page_keys([f.raw["page_key"] for f in frames.values()])
+        page_key = _combine_page_keys([f.raw.page_key for f in frames.values()])
         self._last = _ObservedState(page_key=page_key, controls=control_state)
 
-        title = main.raw["title"] if main else ""
-        url = main.raw["url"] if main else await self.origin()
-        viewport_text = (main.raw["viewport_text"] if main else "")[: limits.viewport_text_chars]
+        title = main.raw.title if main else ""
+        url = main.raw.url if main else await self.origin()
+        viewport_text = main.raw.viewport_text if main else ""
+        if len(viewport_text) > limits.viewport_text_chars:
+            omitted_chars = len(viewport_text) - limits.viewport_text_chars
+            viewport_text = viewport_text[: limits.viewport_text_chars] + cut_marker(omitted_chars)
         return Observation(
             url=url,
             title=title,
             page_key=page_key,
-            document_key=main.raw["document_key"] if main else "",
+            document_key=main.raw.document_key if main else "",
             captured_at=datetime.now(UTC),
             controls=tuple(kept),
             omitted_controls=omitted,
@@ -254,18 +317,18 @@ class CdpPage(Page):
             dialog=dialog,
         )
 
-    async def _snapshot_all_frames(self) -> tuple[dict[str, _FrameObservation], int]:
-        result = await self._read_frames(_SNAPSHOT_JS)
-        coverage = {frame.session_id: int(frame.raw.get("inaccessible_frames", 0)) for frame in result.values()}
+    async def _snapshot_all_frames(self) -> tuple[dict[str, _FrameObservation[_Snapshot]], int]:
+        result = await self._read_frames(_SNAPSHOT_JS, _Snapshot)
+        coverage = {frame.session_id: frame.raw.inaccessible_frames for frame in result.values()}
         return result, self._inaccessible_frames(coverage)
 
-    async def _read_frames(self, expression: str) -> dict[str, _FrameObservation]:
-        result: dict[str, _FrameObservation] = {}
+    async def _read_frames[T: _FrameText](self, expression: str, shape: type[T]) -> dict[str, _FrameObservation[T]]:
+        result: dict[str, _FrameObservation[T]] = {}
         main_session = self._session.active_session_id
         target_id = self._session.active_target_id
         sources = [(_MAIN, main_session), *self._session.frame_sessions().items()]
 
-        async def read(frame_key: str, session_id: str) -> _FrameObservation | None:
+        async def read(frame_key: str, session_id: str) -> _FrameObservation[T] | None:
             try:
                 raw = await self._evaluate(session_id, expression)
             except BrowserError:
@@ -274,7 +337,12 @@ class CdpPage(Page):
                 return None
             if raw is None:
                 return None
-            return _FrameObservation(None if frame_key == _MAIN else frame_key, session_id, raw)
+            try:
+                parsed = shape.model_validate(raw)
+            except ValidationError as exc:
+                # Our own page script produced this, so a mismatch is a bug in one side of the contract.
+                raise BrowserError(f"page script returned an unexpected {shape.__name__}: {exc}") from exc
+            return _FrameObservation(None if frame_key == _MAIN else frame_key, session_id, parsed)
 
         # Preserve source order regardless of completion order so capture offsets and hashes stay stable.
         tasks = [asyncio.create_task(read(key, sid)) for key, sid in sources]
@@ -288,7 +356,7 @@ class CdpPage(Page):
             if frame is not None:
                 result[key] = frame
         if main := result.get(_MAIN):
-            self._session.set_tab_info(target_id, main.raw["url"], main.raw["title"])
+            self._session.set_tab_info(target_id, main.raw.url, main.raw.title)
         return result
 
     def _inaccessible_frames(self, coverage: dict[str, int]) -> int:
@@ -305,15 +373,15 @@ class CdpPage(Page):
         blocks: list[Block] = []
         offset = 0
         coverage: dict[str, int] = {}
-        frames = await self._read_frames(_CAPTURE_JS)
+        frames = await self._read_frames(_CAPTURE_JS, _CaptureSnapshot)
         main = frames.get(_MAIN)
-        title = main.raw["title"] if main else ""
-        url = main.raw["url"] if main else await self.origin()
+        title = main.raw.title if main else ""
+        url = main.raw.url if main else await self.origin()
         for frame in frames.values():
             frame_id, session_id, raw = frame.frame_id, frame.session_id, frame.raw
-            coverage[session_id] = int(raw.get("inaccessible_frames", 0))
-            for block in raw["blocks"]:
-                text = str(block["text"])
+            coverage[session_id] = raw.inaccessible_frames
+            for block in raw.blocks:
+                text = block.text
                 start = offset
                 text_parts.append(text)
                 offset += len(text)
@@ -322,13 +390,13 @@ class CdpPage(Page):
                 offset += 2
                 blocks.append(
                     Block(
-                        source_id=f"{frame_id or _MAIN}/{block.get('source_path', '')}:{len(blocks)}",
-                        kind=_BLOCK_KIND[block["kind"]],
-                        frame_id=f"{frame_id or _MAIN}/{block['frame_path']}" if block.get("frame_path") else frame_id,
+                        source_id=f"{frame_id or _MAIN}/{block.source_path}:{len(blocks)}",
+                        kind=block.kind,
+                        frame_id=f"{frame_id or _MAIN}/{block.frame_path}" if block.frame_path else frame_id,
                         start=start,
                         end=end,
-                        heading_path=tuple(block.get("heading_path", ())),
-                        href=block.get("href"),
+                        heading_path=block.heading_path,
+                        href=block.href,
                     )
                 )
         text = "".join(text_parts)
@@ -422,7 +490,9 @@ class CdpPage(Page):
         if point == "covered":
             return StepOutcome.COVERED, None
         announced = await self._announces_popup(session_id, _local_id)
-        await self._click_point(session_id, point)
+        outcome, detail = await self._click_point(target, point)
+        if outcome is not StepOutcome.EXECUTED:
+            return outcome, detail
         if announced:
             await self._await_popup(session_id, _local_id)
         return StepOutcome.EXECUTED, None
@@ -500,9 +570,15 @@ class CdpPage(Page):
             return StepOutcome.FAILED, "secret fill requires an authorized origin"
         # Ported from browser-use/jev-ultrafast (MIT), browser.py: fill clicks before typing.
         # Focus alone bypasses pointer handlers that open autocomplete and calendar pickers.
-        await self._click_point(session_id, point)
-        if not secret:
-            local_id = int(await self._evaluate(session_id, f"({_HANDED_FOCUS_JS})({local_id})"))
+        outcome, detail = await self._click_point(target, point, prepare_fill=True)
+        if outcome is not StepOutcome.EXECUTED:
+            return outcome, detail
+        handed = _NODE_ID.validate_python(
+            await self._evaluate(session_id, f"({_HANDED_FOCUS_JS})({local_id}, {json.dumps(secret)})")
+        )
+        if handed is None:
+            return StepOutcome.FAILED, "clicked field has no replacement in the same document and position"
+        local_id = handed
         for attempt in range(2):
             if not await self._focus(session_id, local_id, prepare_fill=True, secret=secret):
                 return StepOutcome.FAILED, "target did not receive keyboard focus"
@@ -544,8 +620,14 @@ class CdpPage(Page):
                 break
             # An editor that took focus after the hand-off looked, and so never got the text, is typed into
             # once more, as a person would on seeing the text had gone nowhere.
-            handed = local_id if secret else int(await self._evaluate(session_id, f"({_HANDED_FOCUS_JS})({local_id})"))
-            if attempt or handed == local_id:
+            handed = (
+                local_id
+                if secret
+                else _NODE_ID.validate_python(
+                    await self._evaluate(session_id, f"({_HANDED_FOCUS_JS})({local_id}, false)")
+                )
+            )
+            if attempt or handed is None or handed == local_id:
                 return StepOutcome.FAILED, "field did not retain the supplied text"
             local_id = handed
         await self._await_suggestions(session_id, local_id)
@@ -703,13 +785,37 @@ class CdpPage(Page):
         params: DispatchMouseEventParameters = {"type": "mouseMoved", "x": point[0], "y": point[1]}
         await self._input(self._session.client.send.Input.dispatchMouseEvent(params=params, session_id=session_id))
 
-    async def _click_point(self, session_id: str, point: tuple[float, float]) -> None:
-        # Arrive before pressing, as a pointer does: menus built on pointer events ignore a press with no hover.
-        await self._move(session_id, point)
+    async def _click_point(
+        self,
+        target: tuple[str, str, int, list[object] | None],
+        point: tuple[float, float],
+        *,
+        prepare_fill: bool = False,
+    ) -> tuple[StepOutcome, str | None]:
+        # Pointer entry can move, cover or repurpose a widget. Press only after the same guarded target
+        # stays under the pointer across rendered frames; a moving target never earns a speculative click.
+        session_id = target[0]
+        deadline = time.monotonic() + _TARGET_STABILITY_SECONDS
+        while True:
+            await self._move(session_id, point)
+            if self._session.pending_dialog() is not None:
+                return StepOutcome.FAILED, "pointer movement opened a dialog before press"
+            await self._evaluate(self._session.active_session_id, _PRESENTED_JS)
+            _, guard, fresh = await self._before_action(target, hit_test=True, prepare_fill=prepare_fill)
+            if guard != target[3] or fresh is None:
+                return StepOutcome.STALE, "control changed before pointer press"
+            if fresh == "covered":
+                return StepOutcome.COVERED, None
+            if fresh == point:
+                break
+            if time.monotonic() >= deadline:
+                return StepOutcome.STALE, "target did not stop moving before pointer press"
+            point = fresh
         x, y = point
         for kind in ("mousePressed", "mouseReleased"):
             params: DispatchMouseEventParameters = {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1}
             await self._input(self._session.client.send.Input.dispatchMouseEvent(params=params, session_id=session_id))
+        return StepOutcome.EXECUTED, None
 
     async def _input(self, send: Coroutine[None, None, object]) -> None:
         """Dispatch an input event without waiting on a handler that a JavaScript dialog is blocking.
@@ -831,7 +937,11 @@ class CdpPage(Page):
         return str(result)
 
     async def _before_action(
-        self, target: tuple[str, str, int, list[object] | None] | None, *, hit_test: bool
+        self,
+        target: tuple[str, str, int, list[object] | None] | None,
+        *,
+        hit_test: bool,
+        prepare_fill: bool = False,
     ) -> tuple[str, list[object] | None, _Point]:
         if target is None:
             return await self._fingerprint(), None, None
@@ -848,12 +958,17 @@ class CdpPage(Page):
                 f"const guard = r?.guard ? r.guard(r.nodes.get({local_id})) : null; "
                 f"const point = {json.dumps(hit_test)} && JSON.stringify(guard) === "
                 f"JSON.stringify({json.dumps(guard)}) ? ({_HIT_TEST_JS})({local_id}) : null; "
-                "return [fingerprint, guard, point]; })()",
+                + (
+                    f"if (Array.isArray(point)) {{ const e = r.nodes.get({local_id}); "
+                    "const rect = e.getBoundingClientRect(); "
+                    "r.handoff = {doc: e.ownerDocument, root: e.getRootNode(), "
+                    "x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}; } "
+                    if prepare_fill
+                    else ""
+                )
+                + "return [fingerprint, guard, point]; })()",
             )
-            point = result[2]
-            if point is not None and point != "covered":
-                point = (float(point[0]), float(point[1]))
-            return str(result[0]), cast("list[object] | None", result[1]), point
+            return _TARGET_STATE.validate_python(result)
 
         if same_session:
             return await target_state()
@@ -910,21 +1025,25 @@ class CdpPage(Page):
             self._session.active_session_id,
             f"new Promise(resolve => {{ const sample = {_PAGE_JS}; "
             f"const deadline = performance.now() + {timeout_seconds * 1000}; "
+            f"const spinning = performance.now() + {_SETTLE_LOADING_SECONDS * 1000}; "
             "const poll = () => { "
             "const state = sample('fingerprint'); "
-            f"const stable = state.ready && state.quietFor >= {_SETTLE_QUIET_SECONDS * 1000}; "
+            f"const quiet = state.ready && state.quietFor >= {_SETTLE_QUIET_SECONDS * 1000}; "
+            "const stable = quiet && (!state.loading || performance.now() >= spinning); "
             "if (stable || state.hidden || performance.now() >= deadline) { "
             "resolve([stable, state.ready ? state.fingerprint : null]); return; } "
-            f"setTimeout(poll, state.ready ? Math.min({_SETTLE_POLL_SECONDS * 1000}, "
+            # Quiet but still spinning polls at the plain interval: sampling costs a walk of the document, so
+            # aiming at the moment quiet arrives would busy-poll once quiet has already arrived.
+            f"setTimeout(poll, state.ready && !quiet ? Math.min({_SETTLE_POLL_SECONDS * 1000}, "
             f"Math.max(1, {_SETTLE_QUIET_SECONDS * 1000} - state.quietFor)) "
             f": {_SETTLE_POLL_SECONDS * 1000}); }}; "
             # Wait for one rendered frame first: a menu shown in an animation frame callback mutates only when that
             # frame runs, and a late frame would otherwise let 200ms of quiet pass before the menu exists.
             "if (document.hidden) poll(); else requestAnimationFrame(() => setTimeout(poll, 0)); })",
         )
-        return bool(result[0]), cast("str | None", result[1])
+        return _SETTLED.validate_python(result)
 
-    async def _evaluate(self, session_id: str, expression: str) -> Any:
+    async def _evaluate(self, session_id: str, expression: str) -> JsonValue:
         out = await self._session.client.send.Runtime.evaluate(
             params={"expression": expression, "returnByValue": True, "awaitPromise": True}, session_id=session_id
         )
@@ -933,27 +1052,32 @@ class CdpPage(Page):
         return out["result"].get("value")
 
 
-def _control_from_raw(control_id: str, frame_id: str | None, c: dict[str, Any]) -> Control:
+def _control_from_raw(
+    control_id: str, frame_id: str | None, c: _SnapshotControl, guard: list[object] | None
+) -> Control:
     return Control(
         id=control_id,
         frame_id=frame_id,
-        frame_origin=c.get("frame_origin"),
-        role=c["role"],
-        label=c["label"],
-        context=c.get("context"),
-        operations=frozenset(Operation(op) for op in c["operations"]),
-        value=c.get("value"),
-        href=c.get("href"),
-        options=tuple(c.get("options", ())),
-        input_type=c.get("input_type"),
-        submit_semantics=c.get("submit_semantics"),
-        checked=c.get("checked"),
-        selected=c.get("selected"),
-        expanded=c.get("expanded"),
-        sensitive=bool(c.get("sensitive", False)),
-        offscreen=bool(c.get("offscreen", False)),
-        blocking=c.get("blocking"),
-        next_page=c.get("next_page"),
+        frame_origin=c.frame_origin,
+        # A redraw changes the node ids at either end of the guard. Everything between them, including
+        # the receiving document's timeOrigin and form semantics, must survive before an action can follow it.
+        retarget_key=hashlib.sha256(json.dumps(guard[1:-1]).encode()).hexdigest() if guard else None,
+        role=c.role,
+        label=c.label,
+        context=c.context,
+        operations=c.operations,
+        value=c.value,
+        href=c.href,
+        options=c.options,
+        input_type=c.input_type,
+        submit_semantics=c.submit_semantics,
+        checked=c.checked,
+        selected=c.selected,
+        expanded=c.expanded,
+        sensitive=c.sensitive,
+        offscreen=c.offscreen,
+        blocking=c.blocking,
+        next_page=c.next_page,
     )
 
 

@@ -53,7 +53,6 @@ class Recording:
         self._casting: str | None = None
         self._ffmpeg: asyncio.subprocess.Process | None = None
         self._ticker: asyncio.Task[None] | None = None
-        self._acks: set[asyncio.Task[object]] = set()
         self._started = time.monotonic()
 
     async def __aenter__(self) -> Self:
@@ -81,7 +80,8 @@ class Recording:
         if self._ticker is not None:
             self._ticker.cancel()
             await asyncio.gather(self._ticker, return_exceptions=True)
-        await asyncio.gather(*self._acks, return_exceptions=True)
+        if self._session._on_frame is not None:
+            self._session.client.register.Page.screencastFrame(self._session._on_screencast_frame)
         if self._ffmpeg is None or self._ffmpeg.stdin is None:
             return
         if not self._written:
@@ -114,14 +114,12 @@ class Recording:
         await asyncio.sleep(_RESULT_SECONDS)
 
     def _on_frame(self, event: ScreencastFrameEvent, session_id: str | None) -> None:
-        self._frame = base64.b64decode(event["data"])
+        # CDP keeps one subscriber per event, so recording must also forward frames to the live view.
+        self._session._on_screencast_frame(event, session_id)
         self._frame_at = time.monotonic()
-        # Chrome sends no further frames until each one is acknowledged.
-        ack = asyncio.ensure_future(
-            self._session.client.send_raw("Page.screencastFrameAck", {"sessionId": event["sessionId"]}, session_id)
-        )
-        self._acks.add(ack)
-        ack.add_done_callback(self._acks.discard)
+        # The video holds its last clean frame rather than showing a secret.
+        if not self._session.frames_withheld:
+            self._frame = base64.b64decode(event["data"])
 
     async def _tick(self) -> None:
         if self._ffmpeg is None or self._ffmpeg.stdin is None:
@@ -129,7 +127,9 @@ class Recording:
         started = time.monotonic()
         for frame in itertools.count():
             active = self._session.active_session_id
-            if active != self._casting or time.monotonic() - self._frame_at > _RECAST_SECONDS:
+            if self._session._on_frame is None and (
+                active != self._casting or time.monotonic() - self._frame_at > _RECAST_SECONDS
+            ):
                 await self._cast(active)
             if self._frame is not None:
                 self._ffmpeg.stdin.write(self._frame)

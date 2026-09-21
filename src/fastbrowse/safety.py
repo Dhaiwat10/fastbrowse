@@ -4,7 +4,6 @@ Models only ever see secret names. Values are resolved here, at dispatch time, f
 """
 
 import json
-import re
 from collections.abc import Mapping, Sequence
 from urllib.parse import quote, quote_plus, urlsplit
 
@@ -12,30 +11,39 @@ from fastbrowse.jev import NoulQuestion
 from fastbrowse.models import Operation, SecretRef, SecretResolver
 from fastbrowse.page import Control
 
-# A link can still commit through its label ("Delete"), so the words are checked on every control.
-_IRREVERSIBLE_WORDS = re.compile(
-    r"\b(buy|purchase|pay|checkout|order|confirm|submit|send|delete|remove|erase|wipe|destroy|transfer|"
-    r"book|reserve|subscribe|unsubscribe|cancel|publish|post|donate|sign up|register|agree|accept|withdraw|"
-    r"close account|deactivate|archive|merge|approve)\b",
-    re.IGNORECASE,
-)
-_DISPATCHING = frozenset({Operation.CLICK, Operation.ENTER})
-
 
 def may_be_irreversible(operation: Operation, control: Control | None) -> bool:
-    """Whether Jev is asked before this dispatches. Only plain navigation is exempt.
+    """Whether Jev is asked before this dispatches: every click and every Enter.
 
-    A label list cannot be complete ("Place your order", "Erase"), so every button is asked about: a button
-    runs script, and script can commit anything. A link with an href navigates, which is exempt unless its
-    label says otherwise.
+    Whether a click commits is a judgment about the page, so Jev makes it rather than a word list. A list of
+    committing labels is never complete ("Place your order", "Yes, I'm sure"), and a link commits as easily
+    as a button: a one-click unsubscribe is an href, and a script handler runs whatever the element says.
     """
-    if operation not in _DISPATCHING or control is None:
+    if control is None:
         return False
-    if _IRREVERSIBLE_WORDS.search(control.label) or control.input_type == "submit":
-        return True
-    if operation is Operation.ENTER:
-        return control.submit_semantics is not None
-    return control.href is None
+    match operation:
+        case Operation.CLICK:
+            return True
+        # Not only a form's Enter: a chat, comment or DM box sends on Enter through its own script, with no
+        # form for the page to describe.
+        case Operation.ENTER:
+            return True
+        # A dialog's accept is asked about where the dialog is handled; the rest change nothing off the page.
+        case (
+            Operation.HOVER
+            | Operation.FILL
+            | Operation.SELECT
+            | Operation.ESCAPE
+            | Operation.SCROLL
+            | Operation.BACK
+            | Operation.SWITCH_TAB
+            | Operation.UPLOAD
+            | Operation.DIALOG
+            | Operation.READ
+            | Operation.DONE
+            | Operation.ESCALATE
+        ):
+            return False
 
 
 def irreversible_question(task: str, operation: Operation, control: Control) -> NoulQuestion:

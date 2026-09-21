@@ -3,7 +3,30 @@
 // Adapted to fastbrowse's Control shape (role + operation set, not per-kind actions) and to traverse
 // open shadow roots. Runs once per frame session (main frame or an OOPIF); the Python side merges frames.
 (mode => {
+  // Form context is repeated for each submit-capable input in safety prompts.
+  const FORM_TEXT_CHARS = 2000;
+  // Freshness guards bound comparison work on large cards; this text is never sent to a model.
+  const GUARD_TEXT_CHARS = 6000;
+  // Twin controls repeat their card heading, so keep its excerpt shorter than the control itself.
+  const CONTROL_CONTEXT_CHARS = 120;
+  // A hover target can be a whole card whose text would crowd out the other controls.
+  const HOVER_LABEL_CHARS = 200;
+  // Each hover rule fans out to DOM queries, so bound stylesheet work per observation.
+  const MAX_HOVER_RULES = 200;
+  // Hover targets supplement the actionable controls rather than fill their observation budget.
+  const MAX_HOVER_TARGETS = 40;
+  // Each candidate checks hidden descendants, which can stall a dense page's observation.
+  const MAX_HOVER_CHECKS = 400;
+  const excerpt = (text, cap) => text.length <= cap ? text :
+    `${text.slice(0, cap)} [${text.length - cap} characters omitted]`;
   const registry = window.__fastbrowse ||= { ids: new WeakMap(), nodes: new Map(), next: 1 };
+  // A visible loading indicator means the page is still fetching what it will draw, which network idle and a
+  // quiet DOM both report as settled: a spinner mutates nothing while it spins. Named classes are a heuristic
+  // and deliberately so -- the wait on them is bounded and expires into proceeding, so a false match costs
+  // time and never correctness. Hidden indicators are ignored because most pages keep one in the DOM always.
+  const LOADING = '[aria-busy="true"],[role="progressbar"],progress:not([value]),' +
+    ['spinner', 'loading', 'loader', 'skeleton', 'shimmer']
+      .flatMap(name => [`[class*="${name}" i]`, `[id*="${name}" i]`]).join(',');
   if (!registry.track) {
     const roots = new WeakSet();
     const changed = () => { registry.lastMutation = performance.now(); };
@@ -20,8 +43,11 @@
   }
   if (mode === 'fingerprint') {
     let hash = 2166136261;
+    let loading = false;
     const include = root => {
       registry.track(root);
+      loading ||= [...root.querySelectorAll(LOADING)].some(e => e.checkVisibility({ checkOpacity: true,
+        checkVisibilityCSS: true }));
       const text = root.body?.innerText ?? root.textContent ?? '';
       for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
       // innerText omits shadow trees and child documents even when their content is visible.
@@ -40,6 +66,7 @@
       ready: document.readyState === 'interactive' || document.readyState === 'complete',
       quietFor: performance.now() - registry.lastMutation,
       hidden: document.hidden,
+      loading,
     };
   }
   if (!document.body) return null;
@@ -113,7 +140,7 @@
     return JSON.stringify({ label: submit ? labelOf(submit) : labelOf(form),
       method: submit?.getAttribute('formmethod') || form.method,
       action: submit?.getAttribute('formaction') || form.action,
-      text: form.innerText.slice(0, 2000) });
+      text: excerpt(form.innerText, FORM_TEXT_CHARS) });
   };
 
   const framePath = doc => {
@@ -149,7 +176,7 @@
     return [identity(e), roleOf(e), labelOf(e), reveal(source), source.checked ?? null, e.selectedIndex ?? null,
       e.readOnly ?? null, e.matches(':disabled'), e.getAttribute('aria-disabled'),
       e.getAttribute('aria-expanded'), e.getAttribute('aria-checked'), e.getAttribute('aria-selected'),
-      e.getAttribute('href'), scope?.innerText?.slice(0, 6000) || '',
+      e.getAttribute('href'), scope?.innerText?.slice(0, GUARD_TEXT_CHARS) || '',
       e.ownerDocument.location.origin, e.ownerDocument.defaultView.performance.timeOrigin, submitSemantics(e),
       identity(source)];
   };
@@ -173,7 +200,7 @@
     };
     if (rname === 'link' && e.href) {
       const u = new URL(e.href, location.href);
-      base.href = (u.origin === location.origin ? u.pathname + u.search : u.host + u.pathname).slice(0, 200);
+      base.href = u.origin === location.origin ? u.pathname + u.search : u.host + u.pathname;
       // The page's own word for "the next page of this list", which survives an icon label or another language.
       if (e.rel && e.rel.split(/\s+/).includes('next')) base.next_page = true;
     }
@@ -232,7 +259,7 @@
       if (twins.some(twin => twin !== element && e.contains(twin))) break;
       scope = e;
     }
-    return scope ? nameOf(scope, label).slice(0, 120) : '';
+    return scope ? excerpt(nameOf(scope, label), CONTROL_CONTEXT_CHARS) : '';
   };
   // Content a stylesheet shows only under the pointer (`.card:hover .caption`) is out of reach of every other
   // operation. An element whose hover rule would reveal something now hidden is offered as a hover target.
@@ -271,7 +298,7 @@
       }
     };
     for (const rules of sheets) collect(rules);
-    const found = [...reveals.values()].slice(0, 200);
+    const found = [...reveals.values()].slice(0, MAX_HOVER_RULES);
     registry.hoverRules.set(doc, { version, reveals: found });
     return found;
   };
@@ -283,7 +310,7 @@
       let hosts = [];
       try { hosts = doc.querySelectorAll(base); } catch { continue; }
       for (const e of hosts) {
-        if (hovers >= 40 || checked >= 400) break;
+        if (hovers >= MAX_HOVER_TARGETS || checked >= MAX_HOVER_CHECKS) break;
         // A link or button's own hover rule restyles it or shows decoration; offering HOVER there as well as
         // CLICK only gives the choice another way to be wrong.
         if (offered.has(e) || e === doc.body || e === doc.documentElement || !visible(e)) continue;
@@ -301,7 +328,7 @@
         const role = e.getAttribute('role') ||
           { FIGURE: 'figure', LI: 'listitem', IMG: 'img', TR: 'row', TD: 'cell' }[e.tagName] || 'group';
         const c = {
-          id: identity(e), role, label: label.slice(0, 200), offscreen: y < 0 || y >= innerHeight,
+          id: identity(e), role, label: excerpt(label, HOVER_LABEL_CHARS), offscreen: y < 0 || y >= innerHeight,
           distance: (y < 0 || y >= innerHeight) ? 1 + Math.abs(y - innerHeight / 2) : 0,
           sensitive: false, input_type: null, frame_origin: e.ownerDocument.location.origin,
           frame_path: framePath(e.ownerDocument), submit_semantics: null, value: null, operations: ['hover'],

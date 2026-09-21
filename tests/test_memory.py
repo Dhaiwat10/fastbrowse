@@ -1,9 +1,10 @@
+import json
 from datetime import UTC, datetime
 
 import pytest
 
-from fastbrowse.memory import Fact, Notes, evidence_id
-from fastbrowse.models import Evidence
+from fastbrowse.memory import Fact, Notes, NotesTooLarge, evidence_id
+from fastbrowse.models import Evidence, FactReader
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 
 
@@ -22,8 +23,10 @@ def evidence(*, sha: str = "capture", start: int = 0, end: int = 4) -> Evidence:
 
 def test_notes_deduplicate_spans_without_losing_requirement_coverage() -> None:
     notes = Notes()
-    assert notes.add(Fact(requirement_id="r1", text="First fact", evidence=evidence()))
-    assert not notes.add(Fact(requirement_id="r2", text="Same span, another requirement", evidence=evidence()))
+    assert notes.add(Fact(reader=FactReader.LLM, requirement_id="r1", text="First fact", evidence=evidence()))
+    assert not notes.add(
+        Fact(reader=FactReader.LLM, requirement_id="r2", text="Same span, another requirement", evidence=evidence())
+    )
     assert notes.evidenced("r1") and notes.evidenced("r2")
     assert len(notes.facts) == 1
     plan = Plan(
@@ -33,8 +36,8 @@ def test_notes_deduplicate_spans_without_losing_requirement_coverage() -> None:
         answer_expected=True,
     )
     assert tuple(requirement.id for requirement in notes.unresolved(plan)) == ("r3",)
-    assert notes.add(Fact(text="Another capture", evidence=evidence(sha="different")))
-    assert notes.add(Fact(text="Another span", evidence=evidence(start=10, end=14)))
+    assert notes.add(Fact(reader=FactReader.LLM, text="Another capture", evidence=evidence(sha="different")))
+    assert notes.add(Fact(reader=FactReader.LLM, text="Another span", evidence=evidence(start=10, end=14)))
     assert len(notes.facts) == 3
     copy = notes.evidence
     copy.clear()
@@ -42,8 +45,8 @@ def test_notes_deduplicate_spans_without_losing_requirement_coverage() -> None:
 
 
 def test_render_reports_omissions_and_never_slices_a_citation() -> None:
-    first = Fact(text="A long cited fact", evidence=evidence())
-    second = Fact(text="A second cited fact", evidence=evidence(sha="second"))
+    first = Fact(reader=FactReader.LLM, text="A long cited fact", evidence=evidence())
+    second = Fact(reader=FactReader.LLM, text="A second cited fact", evidence=evidence(sha="second"))
     notes = Notes((first, second))
     complete = notes.render(1000)
     assert evidence_id(first.evidence) in complete and evidence_id(second.evidence) in complete
@@ -55,3 +58,55 @@ def test_render_reports_omissions_and_never_slices_a_citation() -> None:
     with pytest.raises(ValueError, match="too small"):
         notes.render(1)
     assert Notes().render(0) == ""
+
+
+def test_requirement_evidence_has_priority_including_reused_spans() -> None:
+    context = Fact(reader=FactReader.LLM, text="Context", evidence=evidence(sha="context"))
+    early = Fact(reader=FactReader.LLM, requirement_id="r1", text="First answer", evidence=evidence(sha="early"))
+    late = Fact(reader=FactReader.LLM, text="Checkout total", evidence=evidence(sha="late"))
+    notes = Notes((context, early, late))
+    notes.add(late.model_copy(update={"requirement_id": "r2"}))
+    required = Notes((early, late.model_copy(update={"requirement_id": "r2"})))
+    expected = required.render(1000) + "\n[1 facts omitted]"
+    assert notes.render(len(expected), preserve_requirements=True) == expected
+    with pytest.raises(NotesTooLarge, match=f"{len(expected) - 1} character notes budget"):
+        notes.render(len(expected) - 1, preserve_requirements=True)
+
+
+def test_reused_span_keeps_the_answer_and_unions_its_basis_in_read_order() -> None:
+    records = tuple(Fact(reader=FactReader.LLM, text=name, evidence=evidence(sha=name)) for name in ("A", "B", "C"))
+    notes = Notes(records)
+    a, b, c = tuple(notes.evidence)
+    assert not notes.add(records[0].model_copy(update={"requirement_id": "r", "text": "A wins", "basis": (b,)}))
+    assert not notes.add(records[0].model_copy(update={"basis": (c, b, a)}))
+    assert notes.facts[0].text == "A wins" and notes.facts[0].requirement_id == "r"
+    assert notes.facts[0].basis == (b, c, a)
+    assert notes.expand_evidence_ids((a, c, a)) == (a, b, c)
+
+
+@pytest.mark.parametrize("json_encoded", [False, True])
+def test_budget_keeps_transitive_basis_with_the_requirement_or_fails(json_encoded: bool) -> None:
+    record = Fact(reader=FactReader.LLM, text="Compared record", evidence=evidence(sha="record"))
+    subtotal = Fact(
+        reader=FactReader.LLM, text="Subtotal", evidence=evidence(sha="subtotal"), basis=(evidence_id(record.evidence),)
+    )
+    total = Fact(
+        reader=FactReader.LLM,
+        requirement_id="r",
+        text="Total",
+        evidence=evidence(sha="total"),
+        basis=(evidence_id(subtotal.evidence),),
+    )
+    context = Fact(reader=FactReader.LLM, text="Unrelated " * 100, evidence=evidence(sha="context"))
+    # A reused early span can acquire a basis read later, so a prefix alone need not preserve the comparison.
+    required = Notes((total, record, subtotal))
+    notes = Notes((context, *required.facts))
+    expected = required.render(10000) + "\n[1 facts omitted]"
+    budget = len(json.dumps(expected)) - 2 if json_encoded else len(expected)
+    rendered = notes.render_with_ids(budget, preserve_requirements=True, json_encoded=json_encoded)
+    assert rendered.text == expected
+    assert rendered.evidence_ids == tuple(required.evidence)
+    with pytest.raises(NotesTooLarge):
+        notes.render_with_ids(budget - 1, preserve_requirements=True, json_encoded=json_encoded)
+    shortened = notes.render_with_ids(budget - 1, json_encoded=json_encoded)
+    assert evidence_id(total.evidence) not in shortened.evidence_ids

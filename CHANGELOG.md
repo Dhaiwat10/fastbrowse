@@ -6,12 +6,77 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The entries are prose rather than bare
 Added/Fixed lists: what matters about a browser agent's release is why a behaviour changed.
 
-The version on PyPI is what these entries describe: `uvx fastbrowse@0.3.3` runs exactly the release below it.
-Older entries are kept verbatim rather than rewritten as the product moves.
+Released entries describe the corresponding package on PyPI; `Unreleased` describes changes awaiting a
+release. Older entries are kept verbatim rather than rewritten as the product moves.
 
 ## [Unreleased]
 
-Nothing yet.
+- **Counts, totals and superlatives cite their underlying records.** The reader preserves every compared
+  record across pages and records which facts a conclusion draws on. Drafted and composed answers carry
+  those records through claim checks, citation links and `RunResult.citations`. Required evidence keeps
+  its full basis within the notes budget or stops at `observation_limit`.
+- **Long lists are read to the end before they are answered.** A single block longer than the reader's
+  input, such as a flight results list, is split at line breaks rather than stopping the run at
+  `observation_limit`, and the last chunk of a page decides whether its list goes on. When the list does
+  go on, recovery and the next-step hint say to load the rest or narrow it with the page's own filter or
+  sort, instead of finishing early with the best record seen so far. A load-more button at the foot of a
+  long list ("View more flights", "Show 20 more") stays on offer past the off-screen control limit, as a
+  pager link already did.
+- **The completion check keeps the page state that matters on long pages.** When the page and the notes
+  do not both fit, the check drops page text and controls without state before it drops the evidence, so
+  a checked filter such as "Nonstop only" still counts.
+- **Recovery can direct a read or a finish.** A recovery subgoal that names READ or DONE is followed; a
+  finish is still judged by the completion check.
+- **Page-script output is validated.** What the browser scripts return is parsed into typed models, so a
+  mismatch raises `BrowserError` at once instead of failing later in the run.
+- **Concurrent live evals keep separate traces.** Each run records only its own events, including events
+  from its child tasks. Finishing one run no longer disables trace collection for the others.
+- **Answer claims link to the words that support them.** `RunResult.citations` exposes each cited
+  fact, its requirement, source URL, verbatim quote and text-fragment deep link. An answer citing an
+  unknown reference fails the claim check and falls back to one drafted from verified facts. `RunResult.answer` contains numbered Markdown links;
+  integrations should render them as Markdown. MCP answers carry the links too, while its citation records
+  retain their `quote` and `url` shape.
+- **See what each step learned and why it stopped.** `StepResult.facts` carries that step's added facts on
+  its `StepEvent`, with quotes, source links and the reader (`jev_choice` or `llm`). `StepResult.note`
+  reports read outcomes, dispatch details, refusal reasons and recovery guidance when available.
+  Resolved secrets are redacted before delivery.
+- **Watch the active tab as the agent works.** `run_task(on_frame=...)` sends JPEG bytes, follows tab
+  switches and works with browsers reached over CDP. Delivery paces capture by acknowledging each frame
+  after the handler returns, with no fixed frame rate; a later pending frame replaces an earlier one.
+  Slow or failing handlers do not hold up the run. Capture is off unless a handler is supplied. Live
+  images and recordings are held back while a resolved secret may show on the page, as PNG step frames are.
+- **Links pass the same authorization gate as buttons.** Jev judges whether a click, an Enter press or
+  dialog acceptance commits an irreversible change. Code-selected pagination is exempt, and
+  authorized actions with sufficient confidence go straight through. Refusals appear as failed steps
+  with reasons before confirmation or recovery.
+- **Read evidence before a click can hide it.** Jev judges whether the page holds information the task
+  needs. Reading preserves that evidence before another interaction, skips unchanged content for the same
+  open requirements, and sends comparisons and partial evidence to the LLM reader. Short facts can be
+  copied from quoted spans by Jev; each fact records which reader supplied it.
+- **Moving controls are rechecked before input.** A click waits for its target to stop moving and checks
+  its meaning and position again. A replaced field must still match and hold focus before it receives
+  text. The browser also gives visible loading indicators time to clear before declaring a page settled.
+- **Repeated work does not count as progress.** Filling or selecting a value already present in the
+  observed field cannot reset the stall count. Repeated actions and unresolved requirements are also
+  monitored: by default they log possible stalls without changing the run. `StallRules.tripwires` can
+  enable recovery for them. Productive steps break the unresolved-requirement streak, and recovery resets
+  the evidence used by all three stall checks. Local and live evals record these signals per run; the live
+  summary counts passing runs affected, so repeated signals in one run do not inflate the rate.
+- **Prompt limits preserve required evidence.** `ObservationLimits` names the page-text, working-notes
+  and history limits; `TokenBudget` names input and reader/composer output limits. Shortened page excerpts
+  carry a cut marker when it fits. Verdicts retain requirement evidence or stop at `observation_limit`;
+  the Jev completion check makes room by reducing page text before refusing the evidence.
+- **A Jev provider outage can use the other configured provider.** With both keys set, a retryable HTTP
+  failure that exhausts retries switches the run to the backup provider and keeps it there. Authentication
+  errors do not switch providers. A custom endpoint or model disables automatic failover.
+- **CLI secrets can declare their own origin.** `--secret NAME=ENV_VAR@ORIGIN` works without `--start`,
+  including wildcard site origins. The shorter form still takes its scope from `--start`; Bitwarden
+  still needs a start page to match the vault item.
+- **The MCP HTTP token can be read from `.env`.** `FASTBROWSE_MCP_TOKEN` follows the same settings rules
+  as model keys, with the process environment taking precedence.
+- **Flights grades use the submitted search even when its fields collapse.** The grader decodes the
+  route, date and trip type from the URL, falls back to visible fields when decoding is unavailable, and
+  still requires matching result rows and any requested Nonstop filter. A decoded mismatch fails.
 
 ## [0.4.2] - 2026-09-20
 

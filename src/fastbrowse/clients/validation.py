@@ -4,6 +4,7 @@ import asyncio
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from time import monotonic
 from typing import assert_never
 
 import httpx
@@ -15,6 +16,7 @@ from fastbrowse.jev import (
     ChoiceQuestion,
     JevError,
     JevInputTooLarge,
+    JevRetriesExhausted,
     NoulAnswer,
     NoulQuestion,
     Question,
@@ -105,7 +107,8 @@ def response_error(response: httpx.Response, detail: str) -> JevError:
 
 RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0, 8.0, 8.0)
 """About 22s in all. With 6s, a Jev 503 ended 5 of 311 eval runs, and each time the next run, started 0 to 15s
-later, got through: the outages are brief, and a run lost to one costs far more than the wait."""
+later, got through: the outages are brief, and a run lost to one costs far more than the wait. Only a longer
+outage moves the run to the backup provider (`clients/failover.py`)."""
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
 _MAX_BACKOFF_SECONDS = 10.0
 JEV_ATTEMPT_SECONDS = 15.0
@@ -260,12 +263,21 @@ async def post(
     *,
     usage: RequestUsage | None = None,
 ) -> httpx.Response:
+    started = monotonic()
+    usage = usage if usage is not None else RequestUsage()
     auth = {"Authorization": f"Bearer {api_key}", **(headers or {})}
     response = await post_with_retry(
         http, url, body, auth, attempt_seconds=JEV_ATTEMPT_SECONDS, hedge_seconds=JEV_HEDGE_SECONDS, usage=usage
     )
     if response is None:
         raise JevError("Jev transport failed")
+    if response.status_code in RETRYABLE_STATUS:
+        raise JevRetriesExhausted(
+            str(response_error(response, "Jev request failed")),
+            status_code=response.status_code,
+            seconds=monotonic() - started,
+            unaccounted_requests=usage.unaccounted_requests,
+        )
     if response.status_code == 400 and "max_tokens_exceeded" in response.text:
         raise JevInputTooLarge(f"Jev input too large; HTTP 400: {body_excerpt(response)}")
     if not response.is_success:

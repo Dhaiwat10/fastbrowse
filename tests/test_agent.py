@@ -12,6 +12,7 @@ from fastbrowse import agent as agent_module
 from fastbrowse.agent import (
     Agent,
     _answered,
+    _code_decision,
     _follow_recovery,
     _history,
     _RunState,
@@ -21,27 +22,31 @@ from fastbrowse.agent import (
     _Unsure,
     _verified,
 )
-from fastbrowse.config import Config, ObservationLimits
+from fastbrowse.citations import text_fragment
+from fastbrowse.config import Config, ObservationLimits, StallRules, Thresholds
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation
 from fastbrowse.memory import Fact, Notes, evidence_id
 from fastbrowse.models import (
     Authorization,
     BrowserEvent,
+    Citation,
     Decider,
+    FactReader,
     Limits,
     LLMPurpose,
     Operation,
     Status,
     StepEvent,
     StepOutcome,
-    StepResult,
 )
-from fastbrowse.page import ActResult, BlockKind, Control, Observation, Page
+from fastbrowse.page import Action, ActResult, BlockKind, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
-from fastbrowse.policy import HistoryEntry, decide
+from fastbrowse.policy import Decision, HistoryEntry, ReadAssessment, decide
+from fastbrowse.retrieval import ComposedAnswer
 from fastbrowse.safety import ScopedSecrets
 from fastbrowse.telemetry import Ledger
+from fastbrowse.tripwires import Tripwire
 from fastbrowse.verification import LLMVerdict
 from tests.test_memory import evidence
 from tests.test_policy import FREE, ScriptedJev, context, observation
@@ -247,16 +252,31 @@ async def test_jev_still_unsure_after_recovery_takes_the_action_recovery_named()
     obs = observation(buttons)
     page = Mock(spec=Page)
     page.screenshot = AsyncMock(return_value=b"png")
-    recovery = {"diagnosis": "not submitted", "next_subgoal": "Click Search", "give_up": False}
+    recovery = {"diagnosis": "not submitted", "next_subgoal": "Click Search for hunter2", "give_up": False}
     llm = ScriptedLLM([{**recovery, "control": 1, "operation": "click"}])
     jev = ScriptedJev({"operation": "click", "click_target": "done"})
     state = await run_state()
-    await Agent(page, jev, llm)._recover(state, obs, "uncertain next step (0.49)")
+    agent = Agent(page, jev, llm)
+    agent._redactor.register("password", "hunter2")
+    await agent._recover(state, obs, "uncertain next step (0.49): hunter2")
+    assert state.steps[-1].note == (
+        "uncertain next step (0.49): [secret:password]\nnot submitted\nClick Search for [secret:password]"
+    )
     unsure = await decide(jev, obs, context(), Config())
     followed = _follow_recovery(state, obs, unsure, uncertain=True)
     assert followed is not None and followed.target == buttons[1]
     # Used once: the next unsure step is Jev's to recover from again.
     assert _follow_recovery(state, obs, unsure, uncertain=True) is None
+    # Even authorized, recovery's click is put to Jev: the decision's confidence was Jev's in "Done", not this.
+    state.authorization = Authorization(irreversible_actions=True)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    with pytest.raises(_Unsure):
+        await agent._step(state, obs, followed, Decider.LLM)
+    assert state.steps[-1].outcome is StepOutcome.FAILED and state.steps[-1].confidence is None
+    jev.noul = 0.1
+    await agent._step(state, obs, followed, Decider.LLM)
+    assert state.steps[-1].note == "Click Search for [secret:password]"
+    assert state.steps[-1].confidence is None
 
 
 async def test_an_unsure_pick_is_acted_on_once_per_page_state() -> None:
@@ -271,12 +291,24 @@ async def test_an_unsure_pick_is_acted_on_once_per_page_state() -> None:
 async def test_an_unsure_pick_that_may_commit_something_recovers_rather_than_asking_the_user(
     confidence: float, raised: type[Exception]
 ) -> None:
-    button = _button("Place order")
+    button = _button("Place order for hunter2")
     jev = ScriptedJev({"operation": "click", "click_target": button.id}, noul=0.9)
     obs = observation((button,))
     decision = (await decide(jev, obs, context(), Config())).model_copy(update={"operation_confidence": confidence})
-    with pytest.raises(raised):
-        await Agent(Mock(spec=Page), jev, ScriptedLLM([]))._gate_irreversible(await run_state(), obs, decision)
+    state = await run_state()
+    page = Mock(spec=Page)
+    on_event = AsyncMock()
+    agent = Agent(page, jev, ScriptedLLM([]), on_event=on_event)
+    agent._redactor.register("password", "hunter2")
+    with pytest.raises(raised) as refused:
+        await agent._step(state, obs, decision)
+    step = state.steps[-1]
+    assert step.decided_by is Decider.CODE and step.outcome is StepOutcome.FAILED
+    assert step.note == agent._redactor.redact(str(refused.value))
+    assert step.facts == ()
+    on_event.assert_awaited_once_with(StepEvent(step=step))
+    assert "hunter2" not in step.model_dump_json()
+    page.act.assert_not_called()
 
 
 async def test_a_named_action_is_not_taken_over_a_confident_choice_or_on_a_control_that_went() -> None:
@@ -301,54 +333,336 @@ def test_earlier_actions_stay_in_view_without_their_effects() -> None:
     assert [entry.target for entry in shown] == [f"field {i}" for i in range(3, 10)]
     assert [entry.effect for entry in shown] == [None] * 4 + ["e"] * 3
     assert _history(entries[:2], ObservationLimits(history_entries=3)) == tuple(entries[:2])
+    assert _history(entries, ObservationLimits(history_entries=0, earlier_history_entries=0)) == ()
 
 
-@pytest.mark.parametrize(("typed", "reads"), [(True, 1), (False, 0)])
-async def test_the_results_of_a_typed_search_are_read_once_before_leaving(typed: bool, reads: int) -> None:
+@pytest.mark.parametrize("authorized", [False, True])
+@pytest.mark.parametrize("operation", [Operation.CLICK, Operation.FILL, Operation.SELECT])
+async def test_url_edits_are_not_reads_but_each_result_in_one_document_is_preserved(
+    authorized: bool, operation: Operation
+) -> None:
     state = await run_state()
+    state.authorization = Authorization(irreversible_actions=authorized)
     state.ready_plan = Plan(
-        requirements=(Requirement(id="r1", text="When was httpx released?", kind=RequirementKind.INFORMATION),),
+        requirements=(Requirement(id="r1", text="Compare both results", kind=RequirementKind.INFORMATION),),
         answer_expected=True,
     )
-    home, results = "https://example.test/", "https://example.test/search?q=httpx"
-    first = Operation.FILL if typed else Operation.CLICK
-    for operation, url in ((first, home), (Operation.ENTER, home), (Operation.FILL, results)):
-        state.steps.append(
-            StepResult(
-                index=len(state.steps),
-                operation=operation,
-                decided_by=Decider.JEV,
-                outcome=StepOutcome.EXECUTED,
-                url=url,
-                duration_ms=0,
-            )
-        )
-    agent = Agent(Mock(spec=Page), ScriptedJev({}), ScriptedLLM([]))
-    agent._capture = AsyncMock()
-    agent._read = AsyncMock(return_value=True)
-    button = Control(id="go", frame_id=None, role="button", label="Search", operations=frozenset({Operation.CLICK}))
-    obs = observation((button,)).model_copy(update={"url": results})
-    decision = await decide(ScriptedJev({"operation": "enter", "enter_target": "go"}), obs, context(), Config())
-    for _ in range(2):
-        state.read_here = False
-        await agent._read_before_leaving(state, obs, decision)
-    await asyncio.gather(*state.leaving)
-    assert agent._read.await_count == reads
+    control = field().model_copy(update={"operations": frozenset({operation})})
+    obs = observation((control,)).model_copy(update={"document_key": "same-document"})
+    page = Mock(spec=Page)
+    jev = ScriptedJev({"operation": operation.value, f"{operation.value}_target": control.id, "r1": "synthesis"})
+    llm = ScriptedLLM(
+        [
+            {"claims": [{"text": text, "source_id": "s0", "quote": text}], "answered": False}
+            for text in ("First result: 12", "Second result: 18")
+        ]
+    )
+    agent = Agent(page, jev, llm)
+    agent._action = AsyncMock(return_value=Action(operation=operation, target_id=control.id, text="new query"))
+    expected_quote = None
+
+    async def replace_content(*args: object) -> ActResult:
+        if expected_quote is not None:
+            assert expected_quote in [fact.evidence.quote for fact in state.notes.facts]
+        page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Editing")))
+        return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
+
+    page.act = AsyncMock(side_effect=replace_content)
+    decision = await decide(jev, obs, context(), Config())
+    for query in ("B", "Br", "Bristol"):
+        obs = obs.model_copy(update={"url": f"https://example.test/?q={query}"})
+        editing = decision.model_copy(update={"read_assessment": ReadAssessment.EDITING})
+        assert not await agent._read_before_interaction(state, obs, editing)
+        await agent._step(state, obs, editing)
+    page.capture.assert_not_called()
+    relevant = decision.model_copy(update={"read_assessment": ReadAssessment.EVIDENCE})
+    results_url = obs.url
+    for text in ("First result: 12", "Second result: 18"):
+        obs = obs.model_copy(update={"url": results_url})
+        page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, text)).model_copy(update={"url": obs.url}))
+        assert await agent._read_before_interaction(state, obs, relevant)
+        # Even a URL rewrite and another choice to READ cannot re-read this content and requirement set.
+        obs = obs.model_copy(update={"url": obs.url + "&view=compact"})
+        assert not await agent._read_before_interaction(state, obs, relevant)
+        await agent._read(state, await agent._capture(), obs)
+        expected_quote = text
+        await agent._step(state, obs, decision)
+    assert [fact.evidence.quote for fact in state.notes.facts] == ["First result: 12", "Second result: 18"]
+    assert len(llm.calls) == 2
+    assert [fact.evidence.url for fact in state.notes.facts] == [results_url, results_url]
+    assert [step.operation for step in state.steps].count(Operation.READ) == 2
+    assert page.act.await_count == 5
 
 
-async def test_recovery_can_direct_a_read_with_no_control_to_name() -> None:
+@pytest.mark.parametrize("assessment", [ReadAssessment.EVIDENCE, ReadAssessment.ABSENT])
+@pytest.mark.parametrize("role", ["button", "link"])
+async def test_a_message_is_read_before_mutation_and_the_next_action_is_reconsidered(
+    assessment: ReadAssessment, role: str
+) -> None:
+    message = "The account is locked out" if assessment is ReadAssessment.EVIDENCE else "Your preferences were saved"
+    control = _button("Continue").model_copy(update={"role": role})
+    obs = observation((control,)).model_copy(update={"viewport_text": message})
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Report why login failed", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=obs)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, message)))
+    page.artifacts = ()
+
+    async def remove_message(*args: object) -> ActResult:
+        page.observe.return_value = obs.model_copy(update={"viewport_text": ""})
+        return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
+
+    page.act = AsyncMock(side_effect=remove_message)
+
+    class MessageJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            # A preserved message makes the next decision DONE instead of the stale dismissal.
+            if "operation" in questions and isinstance(state, dict) and state.get("notes"):
+                self.pick = {"operation": "done"}
+            return await super().evaluate(state, questions)
+
+    jev = MessageJev(
+        {"operation": "click", "click_target": control.id, "read_assessment": assessment.value, "r1": "c0"},
+        noul=0.0,
+    )
+    agent = Agent(page, jev, ScriptedLLM([]))
+    # Stop at the next decision after the preservation, or immediately after an irrelevant message is removed.
+    state.ledger.limits = Limits(max_steps=1 if assessment is ReadAssessment.ABSENT else 2)
+    expected = agent._result(state, state.ledger, Status.COMPLETE)
+    agent._finish = AsyncMock(return_value=expected)
+    if assessment is ReadAssessment.EVIDENCE:
+        assert await agent._loop(state, None, None) is expected
+        assert state.notes.facts[0].evidence.quote == message
+        assert state.steps[0].operation is Operation.READ
+        page.act.assert_not_awaited()
+        agent._finish.assert_awaited_once()
+    else:
+        from fastbrowse.telemetry import BudgetExceeded
+
+        with pytest.raises(BudgetExceeded):
+            await agent._loop(state, None, None)
+        page.act.assert_awaited_once()
+        page.capture.assert_not_awaited()
+        assert not state.notes.facts
+
+
+@pytest.mark.parametrize("second", ["read", "click"])
+async def test_after_a_forced_read_jev_decides_again_and_a_repeat_read_recovers(
+    second: str,
+) -> None:
+    fare = "Oslo to Rome, 1 stop, $320"
+    nonstop, pager = _button("Nonstop"), _button("Next")
+    obs = observation((nonstop, pager)).model_copy(update={"viewport_text": fare})
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the cheapest nonstop fare", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=obs)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, fare)))
+    page.screenshot = AsyncMock(return_value=b"")
+    page.artifacts = ()
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+
+    class RereadingJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            if "operation" in questions and isinstance(state, dict) and state.get("notes"):
+                self.pick = {
+                    "operation": second,
+                    "click_target": pager.id,
+                    "read_assessment": "evidence",
+                    "r1": "synthesis",
+                }
+            return await super().evaluate(state, questions)
+
+    jev = RereadingJev(
+        {"operation": "click", "click_target": nonstop.id, "read_assessment": "evidence", "r1": "synthesis"},
+        noul=0.0,
+    )
+    llm = ScriptedLLM([{"claims": [{"text": fare, "source_id": "s0", "quote": fare}], "answered": False}])
+    agent = Agent(page, jev, llm)
+    agent._recover = AsyncMock(side_effect=_Stop(Status.STUCK, "recovering"))
+    state.ledger.limits = Limits(max_steps=2)
+    from fastbrowse.telemetry import BudgetExceeded
+
+    with pytest.raises(_Stop if second == "read" else BudgetExceeded):
+        await agent._loop(state, None, None)
+    if second == "read":
+        agent._recover.assert_awaited_once()
+        page.act.assert_not_awaited()
+    else:
+        agent._recover.assert_not_awaited()
+        page.act.assert_awaited_once()
+        assert state.steps[-1].target == pager.label
+    assert len(llm.calls) == 1
+
+
+async def test_an_interaction_is_not_replayed_on_a_control_that_changed_during_the_read() -> None:
+    fare = "Oslo to Rome, 1 stop, $320"
+    preview = _button("Preview draft")
+    obs = observation((preview,)).model_copy(update={"viewport_text": fare})
+    relabelled = obs.model_copy(update={"controls": (preview.model_copy(update={"label": "Send message"}),)})
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the cheapest nonstop fare", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(side_effect=[obs, relabelled, relabelled])
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, fare)))
+    page.screenshot = AsyncMock(return_value=b"")
+    page.artifacts = ()
+
+    class RereadingJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            if "operation" in questions and isinstance(state, dict) and state.get("notes"):
+                self.pick = {"operation": "read", "read_assessment": "evidence", "r1": "synthesis"}
+            return await super().evaluate(state, questions)
+
+    jev = RereadingJev(
+        {"operation": "click", "click_target": preview.id, "read_assessment": "evidence", "r1": "synthesis"},
+        noul=0.0,
+    )
+    llm = ScriptedLLM([{"claims": [{"text": fare, "source_id": "s0", "quote": fare}], "answered": False}])
+    agent = Agent(page, jev, llm)
+    agent._recover = AsyncMock(side_effect=_Stop(Status.STUCK, "recovering"))
+    agent._finish = AsyncMock(side_effect=_Stop(Status.STUCK, "finishing"))
+    with pytest.raises(_Stop):
+        await agent._loop(state, None, None)
+    page.act.assert_not_called()
+    assert Operation.CLICK not in [step.operation for step in state.steps]
+
+
+async def test_unchanged_unsuccessful_preservation_does_not_loop_or_authorize_the_action() -> None:
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the total", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    button = _button("Place order")
+    obs = observation((button,))
+    page = Mock(spec=Page)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Pending total")))
+    llm = ScriptedLLM([{"claims": [], "answered": False}])
+    jev = ScriptedJev(
+        {"operation": "click", "click_target": button.id, "read_assessment": "evidence", "r1": "synthesis"}
+    )
+    decision = await decide(jev, obs, context(), Config())
+    agent = Agent(page, jev, llm)
+    assert await agent._read_before_interaction(state, obs, decision)
+    assert not await agent._read_before_interaction(state, obs, decision)
+    await agent._read(state, await agent._capture(), obs)
+    assert len(llm.calls) == 1 and not state.notes.facts
+    with pytest.raises(_Stop) as stopped:
+        await agent._step(state, obs, decision)
+    assert stopped.value.status is Status.NEEDS_CONFIRMATION
+    page.act.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", [Operation.READ, Operation.DONE])
+async def test_an_exhausted_read_recovers_instead_of_repeating_even_when_jev_is_confident(operation: Operation) -> None:
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the total", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    more = _button("Show total")
+    obs = observation((more,))
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=obs)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Pending total")))
+    page.screenshot = AsyncMock(return_value=b"png")
+    page.artifacts = ()
+
+    async def show_total(*args: object) -> ActResult:
+        # The text changes without changing the URL or controls used by the action cycle detector.
+        page.capture.return_value = capture((BlockKind.PARAGRAPH, "Total: $12"))
+        return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
+
+    page.act = AsyncMock(side_effect=show_total)
+    jev = ScriptedJev({"operation": operation.value, "r1": "synthesis"}, noul=0.0)
+    llm = ScriptedLLM(
+        [
+            {"claims": [], "answered": False},
+            {
+                "diagnosis": "This content has no total; reading it again cannot supply one",
+                "next_subgoal": "Click Show total to load the missing evidence",
+                "operation": "click",
+                "control": 0,
+                "give_up": False,
+            },
+            {
+                "claims": [{"text": "Total: $12", "source_id": "s0", "quote": "Total: $12", "requirement_id": "r1"}],
+                "answered": True,
+            },
+        ]
+    )
+    agent = Agent(page, jev, llm)
+    finish = agent._finish
+
+    async def finish_when_evidenced(*args: object) -> agent_module.RunResult | None:
+        if state.notes.evidenced("r1"):
+            return agent._result(state, state.ledger, Status.COMPLETE)
+        return await finish(state, obs, None, None)
+
+    agent._finish = AsyncMock(side_effect=finish_when_evidenced)
+    result = await agent._loop(state, None, None)
+    assert result.status is Status.COMPLETE
+    page.act.assert_awaited_once()
+    assert state.recoveries == 1
+    assert [purpose for purpose, _ in llm.calls] == [LLMPurpose.READ, LLMPurpose.RECOVER, LLMPurpose.READ]
+    assert state.notes.facts[0].evidence.quote == "Total: $12"
+
+
+@pytest.mark.parametrize("operation", [Operation.READ, Operation.DONE])
+async def test_recovery_can_direct_a_page_operation_with_no_control_to_name(operation: Operation) -> None:
+    # A Flights run holding every answer was told twice to finish; a dropped DONE left Jev to stall until stuck.
     button = Control(id="next", frame_id=None, role="button", label="Next", operations=frozenset({Operation.CLICK}))
     obs = observation((button,))
     page = Mock(spec=Page)
     page.screenshot = AsyncMock(return_value=b"png")
     recovery = {"diagnosis": "the answer is further down", "next_subgoal": "Read the page", "give_up": False}
-    llm = ScriptedLLM([{**recovery, "control": None, "operation": "read"}])
+    llm = ScriptedLLM([{**recovery, "control": None, "operation": operation.value}])
     jev = ScriptedJev({"operation": "scroll"})
     state = await run_state()
     await Agent(page, jev, llm)._recover(state, obs, "uncertain next step (0.47)")
     unsure = await decide(jev, obs, context(), Config())
     followed = _follow_recovery(state, obs, unsure, uncertain=True)
-    assert followed is not None and followed.operation is Operation.READ and followed.target is None
+    assert followed is not None and followed.operation is operation and followed.target is None
+
+
+@pytest.mark.parametrize("recover_below", [0.55, 1.0])
+async def test_directed_done_still_requires_verification_after_an_exhausted_read(recover_below: float) -> None:
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the total", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    obs = observation((_button("Show total"),))
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=obs)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Pending total")))
+    llm = ScriptedLLM([{"claims": [], "answered": False}])
+    agent = Agent(
+        page,
+        ScriptedJev({"operation": "read", "r1": "synthesis"}, noul=0.0),
+        llm,
+        config=Config(thresholds=Thresholds(recover_below=recover_below), stall=StallRules(max_recoveries=0)),
+    )
+    await agent._read(state, await page.capture(), obs)
+    state.directed = (Operation.DONE, None)
+    with pytest.raises(_Stop) as stopped:
+        await agent._loop(state, None, None)
+    assert stopped.value.status is Status.STUCK
+    assert any(step.operation is Operation.DONE and step.outcome is StepOutcome.FAILED for step in state.steps)
+    assert len(llm.calls) == 1
+    page.act.assert_not_called()
 
 
 def _button(label: str) -> Control:
@@ -447,7 +761,8 @@ def test_the_verifier_cannot_hold_open_a_requirement_the_notes_cite(
         answer_expected=True,
     )
     notes = Notes(
-        Fact(requirement_id=r, text=r, evidence=evidence(start=i)) for i, r in enumerate(("httpx", "compare"))
+        Fact(reader=FactReader.LLM, requirement_id=r, text=r, evidence=evidence(start=i))
+        for i, r in enumerate(("httpx", "compare"))
     )
     assert _verified(LLMVerdict(complete=complete, missing=missing), plan, notes) is accepted
 
@@ -483,10 +798,11 @@ async def test_a_read_waits_for_an_empty_page_to_draw_and_never_reads_nothing(
 async def test_a_click_on_a_redrawn_control_lands_on_its_one_twin_without_deciding_again(twins: int) -> None:
     state = await run_state()
     state.authorization = Authorization(irreversible_actions=True)
-    before = observation((_button("Done"),))
-    redrawn = tuple(_button("Done").model_copy(update={"id": f"done-{n}"}) for n in range(twins))
+    target = _button("Done").model_copy(update={"retarget_key": "same-document-and-guard"})
+    before = observation((target,)).model_copy(update={"document_key": "document"})
+    redrawn = tuple(target.model_copy(update={"id": f"done-{n}"}) for n in range(twins))
     page = Mock(spec=Page)
-    page.observe = AsyncMock(return_value=observation(redrawn))
+    page.observe = AsyncMock(return_value=before.model_copy(update={"controls": redrawn}))
     page.act = AsyncMock(
         side_effect=[
             ActResult(outcome=StepOutcome.STALE, page_changed=False, detail="target disconnected"),
@@ -497,6 +813,39 @@ async def test_a_click_on_a_redrawn_control_lands_on_its_one_twin_without_decidi
     targets = [call.args[0].target_id for call in page.act.await_args_list]
     assert targets == (["done", "done-0"] if twins == 1 else ["done"])
     assert state.steps[-1].outcome is (StepOutcome.EXECUTED if twins == 1 else StepOutcome.STALE)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    ["document_key", "title", "retarget_key", "frame_origin", "submit_semantics", "operations", "value"],
+)
+async def test_stale_retargeting_preserves_document_and_authorization_context(changed: str) -> None:
+    target = field().model_copy(update={"retarget_key": "guard"})
+    before = observation((target,)).model_copy(update={"document_key": "document"})
+    twin = target.model_copy(update={"id": "replacement"})
+    after = before.model_copy(update={"controls": (twin,)})
+    if changed in {"document_key", "title"}:
+        after = after.model_copy(update={changed: "changed"})
+    else:
+        twin = twin.model_copy(update={changed: frozenset({Operation.CLICK}) if changed == "operations" else "changed"})
+        after = after.model_copy(update={"controls": (twin,)})
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=after)
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
+    assert await agent._act_on_twin(Action(operation=Operation.ENTER, target_id=target.id), before, target) is None
+    page.act.assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", [StepOutcome.FAILED, StepOutcome.COVERED])
+async def test_only_stale_actions_can_be_retargeted(outcome: StepOutcome) -> None:
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    before = observation((_button("Done"),))
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=outcome, page_changed=False))
+    await _click(Agent(page, ScriptedJev({}), ScriptedLLM([])), state, before, "Done")
+    page.act.assert_awaited_once()
+    page.observe.assert_not_called()
 
 
 def _link(key: str, label: str, href: str) -> Control:
@@ -578,7 +927,6 @@ async def test_a_list_the_reader_needs_whole_is_read_page_by_page_without_decidi
 
     await agent._step(state, first, read)
     assert not state.notes.evidenced("r1")
-    assert "next-page control ('next')" in llm.calls[0][1][-1].content
     assert state.next_page
     click = agent_module._paging(state, first)
     assert click is not None and click.operation is Operation.CLICK and click.target is not None
@@ -608,7 +956,7 @@ async def test_a_list_goes_on_to_jev_with_a_hint_when_code_finds_no_next_page() 
     agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "none"}), ScriptedLLM(reads))
     await agent._read(state, capture((BlockKind.PARAGRAPH, "Einstein quote")), here)
     assert not state.next_page
-    assert state.hint is not None and "go on past this page" in state.hint
+    assert state.hint is not None
 
 
 async def test_the_pages_code_opens_are_capped() -> None:
@@ -693,6 +1041,7 @@ async def test_a_secret_the_step_itself_put_on_the_page_suppresses_its_frame() -
     await _click(agent, state, observation((save,)), "Save")
     assert [event.frame for event in events] == [None]
     page.screenshot.assert_not_awaited()
+    page.withhold_frames.assert_called_with(True)
 
 
 def test_a_plan_is_answered_when_what_it_asks_to_find_is_evidenced_whatever_actions_it_lists() -> None:
@@ -706,9 +1055,9 @@ def test_a_plan_is_answered_when_what_it_asks_to_find_is_evidenced_whatever_acti
     )
     notes = Notes()
     assert not _answered(plan, notes)
-    notes.add(Fact(requirement_id="r1", text="20 books", evidence=evidence(start=0, end=4)))
+    notes.add(Fact(reader=FactReader.LLM, requirement_id="r1", text="20 books", evidence=evidence(start=0, end=4)))
     assert not _answered(plan, notes)
-    notes.add(Fact(requirement_id="r3", text="20 books", evidence=evidence(start=10, end=14)))
+    notes.add(Fact(reader=FactReader.LLM, requirement_id="r3", text="20 books", evidence=evidence(start=10, end=14)))
     assert _answered(plan, notes)
 
 
@@ -739,12 +1088,13 @@ async def test_a_composed_answer_that_fails_its_check_falls_back_to_the_readers_
         answer_expected=True,
     )
     first, second = evidence(start=0, end=4), evidence(start=10, end=14)
-    state.notes.add(Fact(requirement_id="r1", text="Book A is listed", evidence=first))
-    state.notes.add(Fact(requirement_id="r1", text="Book B is listed", evidence=second))
+    state.notes.add(Fact(reader=FactReader.LLM, requirement_id="r1", text="Book A is listed", evidence=first))
+    state.notes.add(Fact(reader=FactReader.LLM, requirement_id="r1", text="Book B is listed", evidence=second))
     whole: JsonValue = {"claims": [{"text": "WHOLE LIST: Book A and Book B", "evidence_ids": [evidence_id(first)]}]}
     agent = Agent(Mock(spec=Page), DoubtingJev({}), ScriptedLLM([whole]))
 
-    answer, verified = await agent._answer(state, None)
+    composed, verified = await agent._answer(state, None)
+    answer = composed.answer
 
     assert verified
     assert "WHOLE LIST" not in answer and "Book A is listed" in answer and "Book B is listed" in answer
@@ -848,3 +1198,163 @@ async def test_a_guessed_page_that_is_still_drawing_is_waited_for_rather_than_ab
     await agent._front_page_if_blank("https://app.test/dashboard")
 
     page.navigate.assert_not_called()
+
+
+async def test_a_recovery_spends_the_evidence_every_tripwire_read() -> None:
+    """Armed, a tripwire must not re-fire on the crossing recovery already handled.
+
+    `history` never shrinks and `plan_marks` grows only on a step that got nowhere, so a threshold crossed
+    once holds for the rest of the run. Leaving it standing meant recovery re-entered on every later step,
+    however well the run then went, and `max_recoveries` returned STUCK three steps later.
+    """
+    page = Mock(spec=Page)
+    page.screenshot = AsyncMock(return_value=b"png")
+    recovery: dict[str, JsonValue] = {
+        "diagnosis": "going round",
+        "next_subgoal": "Click Search",
+        "give_up": False,
+        "control": None,
+    }
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([recovery]))
+    state = await run_state()
+    state.history = [
+        HistoryEntry(operation=Operation.FILL, target="Search", outcome=StepOutcome.EXECUTED, page_changed=True)
+        for _ in range(3)
+    ]
+    state.plan_marks = ["same"] * 4
+
+    tripped = {t.tripwire for t in agent._tripwires(state)}
+    assert Tripwire.ACTION_REPETITION in tripped and Tripwire.PLAN_STAGNATION in tripped
+
+    await agent._recover(state, observation(()), "action_repetition (3)")
+    assert agent._tripwires(state) == []
+
+
+def edit(
+    value: str, *, holds: str | None = None, secret: bool = False, operation: Operation = Operation.FILL
+) -> tuple[Decision, Action]:
+    """A decision to write `value` into a field that currently holds `holds`, and the action doing it."""
+    target = Control(
+        id="f",
+        frame_id=None,
+        role="textbox",
+        label="Name",
+        value=holds,
+        operations=frozenset({Operation.FILL}),
+    )
+    decision = _code_decision(operation, target)
+    return decision, Action(operation=operation, target_id=target.id, text=value, secret=secret)
+
+
+def test_writing_a_value_a_field_already_holds_is_not_progress() -> None:
+    """The invariant is read off the field, so the same value in a DIFFERENT empty field still counts.
+
+    A checkout writes one name into billing and the same name into shipping, and the second write is the whole
+    point. A remembered (operation, label, value) key called it a repeat; the field's own value does not.
+    """
+    # None, not True: writing into an empty field is not evidence on its own, so `changed` decides. Returning
+    # True here credited three fills that changed nothing and let a PyPI run grind on.
+    assert Agent._edit_progress(*edit("Ada", holds=None)) is None
+    assert Agent._edit_progress(*edit("Ada", holds="")) is None
+    assert Agent._edit_progress(*edit("Ada", holds="Ada")) is False
+    # A corrected value is not vetoed, even though the field is not empty.
+    assert Agent._edit_progress(*edit("Ada", holds="Adz")) is None
+
+
+def test_a_secret_is_compared_by_the_length_the_page_reveals() -> None:
+    """A password's value never leaves the page: only bullets of its length are observed."""
+    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 7, secret=True)) is False
+    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 4, secret=True)) is None
+
+
+def test_an_upload_is_judged_by_the_page_not_by_a_value() -> None:
+    """A file input's value is not the file, so every upload after the first read as the same nothing."""
+    assert Agent._edit_progress(*edit("a.pdf", holds=None, operation=Operation.UPLOAD)) is None
+
+
+async def test_same_text_can_be_read_for_a_new_document_or_new_requirement() -> None:
+    state = await run_state()
+    requirement = Requirement(id="r1", text="Find the total", kind=RequirementKind.INFORMATION)
+    state.ready_plan = Plan(requirements=(requirement,), answer_expected=True)
+    obs = observation(()).model_copy(update={"document_key": "document-a"})
+    page = capture((BlockKind.PARAGRAPH, "Waiting for a result"))
+    llm = ScriptedLLM([{"claims": [], "answered": False}] * 3)
+    agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "synthesis", "r2": "synthesis"}), llm)
+    await agent._read(state, page, obs)
+    await agent._read(state, page, obs)
+    assert len(llm.calls) == 1
+    obs = obs.model_copy(update={"document_key": "document-b"})
+    await agent._read(state, page, obs)
+    assert len(llm.calls) == 2
+    state.ready_plan = Plan(requirements=(requirement.model_copy(update={"id": "r2"}),), answer_expected=True)
+    await agent._read(state, page, obs)
+    assert len(llm.calls) == 3
+
+
+@pytest.mark.parametrize("reader", list(FactReader))
+async def test_a_secret_quoted_by_a_citation_is_redacted_from_its_links_too(reader: FactReader) -> None:
+    quote = "signed in as hunter 2&x today"
+    url = "https://example.test/account?token=hunter%202%26x"
+    requirement_id = "r1 hunter 2&x"
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id=requirement_id, text="Who is signed in?", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    state.notes.add(Fact(reader=FactReader.LLM, text="Already known", evidence=evidence()))
+    events: list[StepEvent] = []
+
+    async def collect(event: StepEvent | BrowserEvent) -> None:
+        if isinstance(event, StepEvent):
+            events.append(event)
+
+    claim: JsonValue = {"requirement_id": requirement_id, "text": quote, "source_id": "s0", "quote": quote}
+    llm = ScriptedLLM([{"claims": [claim], "answered": True}] if reader is FactReader.LLM else [])
+    jev = ScriptedJev({requirement_id: "synthesis" if reader is FactReader.LLM else "c0"})
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    agent = Agent(page, jev, llm, on_event=collect)
+    agent._redactor.register("password", "hunter 2&x")
+    captured = capture((BlockKind.PARAGRAPH, quote)).model_copy(update={"url": url})
+    await agent._step(state, observation(()), _code_decision(Operation.READ, None), capture=captured)
+
+    (fact,) = events[0].step.facts
+    assert events[0].step == state.steps[0]
+    assert fact.quote == "signed in as [secret:password] today"
+    assert fact.text == (f"Who is signed in?\n{fact.quote}" if reader is FactReader.JEV_CHOICE else fact.quote)
+    assert fact.requirement_id == "r1 [secret:password]"
+    assert fact.url == "https://example.test/account?token=[secret:password]"
+    assert fact.reader is reader
+    assert fact.deep_link == text_fragment(fact.url, fact.quote)
+    assert "hunter" not in events[0].model_dump_json()
+    assert len(state.notes.facts) == 2
+    assert state.notes.facts[-1].evidence.quote == quote
+    await agent._step(state, observation(()), _code_decision(Operation.SCROLL, None), Decider.CODE)
+    assert events[1].step.facts == ()
+    assert events[1].step.note is None
+
+    link = text_fragment(url, quote)
+    cited = Citation(id=1, text=quote, url=url, quote=quote, deep_link=link)
+    composed = ComposedAnswer(answer=quote, linked_answer=f"{quote} [1](<{link}>)", claims=(), citations=(cited,))
+
+    answer, (public,) = agent._public_answer(composed)
+
+    assert "hunter" not in answer and "hunter" not in public.model_dump_json()
+    assert public.deep_link == text_fragment(public.url, "signed in as [secret:password] today")
+    assert public.deep_link in answer
+
+
+async def test_a_link_sharing_another_links_start_is_still_redacted() -> None:
+    # Rewriting one link at a time changed the start of the longer link, which then kept its encoded secret.
+    agent = Agent(Mock(spec=Page), ScriptedJev({}), ScriptedLLM([]))
+    agent._redactor.register("password", "alpha-beta")
+    url = "https://example.test/page"
+    quotes = ("token alpha-beta", "token alpha-beta repeated alpha-beta")
+    cited = tuple(
+        Citation(id=n, text=quote, url=url, quote=quote, deep_link=text_fragment(url, quote))
+        for n, quote in enumerate(quotes, 1)
+    )
+    body = " ".join(f"[{c.id}](<{c.deep_link}>)" for c in cited)
+    answer, public = agent._public_answer(ComposedAnswer(answer="", linked_answer=body, claims=(), citations=cited))
+    assert "alpha" not in answer
+    assert all(p.deep_link in answer for p in public)

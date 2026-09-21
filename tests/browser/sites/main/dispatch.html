@@ -1,0 +1,46 @@
+<!doctype html>
+<html><head><title>Dispatch races</title>
+<style>
+  #target, #decoy, #cover { position:absolute; left:60px; top:80px; width:180px; height:40px; }
+  #target { z-index:1; }
+  #cover { z-index:2; background:white; display:none; }
+</style></head><body>
+<button id="decoy">Decoy</button>
+<button id="target" role="option" aria-selected="false">One way</button>
+<div id="cover"></div>
+<script>
+  const mode = location.search.slice(1);
+  let target = document.getElementById('target');
+  window.presses = [];
+  window.pressPositions = [];
+  window.clicks = [];
+  document.addEventListener('mousedown', e => {
+    presses.push(e.target.id);
+    pressPositions.push(e.target.getBoundingClientRect().left);
+  });
+  document.addEventListener('click', e => clicks.push(e.target.id));
+  if (mode.startsWith('replace')) {
+    const input = document.createElement('input');
+    input.id = 'target';
+    input.setAttribute('aria-label', 'Origin');
+    target.replaceWith(input);
+    target = input;
+    target.addEventListener('click', () => {
+      const copy = target.cloneNode();
+      target.replaceWith(copy);
+      if (mode === 'replace-decoy') copy.style.left = '400px';
+      if (mode === 'replace-late') setTimeout(() => copy.focus(), 180);
+      else copy.focus();
+    }, {once:true});
+  } else {
+    target.addEventListener('pointerenter', () => {
+      if (mode === 'move' || mode === 'animate') {
+        if (mode === 'animate') target.style.transition = 'left 180ms linear';
+        target.style.left = '400px';
+      } else if (mode === 'cover') document.getElementById('cover').style.display = 'block';
+      else if (mode === 'relabel') target.textContent = 'Delete reservation';
+    }, {once:true});
+    target.addEventListener('click', () => target.setAttribute('aria-selected', 'true'));
+  }
+</script>
+</body></html>
