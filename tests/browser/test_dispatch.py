@@ -359,3 +359,21 @@ async def test_hydration_marking_a_control_enabled_does_not_make_it_stale(
     target = next(c for c in obs.controls if c.label == "Round trip")
     result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), obs)
     assert result.outcome is StepOutcome.EXECUTED
+
+
+async def test_select_the_page_refuses_is_not_executed(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    """A change handler that restores the previous option must not read as a first write, which is progress."""
+    await page.navigate(main_site)
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.body.innerHTML = '<label>Plan <select id=plan><option>Free</option><option>Pro</option>"
+        "</select></label>'; document.getElementById('plan').onchange = e => { e.target.value = 'Free'; }; true",
+    )
+    obs = await page.observe()
+    action = Action(operation=Operation.SELECT, target_id=find(obs, "Plan").id, text="Pro")
+    result = await page.act(action, obs)
+    assert result.outcome is StepOutcome.FAILED
+    assert result.detail and "'Free'" in result.detail

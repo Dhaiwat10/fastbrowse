@@ -701,7 +701,9 @@ class CdpPage(Page):
             "const opt = [...e.options].find(o => o.label === label && !o.disabled); "
             "if (!opt) return false; e.value = opt.value; "
             "e.dispatchEvent(new Event('input', {bubbles: true})); "
-            "e.dispatchEvent(new Event('change', {bubbles: true})); return true; })"
+            "e.dispatchEvent(new Event('change', {bubbles: true})); "
+            # A change handler can refuse the choice by restoring the previous one.
+            "return e.value === opt.value || (e.selectedOptions[0]?.label ?? ''); })"
             f"({local_id}, {json.dumps(option)})"
         )
         result = await self._evaluate(session_id, script)
@@ -709,6 +711,8 @@ class CdpPage(Page):
             return StepOutcome.STALE, "select target disconnected"
         if result is False:
             return StepOutcome.FAILED, f"no option labelled {option!r}"
+        if result is not True:
+            return StepOutcome.FAILED, f"the page kept {result!r} instead of {option!r}"
         return StepOutcome.EXECUTED, None
 
     async def _key(
