@@ -459,8 +459,9 @@ def summarize(rows: list[dict[str, object]], arms: list[str]) -> None:
         )
         calls: dict[str, float] = {}
         for r in arm_rows:
-            for label, spent in cast(dict[str, float], r.get("seconds_by_call", {})).items():
-                calls[label] = calls.get(label, 0.0) + spent
+            if isinstance(by_call := r.get("seconds_by_call"), dict):
+                for label, spent in by_call.items():
+                    calls[label] = calls.get(label, 0.0) + spent
         for label, spent in sorted(calls.items(), key=lambda item: -item[1]):
             print(f"  {label:18} {spent / len(arm_rows):5.1f}s a task")
         # RUNS affected, not fires, and only among the passing ones - that is the false-positive rate the
@@ -469,8 +470,8 @@ def summarize(rows: list[dict[str, object]], arms: list[str]) -> None:
         # misread as 21%. A tripwire firing on a run that failed anyway costs nothing and is excluded.
         shadow: Counter[str] = Counter()
         for r in arm_rows:
-            if r["passed"]:
-                shadow.update(set(cast(dict[str, int], r.get("would_fire", {}))))
+            if r["passed"] and isinstance(fired := r.get("would_fire"), dict):
+                shadow.update(set(fired))
         for tripwire, runs in shadow.most_common():
             print(f"  would-fire {tripwire:18} {runs}/{passed} passing runs")
 
