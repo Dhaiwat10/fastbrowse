@@ -283,7 +283,7 @@ class OpenAICompatibleLLM:
                             _grow_cap(body, attempt, max_output_tokens)
                         elif attempt == 1:
                             raise LLMRetriesExhausted(
-                                f"LLM response ended mid-JSON at {written} of {body['max_tokens']} output tokens twice"
+                                f"LLM response ended mid-JSON at {written} of {body['max_tokens']} output tokens"
                             ) from None
                         continue
                     if attempt == 1:
