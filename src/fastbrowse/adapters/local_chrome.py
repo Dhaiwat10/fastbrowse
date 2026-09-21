@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import IO
 
 from fastbrowse.models import BrowserConnection, LocalChrome
+from fastbrowse.page import BrowserError
 
 
 def free_port() -> int:
@@ -112,25 +113,29 @@ def local_chrome(options: LocalChrome) -> Generator[BrowserConnection]:
 
 
 def _quiet_password_manager(profile: Path) -> None:
-    """Keep Chrome's password manager out of a profile that has no preferences yet.
+    """Keep Chrome's password manager out of the profile, whether it is fresh or kept between runs.
 
     After a sign-in, its save and leaked-password bubbles take the browser's input: the page still renders
-    and hit tests still pass, but no click reaches it. saucedemo's shared password is a known leak, so every
-    click after its sign-in did nothing. A profile with preferences of its own is left as its owner set it.
+    and hit tests still pass, but no click reaches it, and the bubble is Chrome's own interface, outside the
+    page the agent sees. saucedemo's shared password is a known leak, so every click after its sign-in did
+    nothing. A kept profile keeps every other preference its owner set; these three are set on each launch.
     """
     preferences = profile / "Default" / "Preferences"
-    if preferences.exists():
-        return
+    try:
+        held = json.loads(preferences.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        held = {}
+    if not isinstance(held, dict):
+        raise BrowserError(f"{preferences} is not a Chrome preferences file")
+    held["credentials_enable_service"] = False
+    owned = held.get("profile")
+    held["profile"] = {
+        **(owned if isinstance(owned, dict) else {}),
+        "password_manager_enabled": False,
+        "password_manager_leak_detection": False,
+    }
     preferences.parent.mkdir(parents=True, exist_ok=True)
-    preferences.write_text(
-        json.dumps(
-            {
-                "credentials_enable_service": False,
-                "profile": {"password_manager_enabled": False, "password_manager_leak_detection": False},
-            }
-        ),
-        encoding="utf-8",
-    )
+    preferences.write_text(json.dumps(held), encoding="utf-8")
 
 
 def _wait_for_ws(active: Path, proc: subprocess.Popen[bytes], log: IO[bytes], timeout: float = 90.0) -> str:
