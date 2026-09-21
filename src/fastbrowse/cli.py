@@ -8,8 +8,9 @@ signed into there once stays signed in. `--cloud-profile ID` is the same idea on
 starts with the cookies that profile holds. `--cloud` runs on a Browser Use Cloud browser (BROWSER_USE_API_KEY)
 and prints where to watch it live.
 Secrets come from `--secret NAME=ENV_VAR`, read from that variable, or `--bitwarden ITEM`, a vault login's
-`username` and `password`. Either is usable only on the start origin, so both need `--start`: with no page
-named there is no origin to scope a secret to, and one is never offered to whatever the run happens to open.
+`username` and `password`. Every secret is pinned to one origin and typed nowhere else, so the scope has to
+come from somewhere: `--secret NAME=ENV_VAR@https://host` states it, and otherwise it is the `--start` origin.
+A secret with neither is refused rather than offered to whatever the run happens to open.
 """
 
 import argparse
@@ -29,29 +30,49 @@ from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
 
 
-def _secrets(pairs: list[tuple[str, str]], bitwarden: str | None, start: str | None) -> ScopedSecrets | None:
+def _secrets(
+    pairs: list[tuple[str, str, str | None]], bitwarden: str | None, start: str | None
+) -> ScopedSecrets | None:
     """Values read now, so a missing one fails before a browser is opened.
 
-    A secret is usable only on the start origin, so asking for one without `--start` is refused rather than
-    quietly dropped: a caller who named a credential means the run to use it.
+    The scope is never taken from wherever the run has got to. A credential that followed the browser would
+    be typed on any origin a redirect, an ad frame or a link on a compromised page led to, which is the whole
+    reason the allow-list is fixed before the browser opens; the check at dispatch is against the FIELD's
+    origin, so both halves have to be right. `NAME=ENV_VAR@https://host` states the scope per secret and needs
+    no `--start`; a secret that states none takes the start origin, and one with neither is refused.
+
+    `--bitwarden` still needs `--start`: the vault item is matched BY origin, so there is nothing to match on.
     """
+    unscoped = [name for name, _, origin in pairs if origin is None]
     if start is None:
-        if pairs or bitwarden is not None:
-            raise ConfigurationError("--secret and --bitwarden need --start: a secret is scoped to its origin")
-        return None
+        if unscoped:
+            raise ConfigurationError(
+                f"--secret {', '.join(unscoped)} needs an origin: give --start, or NAME=ENV_VAR@https://host"
+            )
+        if bitwarden is not None:
+            raise ConfigurationError("--bitwarden needs --start: the vault item is matched against its origin")
     if missing := options.unset_variables(pairs):
         raise ConfigurationError(f"--secret names unset variables: {', '.join(missing)}")
-    values = {name: os.environ[variable] for name, variable in pairs}
-    if bitwarden is not None:
+    fallback = origin_of(start) if start is not None else None
+    scoped: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for name, variable, origin in pairs:
+        where = origin or fallback
+        # Unreachable while the guard above stands, and it is here so that relaxing that guard cannot silently
+        # produce a secret with no scope, which `per_secret` would then hold for nobody rather than refuse.
+        if where is None:
+            raise ConfigurationError(f"--secret {name} has no origin to be typed on")
+        scoped[name] = (os.environ[variable], (where,))
+    if bitwarden is not None and start is not None:
         try:
             vault = bitwarden_login(bitwarden, origin_of(start))
         except BitwardenError as exc:
             raise ConfigurationError(str(exc)) from None
         try:
-            values = options.merged_secrets(values, vault)
+            options.merged_secrets({name: value for name, (value, _) in scoped.items()}, vault)
         except ValueError as exc:
             raise ConfigurationError(str(exc)) from None
-    return ScopedSecrets(values, origin_of(start)) if values else None
+        scoped |= {name: (value, (origin_of(start),)) for name, value in vault.items()}
+    return ScopedSecrets.per_secret(scoped) if scoped else None
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -67,7 +88,13 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         "--cloud-profile", metavar="ID", default=None, help="a Browser Use Cloud profile to run signed in as"
     )
     parser.add_argument("--authorize", action="store_true", help="allow submit/pay/delete/send without pausing")
-    parser.add_argument("--secret", action="append", default=[], type=options.env_secret, metavar="NAME=ENV_VAR")
+    parser.add_argument(
+        "--secret",
+        action="append",
+        default=[],
+        type=options.scoped_secret,
+        metavar="NAME=ENV_VAR[@ORIGIN]",
+    )
     parser.add_argument(
         "--bitwarden", metavar="ITEM", help="type this vault login's username and password (unlocked bw CLI)"
     )

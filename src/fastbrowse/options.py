@@ -9,6 +9,7 @@ import argparse
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastbrowse.clients.environment import Settings
 from fastbrowse.models import LocalChrome, StepResult
@@ -33,9 +34,32 @@ def env_secret(pair: str) -> tuple[str, str]:
     return name, variable
 
 
-def unset_variables(pairs: list[tuple[str, str]], environ: Mapping[str, str] = os.environ) -> list[str]:
+def scoped_secret(value: str) -> tuple[str, str, str | None]:
+    """`NAME=ENV_VAR` or `NAME=ENV_VAR@ORIGIN`, with the origin absent when none was given.
+
+    The name is taken first: a secret may be named for the account it belongs to, and `user@example.com=PW@...`
+    has an `@` in its name before the one that introduces the origin.
+
+    Absent means "not stated here", never "any origin": an entry point that has no other source for the scope
+    must refuse it. The CLI takes the start origin in that case and the MCP server has none to take, which is
+    why the choice belongs to them and the parsing belongs here.
+    """
+    named, equals, rest = value.partition("=")
+    variable, at, origin = rest.partition("@")
+    name, variable = env_secret(f"{named}{equals}{variable}")
+    if not at:
+        return name, variable, None
+    parts = urlsplit(origin)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise argparse.ArgumentTypeError(f"expected NAME=ENV_VAR@https://host, got {value!r}")
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        raise argparse.ArgumentTypeError(f"{origin!r} is not an origin: drop everything after the host")
+    return name, variable, origin
+
+
+def unset_variables(pairs: list[tuple[str, str, str | None]], environ: Mapping[str, str] = os.environ) -> list[str]:
     """The variables a `--secret` names that the environment does not hold, so a run fails before a browser opens."""
-    return sorted({variable for _, variable in pairs if variable not in environ})
+    return sorted({variable for _, variable, _ in pairs if variable not in environ})
 
 
 def merged_secrets(values: Mapping[str, str], vault: Mapping[str, str]) -> dict[str, str]:

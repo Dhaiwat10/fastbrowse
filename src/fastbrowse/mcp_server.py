@@ -468,22 +468,15 @@ def is_loopback(host: str) -> bool:
 
 
 def _secret(value: str) -> tuple[str, str, str]:
-    """`NAME=ENV_VAR@ORIGIN`: the CLI's pair, plus the one origin this server will type it on.
+    """`NAME=ENV_VAR@ORIGIN`, where the origin is required: a server has no start page to fall back to.
 
-    The name is taken first: a secret may be named for the account it belongs to, and `user@example.com=PW@...`
-    has an `@` in its name before the one that introduces the origin.
+    One call's start page cannot supply it either. The server holds these secrets across every call, so a
+    scope taken from whichever page a call opened would hand the next caller a credential declared for
+    somebody else's site.
     """
-    named, equals, rest = value.partition("=")
-    variable, at, origin = rest.partition("@")
-    parts = urlsplit(origin)
-    try:
-        name, variable = options.env_secret(f"{named}{equals}{variable}")
-    except argparse.ArgumentTypeError:
-        raise argparse.ArgumentTypeError(f"expected NAME=ENV_VAR@https://host, got {value!r}") from None
-    if not at or parts.scheme not in ("http", "https") or not parts.hostname:
+    name, variable, origin = options.scoped_secret(value)
+    if origin is None:
         raise argparse.ArgumentTypeError(f"expected NAME=ENV_VAR@https://host, got {value!r}")
-    if parts.path not in ("", "/") or parts.query or parts.fragment:
-        raise argparse.ArgumentTypeError(f"{origin!r} is not an origin: drop everything after the host")
     return name, variable, origin_of(origin)
 
 
@@ -526,7 +519,7 @@ async def configure(args: argparse.Namespace, settings: Settings, environ: Mappi
         raise ConfigurationError("Chrome was not found: install it, name it in FASTBROWSE_CHROME, or use --cloud")
     if not args.cloud and chrome.profile is not None and args.max_concurrent > 1:
         raise ConfigurationError("a --profile can be open in one Chrome at a time: drop --max-concurrent or --profile")
-    if missing := options.unset_variables([(name, variable) for name, variable, _ in args.secret], environ):
+    if missing := options.unset_variables(args.secret, environ):
         raise ConfigurationError(f"--secret names unset variables: {', '.join(missing)}")
     secrets = tuple(DeclaredSecret(name, environ[variable], origin) for name, variable, origin in args.secret)
     seen: set[tuple[str, str]] = set()
