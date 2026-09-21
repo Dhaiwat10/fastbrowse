@@ -1,8 +1,10 @@
+import json
+
 import pytest
 
 from fastbrowse.browser.page import _capped
 from fastbrowse.models import Operation
-from fastbrowse.page import Control, pager_link, pages_forward
+from fastbrowse.page import Control, cut_text, pager_link, pages_forward
 
 
 def link(label: str, *, next_page: bool | None = None, i: int = 0) -> Control:
@@ -65,3 +67,13 @@ def test_a_control_that_only_looks_like_a_pager_is_not_one() -> None:
     assert not pager_link(link("next").model_copy(update={"href": None}))
     assert not pager_link(link("next").model_copy(update={"operations": frozenset()}))
     assert pager_link(link("next"))
+
+
+def test_escaped_text_keeps_every_character_that_fits() -> None:
+    # Each character of this costs six once JSON-escaped; subtracting the escaped excess from a count of
+    # source characters cut it to nothing although nine hundred of them fit.
+    text = "東京" * 1000
+    cut = cut_text(text, 6000, json_encoded=True)
+    size = len(json.dumps(cut)) - 2
+    assert size <= 6000
+    assert cut.startswith("東京" * 450) and "characters omitted" in cut

@@ -28,13 +28,20 @@ def cut_text(text: str, max_chars: int, *, json_encoded: bool = False) -> str:
 
     if size(text) <= max_chars:
         return text
-    keep = max_chars
-    while keep > 0:
-        cut = text[:keep] + cut_marker(len(text) - keep)
-        if (excess := size(cut) - max_chars) <= 0:
-            return cut
-        keep -= excess
-    return ""
+
+    def fits(keep: int) -> bool:
+        return size(text[:keep] + cut_marker(len(text) - keep)) <= max_chars
+
+    # The longest prefix that fits with its marker. Escaping makes one character cost up to six, so an excess
+    # measured in encoded characters cannot be subtracted from a count of source characters.
+    low, high = 0, min(len(text), max_chars)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(middle):
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low] + cut_marker(len(text) - low) if low > 0 and fits(low) else ""
 
 
 class Control(Frozen):
