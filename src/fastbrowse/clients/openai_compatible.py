@@ -288,7 +288,8 @@ class OpenAICompatibleLLM:
                             raise LLMRetriesExhausted(
                                 f"LLM response ended mid-JSON at {written} of {body['max_tokens']} output tokens twice"
                             ) from None
-                        short_retried = True
+                        else:
+                            short_retried = True
                         continue
                     if attempt == 1:
                         raise LLMError(f"LLM schema validation failed after one retry: {detail[:1000]}") from None

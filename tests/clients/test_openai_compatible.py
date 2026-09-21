@@ -356,18 +356,26 @@ async def test_json_that_ends_mid_value_short_of_the_cap_is_a_provider_fault_not
     assert caps == [100, 100] and isinstance(error.value, Unavailable)
 
 
-async def test_a_short_reply_after_a_schema_repair_is_still_asked_for_again() -> None:
-    contents = ['{"count":"five"}', '{"count":"cut off', '{"count":5}']
+@pytest.mark.parametrize(
+    "replies",
+    [
+        [('{"count":"five"}', 7), ('{"count":"cut off', 7), ('{"count":5}', 7)],
+        [('{"count":"cut off', 100), ('{"count":"cut off', 7), ('{"count":5}', 7)],
+    ],
+    ids=["after a schema repair", "after the cap grew"],
+)
+async def test_a_short_reply_after_another_retry_is_still_asked_for_again(replies: list[tuple[str, int]]) -> None:
     calls = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
         nonlocal calls
+        content, written = replies[calls]
         calls += 1
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": contents[calls - 1]}, "finish_reason": "stop"}],
-                "usage": {"completion_tokens": 7},
+                "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens": written},
             },
         )
 
