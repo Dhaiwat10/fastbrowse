@@ -737,11 +737,10 @@ async def propose_text_fields_from_notes(
 
 def _compared(notes: Notes, key: str, name: str) -> Evidence | None:
     """The evidence for a name a derived conclusion picks, which quotes nothing itself: the record it compared that
-    was read for that name, or else the first record it compared."""
+    was read for that name. A record read for another name does not evidence this one."""
     facts = {fact_id(fact): fact for fact in notes.facts}
-    records = [facts[k] for k in notes.expand_evidence_ids((key,)) if k in facts and facts[k].evidence is not None]
-    chosen = next((fact for fact in records if _names(fact.text, name)), records[0] if records else None)
-    return None if chosen is None else chosen.evidence
+    records = (facts[k] for k in notes.expand_evidence_ids((key,)) if k in facts)
+    return next((fact.evidence for fact in records if fact.evidence is not None and _names(fact.text, name)), None)
 
 
 def _names(task: str, value: str) -> bool:

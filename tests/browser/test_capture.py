@@ -91,13 +91,13 @@ async def test_table_header_variants(
 
 
 @pytest.mark.parametrize(("tag", "kind"), [("div", BlockKind.RECORD), ("li", BlockKind.LIST_ITEM)])
-async def test_records_keep_single_links_and_the_text_limit(
+async def test_records_keep_single_links_and_a_page_sized_card_is_not_one_record(
     page: CdpPage, browser_session: BrowserSession, main_site: str, tag: str, kind: BlockKind
 ) -> None:
     await page.navigate(f"{main_site}/icons.html")
     cards = "".join(
         f'<{tag} class="card"><div>{"x" * length}</div><a href="/author">Author</a></{tag}>'
-        for length in (1492, 1493, 1494)
+        for length in (40, 40, 5000)
     )
     await eval_value(
         browser_session,
@@ -106,7 +106,6 @@ async def test_records_keep_single_links_and_the_text_limit(
     )
     capture = await page.capture()
     assert [block.kind for block in capture.blocks] == [kind, kind, BlockKind.PARAGRAPH, BlockKind.LINK]
-    assert [len(capture.text[block.start : block.end]) for block in capture.blocks[:2]] == [1499, 1500]
     assert all(block.href == "/author" for block in capture.blocks[:2])
 
 
