@@ -1362,6 +1362,7 @@ class Agent:
         trace(
             "done_check",
             verdict=check.verdict.value,
+            complete=round(check.complete, 3),
             unmet=list(check.unmet),
             requirements={r.id: r.text for r in state.plan.requirements},
         )
