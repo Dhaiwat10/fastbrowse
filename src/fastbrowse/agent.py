@@ -180,7 +180,10 @@ class _RunState:
     recoveries: int = 0
     plan_marks: list[str] = field(default_factory=list[str])
     """One fingerprint of the still-unevidenced requirements per step, for `stagnant_plan`."""
-    edited: set[tuple[Operation, str | None]] = field(default_factory=set[tuple[Operation, str | None]])
+    written: set[tuple[Operation, str | None, str | None]] = field(
+        default_factory=set[tuple[Operation, str | None, str | None]]
+    )
+    """Every value edit the run has made, as operation, target and value. Never cleared: see `_first_edit`."""
     attempts: dict[Signature, _Attempts] = field(default_factory=dict[Signature, "_Attempts"])
     """What became of each action taken from each page state, which is how a cycle is told from progress."""
     last_page: tuple[str, str] | None = None
@@ -526,7 +529,9 @@ class Agent:
             if act.outcome is StepOutcome.EXECUTED and action.text is not None:
                 typed = "<secret>" if action.secret else self._redactor.mask(action.text)
             changed = act.page_changed
-            progressed = act.outcome is StepOutcome.EXECUTED and (changed or self._first_edit(state, decision, label))
+            progressed = act.outcome is StepOutcome.EXECUTED and (
+                changed or self._first_edit(state, decision, label, typed)
+            )
             # Moving between two pages changes the page every time, and a run went round "open the author,
             # back to the list" to its step limit with its stall budget reset at every hop. The same action
             # from the same page a third time is going round, not forward.
@@ -550,7 +555,6 @@ class Agent:
                 effect_now = done.summary
             attempt.idle = act.outcome is StepOutcome.EXECUTED and not effective and decision.operation in _IDLE_CHECKED
         if changed:
-            state.edited.clear()
             state.read_here = False
         state.history.append(
             HistoryEntry(
@@ -739,14 +743,27 @@ class Agent:
         return tuple(ref.name for ref in self._secrets.available() if secret_allowed(ref, origin))
 
     @staticmethod
-    def _first_edit(state: _RunState, decision: Decision, label: str | None) -> bool:
-        """A value edit is progress once per target per page state; re-filling the same field is a loop."""
+    def _first_edit(state: _RunState, decision: Decision, label: str | None, typed: str | None) -> bool:
+        """A value edit is progress once per target per VALUE, for the whole run; re-writing it is a loop.
+
+        Keyed on the value and never cleared, because the previous key -- target alone, cleared on every page
+        change -- was defeated by the action's own cosmetic side effect. A PyPI run filled the search box, hit
+        enter, and the enter did not submit; each fill drew the autocomplete popup, so `page_changed` was true,
+        which cleared the set and made the IDENTICAL next fill a "first" edit again. That reset `unchanged` to
+        zero every time, and the popup opening and closing moved `state_key` too, so the per-page-state repeat
+        guard counted each fill separately as well. Both stall guards were blind for five steps until an
+        escalation happened to say "click the Search button".
+
+        Writing a value a field already holds cannot be progress, whatever the page did -- that is an invariant,
+        not a threshold, so it needs no budget. A genuinely new page reached by a genuinely new action still
+        counts through `changed`, and a CORRECTED value is a different key and still counts here.
+        """
         if decision.operation not in {Operation.FILL, Operation.SELECT, Operation.UPLOAD}:
             return False
-        key = (decision.operation, label)
-        if key in state.edited:
+        key = (decision.operation, label, typed)
+        if key in state.written:
             return False
-        state.edited.add(key)
+        state.written.add(key)
         return True
 
     async def _record_step(self, state: _RunState, step: StepResult) -> None:
