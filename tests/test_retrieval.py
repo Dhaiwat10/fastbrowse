@@ -188,11 +188,11 @@ async def test_read_continues_after_an_unoffered_cite_tracks_coverage_and_cost()
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "r1", "text": "Free", "cites": ["s1"]}],
+                "claims": [{"requirement_id": "r1", "text": "Free", "cite": {"first": "s1", "last": "s1"}}],
                 "answered": True,
             },
             {
-                "claims": [{"requirement_id": "r1", "text": "Costs $12", "cites": ["s1"]}],
+                "claims": [{"requirement_id": "r1", "text": "Costs $12", "cite": {"first": "s1", "last": "s1"}}],
                 "answered": True,
             },
         ]
@@ -215,7 +215,7 @@ async def test_read_reaches_end_and_does_not_evidence_unknown_requirements() -> 
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "invented", "text": "Known fact", "cites": ["s0"]}],
+                "claims": [{"requirement_id": "invented", "text": "Known fact", "cite": {"first": "s0", "last": "s0"}}],
                 "answered": False,
             },
             {"claims": [], "answered": False},
@@ -297,7 +297,7 @@ async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer:
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "license", "text": "MIT", "cites": ["s1"]}],
+                "claims": [{"requirement_id": "license", "text": "MIT", "cite": {"first": "s1", "last": "s1"}}],
                 "answered": True,
             }
         ]
@@ -822,7 +822,7 @@ async def test_a_winner_from_part_of_a_list_is_kept_but_does_not_answer() -> Non
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "r1", "text": "cheapest", "cites": ["s0"]}],
+                "claims": [{"requirement_id": "r1", "text": "cheapest", "cite": {"first": "s0", "last": "s0"}}],
                 "answered": True,
                 "continues": ["r1", "not-asked"],
             }
@@ -869,7 +869,7 @@ async def test_a_later_chunk_saying_the_list_goes_on_reopens_an_earlier_chunks_c
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "r1", "text": "cheapest", "cites": ["s0"]}],
+                "claims": [{"requirement_id": "r1", "text": "cheapest", "cite": {"first": "s0", "last": "s0"}}],
                 "answered": True,
             },
             {"claims": [], "answered": False, "continues": ["r1"]},
@@ -894,13 +894,15 @@ async def test_a_list_that_runs_on_into_the_next_chunk_is_settled_by_the_last_on
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"text": "Virgin $1,200", "cites": ["s0"]}],
+                "claims": [{"text": "Virgin $1,200", "cite": {"first": "s0", "last": "s0"}}],
                 "answered": False,
                 "continues": ["r1"],
             },
             {"claims": [], "answered": False, "continues": ["r1"]},
             {
-                "claims": [{"requirement_id": "r1", "text": "JetBlue at $1,061", "cites": ["s2"]}],
+                "claims": [
+                    {"requirement_id": "r1", "text": "JetBlue at $1,061", "cite": {"first": "s2", "last": "s2"}}
+                ],
                 "answered": True,
             },
         ]
@@ -925,7 +927,7 @@ async def test_a_later_chunk_is_read_against_what_earlier_chunks_of_the_page_fou
                     {
                         "requirement_id": None,
                         "text": "an Einstein quote",
-                        "cites": ["s0"],
+                        "cite": {"first": "s0", "last": "s0"},
                     }
                 ],
                 "answered": False,
@@ -954,11 +956,11 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
         [
             {
                 "claims": [
-                    {"text": "Oak $19", "cites": ["s0"]},
-                    {"text": "Redwood $12", "cites": ["s1"]},
+                    {"text": "Oak $19", "cite": {"first": "s0", "last": "s0"}},
+                    {"text": "Redwood $12", "cite": {"first": "s1", "last": "s1"}},
                     {
                         "text": "Two books on page one, total $31.",
-                        "cites": ["s2"],
+                        "cite": {"first": "s2", "last": "s2"},
                         "draws_on": ["claim:1", "claim:0"],
                     },
                 ],
@@ -973,12 +975,12 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
     llm.responses.append(
         {
             "claims": [
-                {"text": "Pine $7", "cites": ["s0"]},
-                {"text": "Elm $15", "cites": ["s1"]},
+                {"text": "Pine $7", "cite": {"first": "s0", "last": "s0"}},
+                {"text": "Elm $15", "cite": {"first": "s1", "last": "s1"}},
                 {
                     "requirement_id": "r",
                     "text": answer,
-                    "cites": ["s0"],
+                    "cite": {"first": "s0", "last": "s0"},
                     "draws_on": ["claim:1", earlier[2], "claim:0", earlier[0]],
                 },
             ],
@@ -1020,9 +1022,9 @@ async def test_a_count_the_page_does_not_state_is_derived_and_judged_by_its_reco
         [
             {
                 "claims": [
-                    {"text": "Oak $19", "cites": ["s0"]},
-                    {"text": "Pine $7", "cites": ["s1"]},
-                    {"requirement_id": "r", "text": "Two trees", "cites": [], "draws_on": ["claim:0", "claim:1"]},
+                    {"text": "Oak $19", "cite": {"first": "s0", "last": "s0"}},
+                    {"text": "Pine $7", "cite": {"first": "s1", "last": "s1"}},
+                    {"requirement_id": "r", "text": "Two trees", "cite": None, "draws_on": ["claim:0", "claim:1"]},
                 ],
                 "answered": True,
             }
@@ -1045,15 +1047,15 @@ async def test_basis_references_cannot_name_rejected_or_later_claims() -> None:
         [
             {
                 "claims": [
-                    {"text": "Forged", "cites": ["s9"]},
-                    {"text": "A $3", "cites": ["s0"]},
+                    {"text": "Forged", "cite": {"first": "s9", "last": "s9"}},
+                    {"text": "A $3", "cite": {"first": "s0", "last": "s0"}},
                     {
                         "requirement_id": "r",
                         "text": "A is cheaper",
-                        "cites": ["s0"],
+                        "cite": {"first": "s0", "last": "s0"},
                         "draws_on": ["claim:0", "claim:1", "claim:1", "claim:3", "invented:0:99"],
                     },
-                    {"text": "B $5", "cites": ["s1"]},
+                    {"text": "B $5", "cite": {"first": "s1", "last": "s1"}},
                 ],
                 "answered": True,
             }
@@ -1090,7 +1092,7 @@ async def test_mixed_read_routes_keep_provenance_and_narrow_the_llm_request() ->
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "names", "text": "One and Two", "cites": ["s1"]}],
+                "claims": [{"requirement_id": "names", "text": "One and Two", "cite": {"first": "s1", "last": "s1"}}],
                 "answered": True,
             }
         ]
@@ -1103,21 +1105,25 @@ async def test_mixed_read_routes_keep_provenance_and_narrow_the_llm_request() ->
     assert not notes.evidenced("fare")
     assert notes.evidenced("version") and notes.evidenced("names")
     request = llm.calls[0][1][-1].content
-    assert "# Requirement ids\nnames\n" in request
+    assert request.endswith("# Requirement ids\nnames")
     assert "Version 1.2.3" in request.split("# Collected evidence\n")[1]
 
 
-@pytest.mark.parametrize("cites", [["s0", "s2"], ["unverified " * 50], []], ids=["gap", "invented", "none"])
-async def test_the_reader_keeps_only_claims_citing_consecutive_offered_blocks(
-    cites: list[JsonValue], caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    "cite",
+    [{"first": "s2", "last": "s0"}, {"first": "unverified " * 50, "last": "s0"}, None],
+    ids=["reversed", "invented", "none"],
+)
+async def test_the_reader_keeps_only_claims_citing_an_offered_run_of_blocks(
+    cite: JsonValue, caplog: pytest.LogCaptureFixture
 ) -> None:
     page = capture((BlockKind.PARAGRAPH, "A $3"), (BlockKind.PARAGRAPH, "B $5"), (BlockKind.PARAGRAPH, "C $7"))
     llm = ScriptedLLM(
         [
             {
                 "claims": [
-                    {"requirement_id": "r", "text": "Rejected", "cites": cites},
-                    {"requirement_id": "r", "text": "A and B", "cites": ["s0", "s1"]},
+                    {"requirement_id": "r", "text": "Rejected", "cite": cite},
+                    {"requirement_id": "r", "text": "A, B and C", "cite": {"first": "s0", "last": "s2"}},
                 ],
                 "answered": True,
             }
@@ -1127,7 +1133,7 @@ async def test_the_reader_keeps_only_claims_citing_consecutive_offered_blocks(
     with caplog.at_level("DEBUG", logger="fastbrowse.retrieval"):
         result = await read(llm, page, "Find the prices", ["r"], notes)
     assert result.rejected_claims == 1
-    assert [evidence.quote for evidence in notes.evidence.values()] == ["A $3\n\nB $5"]
+    assert [evidence.quote for evidence in notes.evidence.values()] == ["A $3\n\nB $5\n\nC $7"]
     assert "read rejected claim" in caplog.text and "unverified " * 5 not in caplog.text
 
 
