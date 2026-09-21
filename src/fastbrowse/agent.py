@@ -1223,7 +1223,14 @@ class Agent:
         return choice == "accept"
 
     async def _read_before_interaction(self, state: _RunState, observation: Observation, decision: Decision) -> bool:
-        if decision.read_assessment is not ReadAssessment.EVIDENCE or decision.operation in _NOT_ACTING:
+        # A read takes in the whole page, so a scroll over one never read only spends steps: Jev judges evidence from
+        # the viewport, and scrolled a country list for Mongolia until recovery ran out and the run stopped stuck.
+        unread_scroll = decision.operation is Operation.SCROLL and not any(
+            key[0] == observation.document_key for key in state.reads
+        )
+        if decision.operation in _NOT_ACTING or (
+            decision.read_assessment is not ReadAssessment.EVIDENCE and not unread_scroll
+        ):
             return False
         plan = await state.await_plan()
         if not _unread(plan, state.notes):

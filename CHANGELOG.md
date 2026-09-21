@@ -11,6 +11,11 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A page is read before it is scrolled.** A read takes in the whole page, so scrolling one nobody has read only
+  spends steps: a lookup for Mongolia on a long country list scrolled until recovery ran out and stopped stuck
+  with the answer on the page. Once a page is read, scrolling it goes ahead, as a list that draws more on scroll
+  needs.
+
 - **A reply the provider cut short is an outage, not a truncation.** JSON that ends mid-value short of the
   output cap is asked for again at the same cap; a second one ends the run `unavailable`, naming how many
   tokens came back. Only a reply that used the cap gets more room and, if cut again, is reported as truncated.
