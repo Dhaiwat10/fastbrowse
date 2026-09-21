@@ -88,17 +88,17 @@ async def test_ultrafast_passes_only_on_a_correct_outcome_it_called_done(
 
     async def ultrafast_arm(
         _: LiveTask, __: httpx.AsyncClient, *, record: Path | None
-    ) -> tuple[Outcome, dict[str, object]]:
+    ) -> tuple[Outcome, live.ArmReport]:
         # jev-ultrafast has no answer; an outcome that has one stands in for a grader that needs none.
         outcome = Outcome("Attention Is All You Need", None, "https://arxiv.org/abs/1706.03762")
-        return outcome, {"status": status, "dollars": 0.001, "seconds": 3.0}
+        return outcome, live.ArmReport(status=status, dollars=0.001, seconds=3.0)
 
     monkeypatch.setattr(live, "ultrafast_arm", ultrafast_arm)
     async with httpx.AsyncClient() as http:
         row = await live.run_arm("ultrafast", arxiv, http, Path(), bitwarden=False, record=None)
-    assert row["correct"] is True
-    assert row["passed"] is passed
-    assert row["seconds"] == 3.0
+    assert row.correct is True
+    assert row.passed is passed
+    assert row.seconds == 3.0
 
 
 def test_gateway_answers_take_the_direct_api_shape() -> None:
@@ -350,4 +350,4 @@ async def test_a_hosted_session_whose_output_fails_the_schema_keeps_its_cost(mon
     monkeypatch.setattr(live, "load_settings", lambda: SimpleNamespace(browser_key=lambda: "key"))
     outcome, report = await live.hosted_arm(task("pypi-newer"), httpx.AsyncClient(), record=None)
     assert outcome.answer == "[Session cost limit reached]"
-    assert report["dollars"] == 0.37 and report["status"] == "stopped"
+    assert report.dollars == 0.37 and report.status == "stopped"
