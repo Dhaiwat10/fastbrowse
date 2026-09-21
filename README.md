@@ -74,7 +74,11 @@ where hosted Browser Use is faster on some. Google Flights took 109.3s here, slo
 
 ## Try it
 
-Needs [uv](https://docs.astral.sh/uv/) and a [Browser Use Cloud](https://cloud.browser-use.com) key (`BROWSER_USE_API_KEY`), or Chrome for `--local`; uv fetches Python itself (3.13 or newer).
+Needs [uv](https://docs.astral.sh/uv/); uv fetches Python itself (3.13 or newer). We recommend a
+[Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`), which runs use by default: it
+passes bot checks a fresh local Chrome fails, and has none of desktop Chrome's own popups, such as its
+leaked-password warning, which sit outside the page where the agent cannot close them. Local Chrome is fully
+supported with `--local`.
 
 ```sh
 export AI_GATEWAY_API_KEY=...   # or TYPESAFE_API_KEY, for Jev
@@ -193,7 +197,7 @@ More in [docs/design.md](docs/design.md).
 | Reads pages | yes | no | yes, every claim cited |
 | Signing in | yes | password fields excluded | `--secret` or a Bitwarden vault item; models see names only |
 | Irreversible actions | not gated | not gated | stop unless `--authorize` |
-| Browser | cloud | local Chrome, your profile | local Chrome or cloud |
+| Browser | cloud | local Chrome, your profile | cloud (recommended), or local Chrome |
 
 jev-ultrafast is Browser Use's navigation agent; fastbrowse
 shares its core techniques. Its column describes `main` as of 2026-09-18.
