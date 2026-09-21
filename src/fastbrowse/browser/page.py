@@ -862,6 +862,40 @@ class CdpPage(Page):
             dialog.cancel()
             await asyncio.gather(task, dialog, return_exceptions=True)
 
+    async def redrawn(self, observation: Observation, timeout_seconds: float, *, target_id: str | None = None) -> bool:
+        last = self._last
+        if last is None or last.page_key != observation.page_key or self._session.pending_dialog() is not None:
+            return False
+        if target_id is not None:
+            if (target := last.controls.get(target_id)) is None:
+                return False
+            session_id, ids = target[0], [target[2]]
+        else:
+            session_id = self._session.active_session_id
+            ids = [local_id for sid, _frame, local_id, _guard in last.controls.values() if sid == session_id]
+        if not ids:
+            return False
+        # The comparison `act` makes, `registry.guard` against the guard observed, in the frame that observed it.
+        # A changed or vanished control, or a new document, is a redraw.
+        check = (
+            "(ids => { const r = window.__fastbrowse; if (!r?.observed) return true; "
+            "return ids.some(id => r.observed.has(id) && JSON.stringify(r.guard(r.nodes.get(id))) !== "
+            f"r.observed.get(id)); }})({json.dumps(ids)})"
+        )
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                changed = await self._evaluate(session_id, check)
+            except BrowserError:
+                # A navigation destroys the context mid-check; `act` refuses the old controls on its own.
+                return False
+            if changed:
+                with suppress(BrowserError):
+                    await self._settled_fingerprint(_SETTLE_SECONDS)
+                return True
+            await asyncio.sleep(_SETTLE_POLL_SECONDS)
+        return False
+
     async def screenshot(self) -> bytes:
         """Capture the active tab, activating it only if a background tab produces no frame to capture.
 

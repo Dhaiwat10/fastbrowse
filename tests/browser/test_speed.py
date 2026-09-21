@@ -166,6 +166,26 @@ async def test_settling_tracks_same_length_mutations(
     )
 
 
+async def test_redraw_after_settling_is_seen_before_acting(
+    page: CdpPage, browser_session: BrowserSession, settling_site: str
+) -> None:
+    # Google Flights' date picker draws its prices about 400ms after it has gone quiet, which changes the text
+    # authorizing its Done button: a decision on the quiet picker would be refused as stale.
+    await page.navigate(settling_site)
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.body.innerHTML = '<div role=\"dialog\"><span>19</span><button>Done</button></div>'; "
+        "setTimeout(() => { document.querySelector('span').textContent = '19 $500'; }, 400);",
+    )
+    blank = await page.observe()
+    assert await page.redrawn(blank, 3, target_id=find(blank, "Done").id)
+    priced = await page.observe()
+    assert not await page.redrawn(priced, 0.3)
+    done = await page.act(Action(operation=Operation.CLICK, target_id=find(priced, "Done").id), priced)
+    assert done.outcome is StepOutcome.EXECUTED, done.detail
+
+
 async def test_observe_still_reads_hydration_after_settling(
     page: CdpPage, browser_session: BrowserSession, settling_site: str
 ) -> None:

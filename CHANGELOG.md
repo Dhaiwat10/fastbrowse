@@ -11,6 +11,9 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A decision the page redraws under is dropped at once.** While Jev decides and gates a click, the run watches
+  the controls on offer; if one changes, as Google Flights' date picker does when its prices arrive late, it
+  decides again on the settled page instead of clicking into a stale refusal.
 - **A guessed shortcut the site does not serve is skipped.** A direct address that answers 4xx/5xx sends the
   run back to its start page instead of reading an error page and spending a BACK to leave it.
 - **Runs use a Browser Use Cloud browser by default** (`BROWSER_USE_API_KEY`). `--local` runs local Chrome;

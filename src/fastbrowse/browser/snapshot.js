@@ -436,6 +436,8 @@
 
   const guards = {};
   for (const c of controls) guards[c.id] = registry.guard(registry.nodes.get(c.id));
+  // Kept so a later check can ask whether any of these controls changed without sending the guards back.
+  registry.observed = new Map(controls.map(c => [c.id, JSON.stringify(guards[c.id])]));
   const field_state = [...document.querySelectorAll('input,textarea,select')].filter(safe)
     .map(e => [identity(e), reveal(e), e.checked, e.selectedIndex, e.disabled, e.readOnly]);
   // Compare meaning and identity for the page_key fingerprint; geometry is re-resolved just before input.

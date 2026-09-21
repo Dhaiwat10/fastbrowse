@@ -9,7 +9,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence, Set
+from collections.abc import Coroutine, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
 
@@ -98,6 +98,8 @@ _INTERSTITIAL_SECONDS = 12.0
 # loads in one to two, so a proposal later than this is an outlier costing more than it saves.
 _SHORTCUT_GRACE_SECONDS = 1.0
 _INTERSTITIAL_POLL_SECONDS = 0.5
+_REDRAW_WATCH_SECONDS = 10.0
+"""Longer than deciding takes: a watch ends with the work it watches, and this only bounds a stuck one."""
 _NOT_ACTING = frozenset({Operation.READ, Operation.DONE})
 _REPEATS_BEFORE_CYCLE = 2
 """Times one action may be taken from one page and still count as progress. Scrolling is exempt: a long page
@@ -223,6 +225,8 @@ class _RunState:
     """Next pages opened by code this run."""
     first_url: str | None = None
     """The first page the run looked at, which is what a task's "this page" means once the run has moved on."""
+    redecided: bool = False
+    """A decision was dropped because the page redrew under it, so nothing is watched until an action is taken."""
     continuing: set[str] = field(default_factory=set[str])
     """Requirements the reader said range over a list that goes on past the page it read. A scalar choice cannot
     answer one of those, so it is not asked about them again on the next page."""
@@ -353,7 +357,11 @@ class Agent:
             fresh = page != state.last_page
             context = self._context(state, secrets, check_login=fresh and not secrets, check_bot=fresh)
             state.last_page = page
-            decision = await decide(self._jev, observation, context, self._config, ledger=state.ledger)
+            decision = await self._unless_redrawn(
+                state, decide(self._jev, observation, context, self._config, ledger=state.ledger), observation, None
+            )
+            if decision is None:
+                continue
             bot_check = (decision.bot_check or 0.0) > self._config.thresholds.bot_check_above
             if bot_check or (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
                 # A wall offering nothing to act on cannot be signed into. It is a bot check such as PyPI's
@@ -450,6 +458,43 @@ class Agent:
                     await self._recover(state, observation, _read_exhausted(state))
             except _Unsure as unsure:
                 await self._recover(state, observation, str(unsure))
+
+    async def _unless_redrawn[T](
+        self, state: _RunState, work: Coroutine[None, None, T], observation: Observation, target: Control | None
+    ) -> T | None:
+        """`work`'s result, or None when the page redrew under it: `target`, or with none any control offered.
+
+        A page can draw after it settles, and nothing says it will: picking a day in Google Flights' date picker
+        blanks the prices, the page waits about 400ms with no request, spinner or mutation, and then fetches and
+        draws them. Those prices are the text around the picker's Done button, which authorizes the click, so a
+        Done chosen and gated on the blank picker was refused as stale in nearly every run and decided again.
+        Watching while Jev decides and gates drops the work as soon as it is doomed, and the next decision is made
+        on the settled page. Only one drop per action: a control that never stops changing is still acted on.
+        """
+        working = asyncio.create_task(work)
+        watching = (
+            None
+            if state.redecided
+            else asyncio.create_task(
+                self._page.redrawn(
+                    self._raw_observation or observation,
+                    _REDRAW_WATCH_SECONDS,
+                    target_id=target.id if target else None,
+                )
+            )
+        )
+        try:
+            if watching is not None:
+                await asyncio.wait({working, watching}, return_when=asyncio.FIRST_COMPLETED)
+                if not working.done() and watching.result():
+                    trace("redecide", url=self._redactor.redact(observation.url))
+                    state.redecided = True
+                    return None
+            return await working
+        finally:
+            if watching is not None:
+                await _discard(watching)
+            await _discard(working)
 
     async def _first_page(self, task: str, ledger: Ledger) -> str:
         """The page to begin on when the caller named none.
@@ -570,7 +615,12 @@ class Agent:
                 effect_now += f" {_read_exhausted(state)}"
             act = ActResult(outcome=StepOutcome.EXECUTED, page_changed=False, detail=effect_now)
         else:
-            action = await self._action(state, observation, decision, decided_by)
+            action = await self._unless_redrawn(
+                state, self._action(state, observation, decision, decided_by), observation, decision.target
+            )
+            if action is None:
+                return False
+            state.redecided = False
             if action.secret:
                 # Held from the keystrokes on: a page may mirror the value, and only the next reading shows it.
                 self._page.withhold_frames(True)
