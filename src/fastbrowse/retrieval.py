@@ -879,9 +879,10 @@ def assemble_answer(
     *,
     dropped_claims: int = 0,
 ) -> ComposedAnswer:
-    claims = tuple(
-        claim.model_copy(update={"evidence_ids": notes.expand_evidence_ids(claim.evidence_ids)}) for claim in claims
-    )
+    claims = tuple(claims)
+    # A claim keeps what it cited, which is what it states; the records its facts were derived from are shown
+    # with it, so the caller and the claim check see what a total or winner was compared against.
+    supports = [notes.expand_evidence_ids(claim.evidence_ids) for claim in claims]
     known = {
         evidence_id(fact.evidence): Citation(
             id=index,
@@ -893,10 +894,10 @@ def assemble_answer(
         )
         for index, fact in enumerate(notes.facts, 1)
     }
-    cited = {key for claim in claims for key in claim.evidence_ids}
+    cited = {key for support in supports for key in support}
     linked = []
-    for claim in claims:
-        links = " ".join(f"[{known[key].id}](<{known[key].deep_link}>)" for key in dict.fromkeys(claim.evidence_ids))
+    for claim, support in zip(claims, supports, strict=True):
+        links = " ".join(f"[{known[key].id}](<{known[key].deep_link}>)" for key in support)
         linked.append(f"{claim.text} {links}")
     return ComposedAnswer(
         answer="\n\n".join(claim.text for claim in claims),
@@ -1009,7 +1010,8 @@ def claim_check_questions(
     known = notes.evidence
     for index, claim in enumerate(composed.claims):
         evidence = "\n".join(
-            known[key].model_dump_json() if key in known else f"MISSING: {key}" for key in claim.evidence_ids
+            known[key].model_dump_json() if key in known else f"MISSING: {key}"
+            for key in notes.expand_evidence_ids(claim.evidence_ids)
         )
         for issue in ("unsupported", "contradicted"):
             questions[f"{issue}_{index}"] = NoulQuestion(

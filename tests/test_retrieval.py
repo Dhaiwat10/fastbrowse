@@ -752,7 +752,7 @@ async def test_a_doubted_claim_is_dropped_only_if_the_rest_still_answers(omitted
 async def test_pruning_the_only_claim_for_a_requirement_is_an_omission() -> None:
     from fastbrowse.jev import Evaluation, NoulAnswer
     from fastbrowse.models import CostBasis, CostComponent, CostLine, Evidence
-    from fastbrowse.retrieval import Claim, ComposedAnswer
+    from fastbrowse.retrieval import Claim, assemble_answer
     from fastbrowse.verification import check_claims
 
     class Jev:
@@ -775,7 +775,11 @@ async def test_pruning_the_only_claim_for_a_requirement_is_an_omission() -> None
         )
         return Fact(reader=FactReader.LLM, requirement_id=requirement, text=quote, evidence=evidence)
 
-    notes = Notes((fact("r1", 0, "A Year in Provence"), fact("r2", 40, "£56.88")))
+    # The price was read as the winner's price, so its fact draws on the winner; citing the price must still not
+    # count as stating which book won.
+    winner = fact("r1", 0, "A Year in Provence")
+    price = fact("r2", 40, "£56.88").model_copy(update={"basis": (evidence_id(winner.evidence),)})
+    notes = Notes((winner, price))
     requirements = (
         Requirement(id="r1", text="Which book is the most expensive?", kind=RequirementKind.INFORMATION),
         Requirement(id="r2", text="What does it cost?", kind=RequirementKind.INFORMATION),
@@ -784,7 +788,7 @@ async def test_pruning_the_only_claim_for_a_requirement_is_an_omission() -> None
         Claim(text="The most expensive is A Year in Provence.", evidence_ids=("c:0:18",)),
         Claim(text="It costs £56.88.", evidence_ids=("c:40:46",)),
     )
-    composed = ComposedAnswer(answer="unused", linked_answer="unused", claims=claims, requirements=requirements)
+    composed = assemble_answer(claims, notes, requirements)
     assert await check_claims(Jev(), composed, notes, Thresholds()) is None
 
 
@@ -949,7 +953,7 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
     else:
         result = draft_answer(plan, notes)
     assert result is not None and result.answer == answer
-    assert result.claims[0].evidence_ids == keys
+    assert notes.expand_evidence_ids(result.claims[0].evidence_ids) == keys
     assert [citation.quote for citation in result.citations] == [fact.evidence.quote for fact in notes.facts]
     assert [citation.id for citation in result.citations] == list(range(1, 6))
     for citation in result.citations:
