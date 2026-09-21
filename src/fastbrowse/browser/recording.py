@@ -56,11 +56,12 @@ class Recording:
         self._path = path
         self._frame: bytes | None = None
         self._frame_at = 0.0
-        self._written = 0
         self._casting: str | None = None
         self._ffmpeg: asyncio.subprocess.Process | None = None
         self._ticker: asyncio.Task[None] | None = None
         self._started = time.monotonic()
+        # Monotonic times. The video starts at its first frame, which the browser sends some time after entry.
+        self._first_frame_at: float | None = None
         self._captions: list[tuple[float, str]] = []
         self._card_at: float | None = None
         self._scratch = tempfile.TemporaryDirectory(prefix="fastbrowse-recording-")
@@ -100,10 +101,14 @@ class Recording:
         finally:
             self._scratch.cleanup()
 
+    @property
+    def _plain_path(self) -> Path:
+        return self._path.with_suffix(".plain" + self._path.suffix)
+
     async def _close(self) -> None:
         if self._ffmpeg is None or self._ffmpeg.stdin is None:
             return
-        if not self._written:
+        if self._first_frame_at is None:
             self._ffmpeg.kill()
             await self._ffmpeg.wait()
             logger.warning("the browser sent no frames, so nothing was recorded to %s", self._path)
@@ -113,37 +118,44 @@ class Recording:
         if self._ffmpeg.returncode != 0:
             logger.warning("ffmpeg could not write %s: %s", self._path, stderr.decode(errors="replace").strip()[:400])
             return
-        await self._finish()
-
-    @property
-    def plain_path(self) -> Path:
-        """The same video without step captions, next to the captioned one."""
-        return self._path.with_suffix(".plain" + self._path.suffix)
+        await self._finish(self._first_frame_at)
 
     def caption(self, step: StepResult) -> None:
         """Caption `step` from when its action began; it arrives once the step is over."""
-        began = time.monotonic() - self._started - step.duration_ms / 1000
-        self._captions.append((max(0.0, began), f"{step.index + 1} · {_describe(step)}"))
+        self._captions.append((time.monotonic() - step.duration_ms / 1000, f"{step.index + 1} · {_describe(step)}"))
 
-    async def _finish(self) -> None:
+    async def _finish(self, origin: float) -> None:
         """Encode the final video twice from the lossless pass: with step captions, and plain."""
         subtitles = Path(self._scratch.name, "steps.srt")
-        end = self._card_at if self._card_at is not None else time.monotonic() - self._started
         # A run that opens straight onto its answer takes no steps, and has no captions to end.
-        starts = [at for at, _ in self._captions]
-        ends = [*starts[1:], end][: len(starts)]
+        timed = [*self._captions, (self._card_at or time.monotonic(), "")]
         cues = [
-            f"{number}\n{_srt_time(at)} --> {_srt_time(until)}\n{text}\n"
-            for number, ((at, text), until) in enumerate(zip(self._captions, ends, strict=True), 1)
+            # libass reads `{...}` as a style override, so a page's braces are escaped to stay text.
+            f"{_srt_time(at - origin)} --> {_srt_time(until - origin)}\n{text.replace('{', '\\{')}\n"
+            for (at, text), (until, _) in itertools.pairwise(timed)
             if until > at
         ]
-        await asyncio.to_thread(subtitles.write_text, "\n".join(cues), encoding="utf-8")
+        await asyncio.to_thread(
+            subtitles.write_text, "\n".join(f"{n}\n{cue}" for n, cue in enumerate(cues, 1)), encoding="utf-8"
+        )
         # BorderStyle 3 draws a box behind the text, coloured by OutlineColour (alpha first, 00 opaque).
         style = "Fontsize=10,BorderStyle=3,Outline=6,Shadow=0,OutlineColour=&H50000000,MarginV=16,Alignment=2"
-        # H.264 needs even dimensions, and yuv420p is what phones and social sites play.
         # libass cannot open an empty subtitle file. The filter names it relative to ffmpeg's working directory:
         # an absolute path's drive colon and backslashes are filter syntax, and a Windows run failed on them.
         burn = f"subtitles={subtitles.name}:force_style='{style}'" if cues else "null"
+        error = await self._encode(burn)
+        if error and cues:
+            # An ffmpeg built without libass has no subtitles filter; the plain video is still worth keeping.
+            logger.warning("ffmpeg could not caption %s, so it is written without captions: %s", self._path, error)
+            error = await self._encode("null")
+        if error:
+            logger.warning("ffmpeg could not write %s: %s", self._path, error)
+            return
+        self.outputs = (self._path, self._plain_path)
+
+    async def _encode(self, burn: str) -> str | None:
+        """Write both videos through `burn` on the captioned one; return ffmpeg's error, removing partial files."""
+        # H.264 needs even dimensions, and yuv420p is what phones and social sites play.
         graph = f"[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,split=2[plain][steps];[steps]{burn}[captioned]"
         # Page text is the subject of a shared clip; x264's default quality blurs small type.
         encode = ("-c:v", "libx264", "-crf", "18", "-preset", "slow", "-movflags", "+faststart")
@@ -151,19 +163,30 @@ class Recording:
             self._ffmpeg_path,
             *("-loglevel", "error", "-y", "-i", str(self._uncaptioned), "-filter_complex", graph),
             *("-map", "[captioned]", *encode, str(self._path.absolute())),
-            *("-map", "[plain]", *encode, str(self.plain_path.absolute())),
+            *("-map", "[plain]", *encode, str(self._plain_path.absolute())),
             stderr=asyncio.subprocess.PIPE,
             cwd=self._scratch.name,
         )
-        _, stderr = await process.communicate()
-        outputs = (self._path, self.plain_path)
-        if process.returncode != 0:
-            logger.warning("ffmpeg could not caption %s: %s", self._path, stderr.decode(errors="replace").strip()[:400])
-            # A partial file looks like a video until it is played.
-            for output in outputs:
+        try:
+            _, stderr = await process.communicate()
+        except asyncio.CancelledError:
+            process.kill()
+            await process.wait()
+            self._remove_outputs()
+            raise
+        if process.returncode == 0:
+            return None
+        self._remove_outputs()
+        return stderr.decode(errors="replace").strip()[:400] or f"exit status {process.returncode}"
+
+    def _remove_outputs(self) -> None:
+        # A partial file looks like a video until it is played. Removal is best effort: a video is never worth
+        # the run's result, and a directory squatting on the name must not raise out of the run.
+        for output in (self._path, self._plain_path):
+            try:
                 output.unlink(missing_ok=True)
-            return
-        self.outputs = outputs
+            except OSError as error:
+                logger.warning("could not remove the partial video %s: %s", output, error)
 
     async def show_result(self, task: str, result: RunResult) -> None:
         """End the video on the task and its outcome, in the tab being recorded."""
@@ -180,8 +203,7 @@ class Recording:
             for citation in result.citations
             if citation.id in cited
         )
-        self._card_at = time.monotonic() - self._started
-        seconds = self._card_at
+        self._card_at = time.monotonic()
         card = (
             "<meta charset=utf-8><body style='margin:0;height:100vh;display:grid;place-content:center;gap:28px;"
             "grid-template-columns:minmax(0,1fr);padding:0 8vw;background:#0d1117;color:#e6edf3;"
@@ -189,7 +211,7 @@ class Recording:
             f"<div style='color:#8b949e'>{html.escape(task)}</div>"
             f"<div style='font-size:40px;font-weight:600'>{answer}</div>"
             + (f"<div style='display:grid;gap:6px;color:#8b949e;font-size:20px'>{sources}</div>" if sources else "")
-            + f"<div style='color:#3fb950'>{html.escape(result.status.value)} in {seconds:.1f}s, "
+            + f"<div style='color:#3fb950'>{html.escape(result.status.value)} in {self._card_at - self._started:.1f}s, "
             f"{len(result.steps)} steps, ${result.cost.known_dollars:.4f}</div></body>"
         )
         await self._session.client.send_raw(
@@ -220,7 +242,8 @@ class Recording:
             if self._frame is not None:
                 self._ffmpeg.stdin.write(self._frame)
                 await self._ffmpeg.stdin.drain()
-                self._written += 1
+                if self._first_frame_at is None:
+                    self._first_frame_at = time.monotonic()
             await asyncio.sleep(max(0.0, started + (frame + 1) / _FPS - time.monotonic()))
 
     async def _cast(self, session_id: str) -> None:
