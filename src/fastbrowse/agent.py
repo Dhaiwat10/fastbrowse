@@ -529,9 +529,11 @@ class Agent:
             if act.outcome is StepOutcome.EXECUTED and action.text is not None:
                 typed = "<secret>" if action.secret else self._redactor.mask(action.text)
             changed = act.page_changed
-            progressed = act.outcome is StepOutcome.EXECUTED and (
-                changed or self._first_edit(state, decision, label, typed)
-            )
+            # A value edit answers "was this progress" itself, and its answer beats `changed`: the popup a fill
+            # draws IS a page change, so `changed` alone kept crediting the identical re-fill even once the
+            # written-value check had stopped doing so. `changed` decides every other operation.
+            edit = self._edit_progress(state, decision, label, typed)
+            progressed = act.outcome is StepOutcome.EXECUTED and (changed if edit is None else edit)
             # Moving between two pages changes the page every time, and a run went round "open the author,
             # back to the list" to its step limit with its stall budget reset at every hop. The same action
             # from the same page a third time is going round, not forward.
@@ -743,8 +745,10 @@ class Agent:
         return tuple(ref.name for ref in self._secrets.available() if secret_allowed(ref, origin))
 
     @staticmethod
-    def _first_edit(state: _RunState, decision: Decision, label: str | None, typed: str | None) -> bool:
-        """A value edit is progress once per target per VALUE, for the whole run; re-writing it is a loop.
+    def _edit_progress(state: _RunState, decision: Decision, label: str | None, typed: str | None) -> bool | None:
+        """Whether a value edit was progress, or None when this operation is not one and `changed` decides.
+
+        A value edit is progress once per target per VALUE, for the whole run; re-writing it is a loop.
 
         Keyed on the value and never cleared, because the previous key -- target alone, cleared on every page
         change -- was defeated by the action's own cosmetic side effect. A PyPI run filled the search box, hit
@@ -759,7 +763,7 @@ class Agent:
         counts through `changed`, and a CORRECTED value is a different key and still counts here.
         """
         if decision.operation not in {Operation.FILL, Operation.SELECT, Operation.UPLOAD}:
-            return False
+            return None
         key = (decision.operation, label, typed)
         if key in state.written:
             return False
