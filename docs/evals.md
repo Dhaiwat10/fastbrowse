@@ -149,8 +149,8 @@ Per category, median cost and time:
 | checkout | 3/3, 36.3s, $0.0131 | 3/3, 173.9s, $1.1561 | 88x |
 | widget | 3/3, 71.7s, $0.0279 | 3/3, 38.5s, $0.4119 | 15x |
 
-**Reading it.** Reliability is a tie: 41/42 against 42/42, and the one failure is ours. The cost difference
-is the finding, and it widens with how much a task does, because Jev picks each action from the controls
+**Reading it.** Reliability is not the difference: 41/42 against 42/42, so we are one task behind and that
+failure is ours. The cost difference is the finding, and it widens with how much a task does, because Jev picks each action from the controls
 already on the page - a step is a classification, not a generation. Time is close on the whole suite and goes
 both ways per task: the sign-ins and the checkout are three to five times faster here, a simple lookup is a
 second or two apart, and Google Flights is nearly twice as fast there.

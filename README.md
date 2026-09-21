@@ -43,9 +43,9 @@ finished, so these figures compare the agents rather than their budgets.
 
 The whole suite cost $0.35 here and $22.28 there.
 
-**Reliability is a tie.** There is no reliability advantage to claim on this suite: Browser Use passes every
-task, and the one failure in the table is ours (`saucedemo-locked-out`, one pass of three). Cost is the
-difference, and it is the whole difference.
+**Reliability is not the difference.** We are one task behind, not level: Browser Use passes every task, and
+the one failure in the table is ours (`saucedemo-locked-out`, one pass of three). Cost is the difference, and
+it is the whole difference.
 
 **Where the cost difference comes from.** It grows with how much a task does: 63x on a lookup, 88x on the
 checkout, 182x on the sign-ins. Jev picks each action from the controls already on the page, so a step costs a
