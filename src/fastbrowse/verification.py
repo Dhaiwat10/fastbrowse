@@ -46,6 +46,8 @@ class DoneCheck(Frozen):
     complete: float
     unmet: tuple[str, ...]
     """Requirement ids that are not satisfied or not evidenced."""
+    doubted: tuple[str, ...]
+    """Requirement ids Jev did not confidently confirm, which the verifier must see shown rather than assume."""
     answer: ComposedAnswer | None
     """The offered draft when Jev judged it already answers the task, so no composer needs to run."""
     cost: CostLine
@@ -194,13 +196,18 @@ async def check_done(
     # Every requirement confirmed one by one is stronger evidence than the strict holistic question alone,
     # which asks about the whole task at once and doubts a right page as often as it confirms it.
     # An answer Jev did not give confirms nothing, and a task with nothing to do keeps the verifier.
-    doubts = [evaluation.answers.get(f"unmet_{r.id}") for r in plan.requirements]
-    confirmed = bool(doubts) and all(
-        isinstance(doubt, NoulAnswer) and doubt.probability < thresholds.requirement_confirmed_below for doubt in doubts
+    doubted = tuple(
+        r.id
+        for r in plan.requirements
+        if not (
+            isinstance(doubt := evaluation.answers.get(f"unmet_{r.id}"), NoulAnswer)
+            and doubt.probability < thresholds.requirement_confirmed_below
+        )
     )
+    confirmed = bool(plan.requirements) and not doubted
     # Jev reliably confirms a visible result but is too strict to reject one on its own, so apart from
     # information nobody has read, doubt goes to the verifier rather than straight back to work.
-    if any(requirement_id in unevidenced for requirement_id in unmet):
+    if unevidenced:
         verdict = DoneVerdict.REJECT
     elif not unmet and (
         complete >= thresholds.done_accept_from or (confirmed and complete >= thresholds.done_confirmed_from)
@@ -215,6 +222,7 @@ async def check_done(
         verdict=verdict,
         complete=complete,
         unmet=tuple(unmet),
+        doubted=doubted,
         answer=draft if ready else None,
         cost=evaluation.cost,
     )

@@ -1414,7 +1414,7 @@ class Agent:
                     await self._screenshots(),
                     state.notes,
                     state.steps,
-                    doubted=check.unmet,
+                    doubted=check.doubted,
                     config=self._config,
                     ledger=state.ledger,
                 )
