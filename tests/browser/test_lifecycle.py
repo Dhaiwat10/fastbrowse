@@ -43,6 +43,7 @@ class CdpTransport:
         self.requests: list[tuple[str, Any, str | None]] = []
         self.failures: dict[str, BaseException] = {}
         self.blocked: dict[str, asyncio.Event] = {}
+        self.delays: dict[str, float] = {}
         self.finished: set[str] = set()
         self.results: dict[str, list[dict[str, Any]]] = {}
         monkeypatch.setattr(CDPClient, "start", AsyncMock())
@@ -56,6 +57,7 @@ class CdpTransport:
             raise self.failures[method]
         if queued := self.results.get(method):
             return queued.pop(0)
+        await asyncio.sleep(self.delays.get(method, 0))
         if started := self.blocked.get(method):
             started.set()
             try:
@@ -508,8 +510,19 @@ async def test_a_browser_handed_over_with_no_page_named_still_works_one_out_from
 async def test_a_command_the_browser_never_answers_is_an_outage(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = CdpTransport(monkeypatch)
     monkeypatch.setattr(browser_session, "CDP_REPLY_SECONDS", 0.05)
+    monkeypatch.setattr(browser_session, "CDP_ALIVE_SECONDS", 0.05)
     async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
         transport.blocked["Page.navigate"] = asyncio.Event()
+        transport.blocked["Browser.getVersion"] = asyncio.Event()
         with pytest.raises(browser_session.BrowserUnresponsive) as raised:
             await CdpPage(session, Config()).navigate("https://example.test/")
     assert isinstance(raised.value, Unavailable) and "Page.navigate got no reply" in str(raised.value)
+
+
+async def test_a_slow_command_from_a_live_browser_is_waited_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = CdpTransport(monkeypatch)
+    monkeypatch.setattr(browser_session, "CDP_REPLY_SECONDS", 0.05)
+    async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
+        transport.delays["Target.getTargets"] = 0.2
+        await session.client.send_raw("Target.getTargets")
+    assert transport.calls.count("Browser.getVersion") >= 2, "the browser was asked whether it was there"
