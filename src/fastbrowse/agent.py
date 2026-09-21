@@ -1175,16 +1175,9 @@ class Agent:
             # Nothing on the page can evidence anything, so the reader is not asked.
             trace("read", url=self._redactor.redact(capture.url), chars=0, wanted=[r.id for r in wanted])
             return False, False
-        question = read_question(state.task, wanted)
         following = next_page_control(observation) if observation is not None else None
-        if state.first_url is not None and (following is not None or state.pages):
-            # "This page and the next" was written on the page the run started on. Read from the second, it would
-            # otherwise mean the second and the third, or never say the list ends.
-            question += (
-                f'\n\nThe task\'s "this page" is {self._redactor.redact(state.first_url)}, where the run began, '
-                'and "the next page" is the one after it. A task that names how many pages it covers ends at the '
-                "last one it names."
-            )
+        began = state.first_url if following is not None or state.pages else None
+        question = read_question(state.task, wanted, began_at=None if began is None else self._redactor.redact(began))
         notice = next_page_notice(following)
         before = len(state.notes.facts)
         outcome = await read(
@@ -1722,9 +1715,18 @@ def _signature(decision: Decision, observation: Observation) -> Signature:
     return decision.operation, label, state_key(observation)
 
 
-def read_question(task: str, wanted: Sequence[Requirement]) -> str:
+def read_question(task: str, wanted: Sequence[Requirement], *, began_at: str | None = None) -> str:
+    """The reader's question. `began_at` is the run's first page, given once a list may run over several pages:
+    "this page and the next" was written there, and read from the second page it would otherwise mean the second
+    and the third, or never say the list ends."""
     # Unresolved requirements may refer to an earlier one; keep the task's constraints in every read.
-    return task + "\n\nRequirements still to evidence:\n" + "\n".join(f"- {r.text}" for r in wanted)
+    question = task + "\n\nRequirements still to evidence:\n" + "\n".join(f"- {r.text}" for r in wanted)
+    if began_at is None:
+        return question
+    return (
+        f'{question}\n\nThe task\'s "this page" is {began_at}, where the run began, and "the next page" is the one '
+        "after it. A task that names how many pages it covers ends at the last one it names."
+    )
 
 
 def next_page_notice(following: Control | None) -> str:

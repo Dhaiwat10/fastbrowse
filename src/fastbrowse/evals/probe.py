@@ -45,20 +45,23 @@ async def _once(
     notes = Notes()
     continuing: set[str] = set()
     rejected = 0
-    for capture, observation in pages:
+    for index, (capture, observation) in enumerate(pages):
         wanted = [r for r in notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION]
         if not wanted:
             break
+        following = next_page_control(observation)
+        # As in an agent run, "this page" is pinned to the first page once the pages may be a list's several pages.
+        began = pages[0][0].url if following is not None or index else None
         outcome = await read(
             llm,
             capture,
-            read_question(task, wanted),
+            read_question(task, wanted, began_at=began),
             [r.id for r in wanted],
             notes,
             tokens=config.tokens,
             jev=jev,
             requirements=wanted,
-            notice=next_page_notice(next_page_control(observation)),
+            notice=next_page_notice(following),
             continuing=continuing,
         )
         rejected += outcome.rejected_claims
