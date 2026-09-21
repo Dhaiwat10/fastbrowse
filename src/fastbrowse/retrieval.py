@@ -159,6 +159,11 @@ def _evidence(capture: Capture, block: Block, start: int, end: int) -> Evidence:
 
 
 def locate_quote(capture: Capture, source_id: str, quote: str) -> Evidence | None:
+    """The quote as it appears in the page text, starting in the named block.
+
+    It may run on into the blocks after it: a reader quotes a card as the page shows it, "It's Only the Himalayas
+    £45.17", which is a title block and a price block, and the text between them is only a line break.
+    """
     words = quote.split()
     if not words:
         return None
@@ -166,8 +171,12 @@ def locate_quote(capture: Capture, source_id: str, quote: str) -> Evidence | Non
     for block in capture.blocks:
         if block.source_id != source_id:
             continue
-        match = pattern.search(capture.text, block.start, block.end)
-        if match is not None:
+        match = pattern.search(capture.text, block.start)
+        if match is None or match.start() >= block.end:
+            continue
+        # Frames' texts sit side by side in the capture; a quote joining two would show what no page does.
+        spanned = (other for other in capture.blocks if other.start < match.end() and other.end > match.start())
+        if all(other.frame_id == block.frame_id for other in spanned):
             return _evidence(capture, block, match.start(), match.end())
     return None
 
@@ -176,8 +185,8 @@ class _ReadClaim(Frozen):
     requirement_id: str | None = None
     text: str
     source_id: str = Field(
-        description="The bracketed label of the Source blocks line the quote comes from, exactly as shown; never an "
-        "evidence id."
+        description="The label of the Source blocks line the quote starts in, without its brackets (main/:12 for a "
+        "line shown as [main/:12]); never an evidence id."
     )
     quote: str
     draws_on: tuple[str, ...] = Field(

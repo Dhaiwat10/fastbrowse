@@ -100,7 +100,12 @@ def test_quote_location_preserves_original_offsets_and_is_block_scoped() -> None
     assert locate_quote(page, "s1", "BRIGHT blue sky") is None
     assert locate_quote(page, "missing", "bright") is None
     assert locate_quote(page, "s1", " \n ") is None
-    assert locate_quote(page, "s0", "match Prefix") is None
+    # A quote may run on into the next block, as a card's title and price do, but only one it starts in names it.
+    run_on = locate_quote(page, "s0", "match Prefix")
+    assert run_on is not None and (run_on.source_id, run_on.quote) == ("s0", "match\n\nPrefix")
+    assert locate_quote(page, "s1", "match Prefix") is None
+    framed = page.model_copy(update={"blocks": (page.blocks[0], page.blocks[1].model_copy(update={"frame_id": "ad"}))})
+    assert locate_quote(framed, "s0", "match Prefix") is None
 
 
 def test_chunk_prefers_headings_and_preserves_block_coverage() -> None:
