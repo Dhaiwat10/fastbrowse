@@ -8,11 +8,11 @@ from pydantic import JsonValue
 from fastbrowse.config import Config, Thresholds, TokenBudget
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, Question
 from fastbrowse.memory import Fact, Notes, fact_id
-from fastbrowse.models import CostBasis, CostComponent, CostLine, FactReader, Operation
+from fastbrowse.models import UNTRUSTED, CostBasis, CostComponent, CostLine, FactReader, Operation
 from fastbrowse.page import Control, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.retrieval import claim_check_questions, compose
-from fastbrowse.verification import DoneVerdict, check_done, llm_verify, page_state
+from fastbrowse.verification import DoneVerdict, LLMVerdict, check_done, llm_verify, page_state
 from tests.test_memory import evidence
 from tests.test_retrieval import ScriptedLLM
 
@@ -45,15 +45,15 @@ class _Jev:
         return Evaluation(model="test", answers=answers, input_tokens=1, cost=cost)
 
 
-# Answers Jev gave live: right pages scored 0.49 to 0.91 complete, near misses 0.04 or less.
+# Completion scores came from live runs; requirement scores are the complements of the old doubt answers.
 @pytest.mark.parametrize(
     ("answers", "verdict"),
     [
-        ({"complete": 0.63, "unmet_r1": 0.19}, DoneVerdict.ACCEPT),  # the repository, doubted as a whole
-        ({"complete": 0.90, "unmet_r1": 0.14}, DoneVerdict.ACCEPT),
-        ({"complete": 0.03, "unmet_r1": 0.85}, DoneVerdict.VERIFY),  # the organisation page
-        ({"complete": 0.49, "unmet_r1": 0.66}, DoneVerdict.VERIFY),  # doubt either way goes to the verifier
-        ({"complete": 0.72, "unmet_r1": 0.45}, DoneVerdict.VERIFY),
+        ({"complete": 0.63, "satisfied_r1": 0.81}, DoneVerdict.ACCEPT),  # the repository, doubted as a whole
+        ({"complete": 0.90, "satisfied_r1": 0.86}, DoneVerdict.ACCEPT),
+        ({"complete": 0.03, "satisfied_r1": 0.15}, DoneVerdict.VERIFY),  # the organisation page
+        ({"complete": 0.49, "satisfied_r1": 0.34}, DoneVerdict.VERIFY),  # doubt either way goes to the verifier
+        ({"complete": 0.72, "satisfied_r1": 0.55}, DoneVerdict.VERIFY),
         ({"complete": 0.72}, DoneVerdict.VERIFY),  # an answer Jev did not give confirms nothing
     ],
 )
@@ -66,6 +66,40 @@ async def test_a_task_with_nothing_to_do_keeps_the_verifier() -> None:
     plan = Plan(requirements=(), answer_expected=False)
     check = await check_done(_Jev({"complete": 0.7}), "Look around.", plan, _PAGE, Notes(), Thresholds())
     assert check.verdict is DoneVerdict.VERIFY
+
+
+@pytest.mark.parametrize(
+    ("satisfied", "complete", "verdict", "unmet"),
+    [
+        (0.71, 0.5, DoneVerdict.ACCEPT, ()),
+        (0.70, 0.5, DoneVerdict.VERIFY, ()),
+        (0.30, 0.9, DoneVerdict.ACCEPT, ()),
+        (0.29, 0.9, DoneVerdict.VERIFY, ("r1",)),
+    ],
+)
+async def test_positive_requirement_answers_preserve_the_doubt_thresholds(
+    satisfied: float, complete: float, verdict: DoneVerdict, unmet: tuple[str, ...]
+) -> None:
+    check = await check_done(
+        _Jev({"complete": complete, "satisfied_r1": satisfied}), "Open it", _OPEN, _PAGE, Notes(), Thresholds()
+    )
+    assert check.verdict is verdict and check.unmet == unmet
+
+
+def test_verifier_schema_emits_evidence_before_the_verdict_with_field_guidance() -> None:
+    properties = LLMVerdict.model_json_schema()["properties"]
+    assert list(properties) == ["missing", "complete"]
+    assert "Requirement ids" in properties["missing"]["description"]
+
+
+async def test_verifier_receives_context_before_the_final_verdict_instruction() -> None:
+    llm = ScriptedLLM([{"missing": [], "complete": True}])
+    await llm_verify(llm, "Open the repository", _OPEN, _PAGE, (b"screenshot",), Notes(), ())
+    messages = llm.calls[0][1]
+    assert UNTRUSTED in messages[0].content
+    prompt = messages[-1].content
+    assert prompt.index("## Page") < prompt.index("## Notes") < prompt.index("## Verdict")
+    assert messages[-1].images == (b"screenshot",)
 
 
 @pytest.mark.parametrize(("largest", "total"), [(1500, 5000), (5000, 1500)])

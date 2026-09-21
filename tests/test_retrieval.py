@@ -676,15 +676,15 @@ async def test_composition_and_claims_share_budget() -> None:
 
 
 class _DraftJev:
-    """Answers the done check with `doubt` for the draft question, or omits that answer when None."""
+    """Answers the done check's draft question with confidence `1 - doubt`, or omits that answer when None."""
 
     def __init__(self, doubt: float | None) -> None:
         self.doubt = doubt
 
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
         answers: dict[str, Answer] = {"complete": NoulAnswer(probability=0.95)}
-        if self.doubt is not None and "draft_needs_writing" in questions:
-            answers["draft_needs_writing"] = NoulAnswer(probability=self.doubt)
+        if self.doubt is not None and "draft_ready" in questions:
+            answers["draft_ready"] = NoulAnswer(probability=1 - self.doubt)
         cost = CostLine(component=CostComponent.JEV, basis=CostBasis.ESTIMATED, dollars=0.0)
         return Evaluation(model="test", answers=answers, input_tokens=1, cost=cost)
 
