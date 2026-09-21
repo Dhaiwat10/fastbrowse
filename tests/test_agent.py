@@ -874,7 +874,7 @@ def _at(url: str, *controls: Control) -> Observation:
 def test_the_next_page_of_a_list_is_one_link_to_another_address(
     controls: tuple[Control, ...], found: str | None
 ) -> None:
-    control = agent_module._next_page_control(_at("https://example.test/list/", *controls))
+    control = agent_module.next_page_control(_at("https://example.test/list/", *controls))
     assert (control.id if control else None) == found
 
 
@@ -993,7 +993,7 @@ async def test_a_click_that_changed_nothing_is_not_taken_again_from_the_same_pag
 def test_a_pager_the_page_marks_rel_next_is_followed_whatever_its_label() -> None:
     # A pager drawn as an icon, or in another language, says so only in the markup.
     icon = _link("n", "→→→", "/page/2/").model_copy(update={"label": "Weiter", "next_page": True})
-    found = agent_module._next_page_control(_at("https://example.test/list/", icon))
+    found = agent_module.next_page_control(_at("https://example.test/list/", icon))
     assert found is not None and found.id == "n"
 
 
