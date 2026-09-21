@@ -96,7 +96,9 @@ async def test_ultrafast_passes_only_on_a_correct_outcome_it_called_done(
 
     monkeypatch.setattr(live, "ultrafast_arm", ultrafast_arm)
     async with httpx.AsyncClient() as http:
-        row = await live.run_arm("jev-ultrafast", arxiv, http, Path(), bitwarden=False, record=None)
+        row = await live.run_arm(
+            "jev-ultrafast", arxiv, "Attention Is All You Need", http, Path(), bitwarden=False, record=None
+        )
     assert row.correct is True
     assert row.passed is passed
     assert row.seconds == 3.0

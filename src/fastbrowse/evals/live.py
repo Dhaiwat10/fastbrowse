@@ -478,6 +478,7 @@ async def _truth(task: LiveTask, http: httpx.AsyncClient) -> object:
 async def run_arm(
     arm: str,
     task: LiveTask,
+    truth: object,
     http: httpx.AsyncClient,
     downloads: Path,
     *,
@@ -485,7 +486,6 @@ async def run_arm(
     record: Path | None,
 ) -> EvalRow:
     _running.set(f"{arm} {task.id}")
-    truth = await _truth(task, http)
     started = time.monotonic()
     at = time.time()
     try:
@@ -676,10 +676,13 @@ async def main(argv: list[str]) -> int:
 
             async def one(arm: str, task: LiveTask, record: Path | None) -> EvalRow:
                 # A provider outage says nothing about the agent, so a run it ended is run again until one ends
-                # on its own, however long that takes; the slot is released while waiting.
+                # on its own, however long that takes; the slot is released while waiting, and for the answer key.
                 for retries in itertools.count():
+                    truth = await _truth(task, http)
                     async with gate:
-                        row = await run_arm(arm, task, http, Path(downloads), bitwarden=args.bitwarden, record=record)
+                        row = await run_arm(
+                            arm, task, truth, http, Path(downloads), bitwarden=args.bitwarden, record=record
+                        )
                     if row.status != Status.UNAVAILABLE:
                         break
                     wait = min(30 * (retries + 1), 300)
