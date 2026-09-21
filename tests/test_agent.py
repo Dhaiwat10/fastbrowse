@@ -12,6 +12,7 @@ from fastbrowse import agent as agent_module
 from fastbrowse.agent import (
     Agent,
     _answered,
+    _code_decision,
     _follow_recovery,
     _history,
     _RunState,
@@ -37,9 +38,9 @@ from fastbrowse.models import (
     StepOutcome,
     StepResult,
 )
-from fastbrowse.page import ActResult, BlockKind, Control, Observation, Page
+from fastbrowse.page import Action, ActResult, BlockKind, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
-from fastbrowse.policy import HistoryEntry, decide
+from fastbrowse.policy import Decision, HistoryEntry, decide
 from fastbrowse.safety import ScopedSecrets
 from fastbrowse.telemetry import Ledger
 from fastbrowse.tripwires import Tripwire
@@ -879,3 +880,45 @@ async def test_a_recovery_spends_the_evidence_every_tripwire_read() -> None:
 
     await agent._recover(state, observation(()), "action_repetition (3)")
     assert agent._tripwires(state) == []
+
+
+def edit(
+    value: str, *, holds: str | None = None, secret: bool = False, operation: Operation = Operation.FILL
+) -> tuple[Decision, Action]:
+    """A decision to write `value` into a field that currently holds `holds`, and the action doing it."""
+    target = Control(
+        id="f",
+        frame_id=None,
+        role="textbox",
+        label="Name",
+        value=holds,
+        operations=frozenset({Operation.FILL}),
+    )
+    decision = _code_decision(operation, target)
+    return decision, Action(operation=operation, target_id=target.id, text=value, secret=secret)
+
+
+def test_writing_a_value_a_field_already_holds_is_not_progress() -> None:
+    """The invariant is read off the field, so the same value in a DIFFERENT empty field still counts.
+
+    A checkout writes one name into billing and the same name into shipping, and the second write is the whole
+    point. A remembered (operation, label, value) key called it a repeat; the field's own value does not.
+    """
+    # None, not True: writing into an empty field is not evidence on its own, so `changed` decides. Returning
+    # True here credited three fills that changed nothing and let a PyPI run grind on.
+    assert Agent._edit_progress(*edit("Ada", holds=None)) is None
+    assert Agent._edit_progress(*edit("Ada", holds="")) is None
+    assert Agent._edit_progress(*edit("Ada", holds="Ada")) is False
+    # A corrected value is not vetoed, even though the field is not empty.
+    assert Agent._edit_progress(*edit("Ada", holds="Adz")) is None
+
+
+def test_a_secret_is_compared_by_the_length_the_page_reveals() -> None:
+    """A password's value never leaves the page: only bullets of its length are observed."""
+    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 7, secret=True)) is False
+    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 4, secret=True)) is None
+
+
+def test_an_upload_is_judged_by_the_page_not_by_a_value() -> None:
+    """A file input's value is not the file, so every upload after the first read as the same nothing."""
+    assert Agent._edit_progress(*edit("a.pdf", holds=None, operation=Operation.UPLOAD)) is None

@@ -184,10 +184,6 @@ class _RunState:
     re-enter recovery on every later step, whatever the run did next."""
     plan_marks: list[str] = field(default_factory=list[str])
     """One fingerprint of the still-unevidenced requirements per step, for `stagnant_plan`."""
-    written: set[tuple[Operation, str | None, str | None]] = field(
-        default_factory=set[tuple[Operation, str | None, str | None]]
-    )
-    """Every value edit the run has made, as operation, target and value. Never cleared: see `_edit_progress`."""
     attempts: dict[Signature, _Attempts] = field(default_factory=dict[Signature, "_Attempts"])
     """What became of each action taken from each page state, which is how a cycle is told from progress."""
     last_page: tuple[str, str] | None = None
@@ -536,7 +532,7 @@ class Agent:
             # A value edit answers "was this progress" itself, and its answer beats `changed`: the popup a fill
             # draws IS a page change, so `changed` alone kept crediting the identical re-fill even once the
             # written-value check had stopped doing so. `changed` decides every other operation.
-            edit = self._edit_progress(state, decision, label, typed)
+            edit = self._edit_progress(decision, action)
             progressed = act.outcome is StepOutcome.EXECUTED and (changed if edit is None else edit)
             # Moving between two pages changes the page every time, and a run went round "open the author,
             # back to the list" to its step limit with its stall budget reset at every hop. The same action
@@ -749,31 +745,36 @@ class Agent:
         return tuple(ref.name for ref in self._secrets.available() if secret_allowed(ref, origin))
 
     @staticmethod
-    def _edit_progress(state: _RunState, decision: Decision, label: str | None, typed: str | None) -> bool | None:
+    def _edit_progress(decision: Decision, action: Action) -> bool | None:
         """Whether a value edit was progress, or None when this operation is not one and `changed` decides.
 
-        A value edit is progress once per target per VALUE, for the whole run; re-writing it is a loop.
+        Writing a value a field already holds cannot be progress, whatever the page did. That is an invariant,
+        not a threshold, so it needs no budget -- and it is read off the field the action is about to write,
+        never remembered, because every remembered form of it has been wrong in a different direction.
 
-        Keyed on the value and never cleared, because the previous key -- target alone, cleared on every page
-        change -- was defeated by the action's own cosmetic side effect. `_fill` clicks the field before typing
-        on purpose, so that pointer handlers run; on a search box that opens the autocomplete list, and opening
-        it is a page change. A PyPI run therefore filled the same box with the same word five times: each fill
-        cleared the set, so the IDENTICAL next fill was a "first" edit again and `unchanged` reset to zero, and
-        the list opening and closing moved `state_key` too, so the per-page-state repeat guard counted each
-        fill separately as well. Nothing ever reported the fill as a no-op, so the run never moved on to the
-        submit it needed, and both stall guards stayed blind until an escalation said "click the Search button".
+        Keyed on target and cleared on page change, it was defeated by the action's own cosmetic side effect:
+        `_fill` clicks the field before typing on purpose, so that pointer handlers run, and on a search box
+        that opens the autocomplete list, which IS a page change. A PyPI run filled the same box with the same
+        word five times, each fill clearing the set so the identical next one was a "first" edit again.
 
-        Writing a value a field already holds cannot be progress, whatever the page did -- that is an invariant,
-        not a threshold, so it needs no budget. A genuinely new page reached by a genuinely new action still
-        counts through `changed`, and a CORRECTED value is a different key and still counts here.
+        Keyed on target, value and never cleared, it fired on values a run legitimately writes twice: the same
+        name and city into a billing form and then into a fresh shipping form beside it, where the second write
+        is the whole point. The field's own value separates those two cases and the key cannot.
+
+        UPLOAD is excluded rather than compared: a file input's value is not the file, so every upload after the
+        first looked like a rewrite of the same nothing. `changed` decides those.
+
+        It VETOES progress and never grants it: `False` or `None`, never `True`. A write into an empty field is
+        not evidence of anything on its own -- three fills of the PyPI results box, each changing nothing, were
+        credited as progress by a version that returned `True` here, and the run ground on for four more steps.
         """
-        if decision.operation not in {Operation.FILL, Operation.SELECT, Operation.UPLOAD}:
+        if decision.operation not in {Operation.FILL, Operation.SELECT} or decision.target is None:
             return None
-        key = (decision.operation, label, typed)
-        if key in state.written:
-            return False
-        state.written.add(key)
-        return True
+        if action.text is None:
+            return None
+        # A secret's value never leaves the page; only its length is observed, so that is what to compare.
+        held = "\u2022" * len(action.text) if action.secret else action.text
+        return False if decision.target.value == held else None
 
     async def _record_step(self, state: _RunState, step: StepResult) -> None:
         state.steps.append(step)
