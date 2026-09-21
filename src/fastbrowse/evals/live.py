@@ -33,6 +33,7 @@ from collections import Counter
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -93,13 +94,25 @@ def video_path(folder: Path, arm: str, task: LiveTask) -> Path:
     return path
 
 
-class _TimedRecording(Recording):
-    """A fastbrowse recording that notes when the run ended, so the result card is not timed as the run."""
+@dataclass
+class _Observed:
+    """What the harness sees of one fastbrowse run beyond its result. One per run: eight runs overlap, and state
+    kept on the classes let a run starting reset the page another had just observed, which then graded as
+    "no final page to grade"."""
 
+    controls: tuple[tuple[str, str | None], ...] | None = None
+    observe_error: str | None = None
+    """Why the page could not be observed after the run; a grader then reports it had no page."""
     ended: float | None = None
+    """When the run ended, so the recording's result card is not timed as the run."""
 
+
+_observed: ContextVar[_Observed] = ContextVar("live_observed")
+
+
+class _TimedRecording(Recording):
     async def show_result(self, task: str, result: RunResult) -> None:
-        _TimedRecording.ended = time.monotonic()
+        _observed.get().ended = time.monotonic()
         await super().show_result(task, result)
 
 
@@ -134,17 +147,16 @@ class _ObservedAgent(Agent):
     """fastbrowse's agent, with the page it ended on observed once more after the run, for graders that read the
     page itself (what a form ended up holding) rather than anything the agent reported."""
 
-    controls: tuple[tuple[str, str | None], ...] | None = None
-
     async def run(self, *args: Any, **kwargs: Any) -> RunResult:
         result = await super().run(*args, **kwargs)
         try:
             observation = await self._page.observe()
             hidden = await self._page.observe_all() if isinstance(self._page, _GradedPage) else None
-        except Exception:  # a page that cannot be observed leaves nothing to grade, which the grader reports
+        except Exception as exc:  # a page that cannot be observed leaves nothing to grade, which the grader reports
+            _observed.get().observe_error = f"{type(exc).__name__}: {exc}"
             return result
         controls = (*observation.controls, *(hidden.controls if hidden is not None else ()))
-        _ObservedAgent.controls = tuple((c.label, c.value) for c in controls)
+        _observed.get().controls = tuple((c.label, c.value) for c in controls)
         return result
 
 
@@ -168,6 +180,7 @@ class ArmReport(BaseModel):
     step_log: list[JsonValue] = []
     events: list[object] = []
     unknown_cost: bool | None = None
+    observe_error: str | None = None
     seconds_by_call: dict[str, float] = {}
     # jev-ultrafast
     actions: int | None = None
@@ -250,14 +263,10 @@ async def fast_arm(
     *,
     bitwarden: bool,
     record: Path | None,
-) -> tuple[Outcome, RunResult, float | None]:
-    _TimedRecording.ended = None
-    _ObservedAgent.controls = None
-    with (
-        mock.patch.object(fastbrowse.run, "Recording", _TimedRecording),
-        mock.patch.object(fastbrowse.run, "Agent", _ObservedAgent),
-        mock.patch.object(fastbrowse.run, "CdpPage", _GradedPage),
-    ):
+) -> tuple[Outcome, RunResult, _Observed]:
+    seen = _Observed()
+    token = _observed.set(seen)
+    try:
         result = await run_task(
             task.task,
             start=task.start,
@@ -271,9 +280,11 @@ async def fast_arm(
             on_event=lambda event: _on_fast_event(task, event),
             record=record,
         )
+    finally:
+        _observed.reset(token)
     quotes = tuple((e.url, e.quote) for e in result.evidence)
-    outcome = Outcome(result.answer, result.data, result.final_url or task.start, quotes, _ObservedAgent.controls)
-    return outcome, result, _TimedRecording.ended
+    outcome = Outcome(result.answer, result.data, result.final_url or task.start, quotes, seen.controls)
+    return outcome, result, seen
 
 
 async def _on_fast_event(task: LiveTask, event: StepEvent | BrowserEvent) -> None:
@@ -481,11 +492,11 @@ async def _fast_report(
     task: LiveTask, http: httpx.AsyncClient, downloads: Path, *, bitwarden: bool, record: Path | None, started: float
 ) -> tuple[Outcome, ArmReport]:
     with _traced() as events, shadow_counts() as would_fire:
-        outcome, result, ended = await fast_arm(task, http, downloads, bitwarden=bitwarden, record=record)
+        outcome, result, seen = await fast_arm(task, http, downloads, bitwarden=bitwarden, record=record)
     cost = result.cost
     return outcome, ArmReport(
         status=result.status.value,
-        seconds=(ended or time.monotonic()) - started,
+        seconds=(seen.ended or time.monotonic()) - started,
         # An unknown line makes the known total a floor, not a cost.
         dollars=None if cost.has_unknown else cost.known_dollars,
         # A shadow tripwire only earns arming on evidence from LIVE sites: the local fixtures never
@@ -500,6 +511,7 @@ async def _fast_report(
         events=events,
         steps=len(result.steps),
         unknown_cost=cost.has_unknown,
+        observe_error=seen.observe_error,
         seconds_by_call=cost.seconds_by_call(),
         cost_by_component={
             c: round(sum(line.dollars or 0 for line in cost.lines if line.component == c), 5)
@@ -572,8 +584,21 @@ async def main(argv: list[str]) -> int:
         await prepare_ultrafast()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows: list[EvalRow] = []
+    # Patched once for the whole run: overlapping runs each patching and restoring would interleave, and a run ending
+    # would restore the originals under a run still going.
+    patches = (
+        mock.patch.object(fastbrowse.run, "Recording", _TimedRecording),
+        mock.patch.object(fastbrowse.run, "Agent", _ObservedAgent),
+        mock.patch.object(fastbrowse.run, "CdpPage", _GradedPage),
+    )
     gate = asyncio.Semaphore(args.concurrency)
-    with tempfile.TemporaryDirectory() as downloads, args.out.open("a", encoding="utf-8") as out:
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        tempfile.TemporaryDirectory() as downloads,
+        args.out.open("a", encoding="utf-8") as out,
+    ):
         async with httpx.AsyncClient(timeout=60) as http:
 
             async def one(arm: str, task: LiveTask, record: Path | None) -> EvalRow:
