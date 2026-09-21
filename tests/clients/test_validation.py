@@ -5,8 +5,8 @@ import httpx
 import pytest
 
 from fastbrowse.clients.validation import RequestUsage, post, post_with_retry, with_discarded
-from fastbrowse.jev import JevRetriesExhausted
-from fastbrowse.models import CostBasis, CostComponent, CostLine
+from fastbrowse.jev import JevError, JevRetriesExhausted
+from fastbrowse.models import CostBasis, CostComponent, CostLine, Unavailable
 
 
 @pytest.mark.parametrize("winner", [1, 2])
@@ -150,3 +150,18 @@ async def test_exhausted_status_keeps_timing_usage_and_redacts_the_key(monkeypat
     assert error.value.unaccounted_requests == 1
     assert "secret-key" not in str(error.value)
     assert len(str(error.value)) < 500
+
+
+async def test_a_request_that_can_never_be_sent_is_not_an_outage() -> None:
+    """Retrying it would fail the same way every time, and an eval would re-run the task forever."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.UnsupportedProtocol("ftp is not supported", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(JevError, match="could not be sent") as error:
+            await post(http, "https://jev.test/v1", "secret-key", {})
+    assert calls == 1 and not isinstance(error.value, Unavailable)

@@ -49,7 +49,7 @@ from fastbrowse.agent import Agent
 from fastbrowse.browser import CdpPage
 from fastbrowse.browser.recording import Recording
 from fastbrowse.clients.environment import load_settings
-from fastbrowse.clients.validation import RETRYABLE_STATUS
+from fastbrowse.clients.validation import RETRYABLE_STATUS, TRANSIENT_TRANSPORT
 from fastbrowse.evals.live_tasks import TASKS, Category, LiveTask, Outcome
 from fastbrowse.evals.more_tasks import DEV, HELDOUT
 from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, Status, StepEvent, Unavailable
@@ -398,7 +398,7 @@ async def hosted_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path | 
 
 
 async def _hosted_run(task: LiveTask, http: httpx.AsyncClient, *, record: Path | None) -> tuple[Outcome, ArmReport]:
-    from browser_use_sdk.v3 import AsyncBrowserUse  # an optional extra
+    from browser_use_sdk.v3 import AsyncBrowserUse, BrowserUseError  # an optional extra
 
     client = AsyncBrowserUse(api_key=load_settings().browser_key())
     run = client.run(
@@ -421,8 +421,9 @@ async def _hosted_run(task: LiveTask, http: httpx.AsyncClient, *, record: Path |
     if (error := finishing.exception()) is None:
         result = finishing.result()
         session, output = result.session, result.output
-    elif run.session_id is not None:
+    elif run.session_id is not None and not isinstance(error, BrowserUseError | httpx.HTTPError):
         # The SDK raises on output that fails the task's schema; the session still holds that output and its cost.
+        # An API or transport failure is raised instead: the session it interrupted says nothing of the agent.
         session = await client.sessions.get(run.session_id)
         output = session.output
     else:
@@ -479,7 +480,7 @@ async def run_arm(
         else:
             outcome, report = await hosted_arm(task, http, record=record)
     except Exception as exc:  # a crashed arm is a failed task, recorded rather than aborting the comparison
-        unavailable = isinstance(exc, Unavailable | httpx.TransportError)
+        unavailable = isinstance(exc, (Unavailable, *TRANSIENT_TRANSPORT))
         return EvalRow(
             arm=arm,
             task=task.id,

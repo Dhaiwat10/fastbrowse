@@ -14,7 +14,7 @@ from typing import Self
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from fastbrowse.clients.validation import RETRYABLE_STATUS
+from fastbrowse.clients.validation import RETRYABLE_STATUS, TRANSIENT_TRANSPORT
 from fastbrowse.models import BrowserConnection, CostBasis, CostComponent, CostLine, Unavailable
 
 API = "https://api.browser-use.com/api/v3"
@@ -80,7 +80,14 @@ class BrowserUseCloudBrowser:
             browser = await asyncio.shield(creation)
             if browser.cdp_url is None:
                 raise BrowserUseCloudError(f"browser {browser.id} started without a CDP URL")
-            version = await self._http.get(f"{browser.cdp_url}/json/version")
+            try:
+                version = await self._http.get(f"{browser.cdp_url}/json/version")
+            except TRANSIENT_TRANSPORT as error:
+                raise BrowserUseCloudUnavailable(
+                    f"browser {browser.id} did not answer ({type(error).__name__})"
+                ) from None
+            if version.status_code in RETRYABLE_STATUS:
+                raise BrowserUseCloudUnavailable(f"browser {browser.id} answered HTTP {version.status_code}")
             version.raise_for_status()
             ws_url = str(version.json()["webSocketDebuggerUrl"])
             self._connection = BrowserConnection(
@@ -140,9 +147,11 @@ class BrowserUseCloudBrowser:
     async def _call(self, method: str, path: str, *, json: dict[str, str | int]) -> httpx.Response:
         try:
             response = await self._http.request(method, f"{API}{path}", headers=self._headers, json=json)
-        except httpx.HTTPError:
+        except TRANSIENT_TRANSPORT:
             # The request carries the API key header; never let the transport error's request escape.
             raise BrowserUseCloudUnavailable(f"Browser Use Cloud {method} {path} failed") from None
+        except httpx.HTTPError:
+            raise BrowserUseCloudError(f"Browser Use Cloud {method} {path} failed") from None
         if response.status_code in RETRYABLE_STATUS:
             raise BrowserUseCloudUnavailable(f"Browser Use Cloud {method} {path}: HTTP {response.status_code}")
         if not response.is_success:

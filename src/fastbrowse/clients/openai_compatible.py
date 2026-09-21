@@ -172,17 +172,20 @@ class OpenAICompatibleLLM:
         self, body: dict[str, JsonValue], ledger: Ledger | None, usage: RequestUsage
     ) -> dict[str, JsonValue]:
         started = monotonic()
-        response = await post_with_retry(
-            self._http,
-            f"{self._base_url}/chat/completions",
-            body,
-            {"Authorization": f"Bearer {self._api_key}"},
-            call=f"llm {body.get('model')}",
-            attempt_seconds=LLM_ATTEMPT_SECONDS,
-            hedge_seconds=LLM_HEDGE_SECONDS,
-            before_retry=None if ledger is None else lambda: ledger.reserve(CostComponent.LLM),
-            usage=usage,
-        )
+        try:
+            response = await post_with_retry(
+                self._http,
+                f"{self._base_url}/chat/completions",
+                body,
+                {"Authorization": f"Bearer {self._api_key}"},
+                call=f"llm {body.get('model')}",
+                attempt_seconds=LLM_ATTEMPT_SECONDS,
+                hedge_seconds=LLM_HEDGE_SECONDS,
+                before_retry=None if ledger is None else lambda: ledger.reserve(CostComponent.LLM),
+                usage=usage,
+            )
+        except httpx.HTTPError as error:
+            raise LLMError(f"LLM request could not be sent ({type(error).__name__})") from None
         if response is None:
             raise LLMRetriesExhausted(
                 f"LLM transport failed after {usage.history(monotonic() - started)}; last: {usage.failures[-1]}"

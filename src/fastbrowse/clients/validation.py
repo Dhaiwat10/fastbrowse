@@ -149,6 +149,9 @@ RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0, 8.0, 8.0)
 later, got through: the outages are brief, and a run lost to one costs far more than the wait. Only a longer
 outage moves the run to the backup provider (`clients/failover.py`)."""
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
+TRANSIENT_TRANSPORT = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, httpx.ProxyError)
+"""Transport failures a repeat can clear. Any other (an unsupported scheme, an invalid URL) fails the same way
+every time, so it is raised at once rather than retried."""
 _MAX_BACKOFF_SECONDS = 10.0
 JEV_ATTEMPT_SECONDS = 15.0
 """Jev answers in about a second, so an attempt this old is stuck upstream, and a retry beats waiting on it."""
@@ -311,7 +314,7 @@ async def _send(
     except httpx.TimeoutException as error:
         failure = f"no response within {attempt_seconds:.0f}s ({type(error).__name__})"
         response = None
-    except httpx.HTTPError as error:
+    except TRANSIENT_TRANSPORT as error:
         # The type names the failure; its text can quote the request, credential included.
         failure = f"no response ({type(error).__name__})"
         response = None
@@ -335,16 +338,19 @@ async def post(
     started = monotonic()
     usage = usage if usage is not None else RequestUsage()
     auth = {"Authorization": f"Bearer {api_key}", **(headers or {})}
-    response = await post_with_retry(
-        http,
-        url,
-        body,
-        auth,
-        call="jev",
-        attempt_seconds=JEV_ATTEMPT_SECONDS,
-        hedge_seconds=JEV_HEDGE_SECONDS,
-        usage=usage,
-    )
+    try:
+        response = await post_with_retry(
+            http,
+            url,
+            body,
+            auth,
+            call="jev",
+            attempt_seconds=JEV_ATTEMPT_SECONDS,
+            hedge_seconds=JEV_HEDGE_SECONDS,
+            usage=usage,
+        )
+    except httpx.HTTPError as error:
+        raise JevError(f"Jev request could not be sent ({type(error).__name__})") from None
     seconds = monotonic() - started
     if response is None:
         raise JevTransportFailed(f"Jev transport failed after {usage.history(seconds)}; last: {usage.failures[-1]}")

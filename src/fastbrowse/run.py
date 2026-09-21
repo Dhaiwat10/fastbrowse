@@ -39,6 +39,7 @@ from fastbrowse.models import (
     SecretResolver,
     Status,
     StepEvent,
+    Unavailable,
     UntilCheck,
 )
 from fastbrowse.page import BrowserError
@@ -179,9 +180,11 @@ async def run_task(
                             )
                             if recording is not None:
                                 await recording.show_result(task, result)
-            except BrowserError as exc:
+            except (BrowserError, Unavailable) as exc:
+                # A cloud browser that cannot be started is an outage, not a failed run.
+                status = Status.UNAVAILABLE if isinstance(exc, Unavailable) else Status.ERROR
                 result = result or RunResult(
-                    status=Status.ERROR,
+                    status=status,
                     answer=None,
                     data=None,
                     evidence=(),
@@ -189,7 +192,7 @@ async def run_task(
                     cost=CostBreakdown(),
                     artifacts=session.artifacts if session is not None else (),
                 )
-                result = result.model_copy(update={"status": Status.ERROR, "error": str(exc)})
+                result = result.model_copy(update={"status": status, "error": str(exc)})
             # Read after the browser closes either way: a failed result card still leaves the finished videos.
             if recording is not None:
                 result = result.model_copy(update={"recordings": recording.outputs})
