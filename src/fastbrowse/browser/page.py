@@ -36,6 +36,7 @@ from fastbrowse.page import (
     Dialog,
     Observation,
     Page,
+    cut_marker,
     pager_link,
 )
 
@@ -237,10 +238,7 @@ class CdpPage(Page):
         viewport_text = main.raw["viewport_text"] if main else ""
         if len(viewport_text) > limits.viewport_text_chars:
             omitted_chars = len(viewport_text) - limits.viewport_text_chars
-            viewport_text = (
-                viewport_text[: limits.viewport_text_chars]
-                + f"\n[Viewport text cut: {omitted_chars} characters omitted; read the page for the rest]"
-            )
+            viewport_text = viewport_text[: limits.viewport_text_chars] + cut_marker(omitted_chars)
         return Observation(
             url=url,
             title=title,

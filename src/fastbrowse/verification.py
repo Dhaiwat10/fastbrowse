@@ -14,9 +14,9 @@ from pydantic import BaseModel, JsonValue, ValidationError
 from fastbrowse.config import Config, Thresholds, TokenBudget
 from fastbrowse.jev import JevClient, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation, LLMClient, Message
-from fastbrowse.memory import Notes
+from fastbrowse.memory import Notes, NotesTooLarge
 from fastbrowse.models import CostComponent, CostLine, Evidence, Frozen, LLMPurpose, StepResult
-from fastbrowse.page import Capture, Observation
+from fastbrowse.page import Capture, Observation, cut_text
 from fastbrowse.planner import Plan, RequirementKind
 from fastbrowse.retrieval import (
     ComposedAnswer,
@@ -70,8 +70,9 @@ def page_state(
     *,
     questions: Sequence[str] = (),
 ) -> JsonValue:
+    page: dict[str, JsonValue] = {"url": observation.url, "title": observation.title, "text": observation.viewport_text}
     state: dict[str, JsonValue] = {
-        "page": {"url": observation.url, "title": observation.title, "text": observation.viewport_text},
+        "page": page,
         # Inputs and ARIA selection states are absent from innerText; without them a preview can
         # pass completion even though the requested filters were never applied.
         "controls": [
@@ -82,9 +83,18 @@ def page_state(
         ],
         "notes": "",
     }
-    state["notes"] = notes.render(
-        tokens.remaining_chars(json.dumps(state), questions), preserve_requirements=True, json_encoded=True
-    )
+
+    def room() -> int:
+        return tokens.remaining_chars(json.dumps(state), questions)
+
+    try:
+        state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
+    except NotesTooLarge:
+        # Requirement evidence outranks the page's own text: a verdict without it is a guess, while cut text says
+        # it was cut. Only when the controls alone leave no room for the evidence does the verdict stop.
+        page["text"] = ""
+        state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
+        page["text"] = cut_text(observation.viewport_text, room(), json_encoded=True)
     return state
 
 

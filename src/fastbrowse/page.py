@@ -4,6 +4,7 @@ The browser layer produces `Observation` (bounded, for Jev's action choice) and 
 and executes `Action`s. Nothing above this seam touches CDP.
 """
 
+import json
 import re
 from datetime import datetime
 from enum import StrEnum
@@ -12,6 +13,28 @@ from typing import Protocol
 from pydantic import Field
 
 from fastbrowse.models import Artifact, Attachment, Frozen, Operation, StepOutcome
+
+
+def cut_marker(omitted_chars: int) -> str:
+    return f"\n[Viewport text cut: {omitted_chars} characters omitted; read the page for the rest]"
+
+
+def cut_text(text: str, max_chars: int, *, json_encoded: bool = False) -> str:
+    """`text` within `max_chars`, ending with how much was cut so a model knows the page goes on."""
+
+    def size(value: str) -> int:
+        # A JSON state escapes quotes and newlines; its budget must count those extra characters.
+        return len(json.dumps(value)) - len('""') if json_encoded else len(value)
+
+    if size(text) <= max_chars:
+        return text
+    keep = max_chars
+    while keep > 0:
+        cut = text[:keep] + cut_marker(len(text) - keep)
+        if (excess := size(cut) - max_chars) <= 0:
+            return cut
+        keep -= excess
+    return ""
 
 
 class Control(Frozen):

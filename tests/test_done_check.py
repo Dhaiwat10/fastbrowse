@@ -12,7 +12,7 @@ from fastbrowse.models import CostBasis, CostComponent, CostLine
 from fastbrowse.page import Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.retrieval import claim_check_questions, compose
-from fastbrowse.verification import DoneVerdict, check_done, llm_verify
+from fastbrowse.verification import DoneVerdict, check_done, llm_verify, page_state
 from tests.test_memory import evidence
 from tests.test_retrieval import ScriptedLLM
 
@@ -111,3 +111,24 @@ async def test_verdict_prompts_keep_late_requirement_evidence_when_notes_overflo
         sizes = [len(q.model_dump_json()) for q in batch.values()]
         assert state_chars + max(sizes) <= largest * tokens.chars_per_token
         assert state_chars + sum(sizes) <= total * tokens.chars_per_token
+
+
+def test_a_page_too_long_for_the_evidence_is_cut_rather_than_ending_the_run() -> None:
+    tokens = TokenBudget(state_plus_largest_question=1500, state_plus_all_questions=1500)
+    total_text = "Checkout total is $42"
+    notes = Notes(
+        [
+            Fact(
+                reader=FactReader.LLM,
+                requirement_id="r1",
+                text=total_text,
+                evidence=evidence(sha="total", end=len(total_text)).model_copy(update={"quote": total_text}),
+            )
+        ]
+    )
+    page = _PAGE.model_copy(update={"viewport_text": 'Flight "row"\n' * 2000})
+    state = page_state(page, notes, tokens)
+    assert isinstance(state, dict) and isinstance(state["page"], dict) and isinstance(state["notes"], str)
+    assert total_text in state["notes"]
+    assert "[Viewport text cut:" in str(state["page"]["text"])
+    assert len(json.dumps(state)) <= tokens.state_plus_all_questions * tokens.chars_per_token
