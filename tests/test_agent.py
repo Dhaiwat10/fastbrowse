@@ -380,7 +380,9 @@ async def test_url_edits_are_not_reads_but_each_result_in_one_document_is_preser
     for text in ("First result: 12", "Second result: 18"):
         obs = obs.model_copy(update={"url": results_url})
         page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, text)).model_copy(update={"url": obs.url}))
-        assert await agent._read_before_interaction(state, obs, relevant)
+        # The read is kept, but it resolved nothing, so the interaction Jev chose still applies.
+        assert not await agent._read_before_interaction(state, obs, relevant)
+        assert text in [fact.evidence.quote for fact in state.notes.facts]
         # Even a URL rewrite and another choice to READ cannot re-read this content and requirement set.
         obs = obs.model_copy(update={"url": obs.url + "&view=compact"})
         assert not await agent._read_before_interaction(state, obs, relevant)
@@ -466,7 +468,8 @@ async def test_unchanged_unsuccessful_preservation_does_not_loop_or_authorize_th
     )
     decision = await decide(jev, obs, context(), Config())
     agent = Agent(page, jev, llm)
-    assert await agent._read_before_interaction(state, obs, decision)
+    assert not await agent._read_before_interaction(state, obs, decision)
+    assert state.steps[-1].operation is Operation.READ
     assert not await agent._read_before_interaction(state, obs, decision)
     assert not await agent._read(state, await agent._capture(), obs)
     assert len(llm.calls) == 1 and not state.notes.facts

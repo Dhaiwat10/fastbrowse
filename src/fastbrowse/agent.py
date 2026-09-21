@@ -1165,8 +1165,13 @@ class Agent:
             return False
         # A dismissal can remove the answer without committing anything. Read first, then reconsider with
         # the evidence in notes; the next decision still passes the ordinary authorization gate.
+        unresolved = state.notes.unresolved(plan)
         await self._step(state, observation, _code_decision(Operation.READ, None), Decider.CODE, capture=capture)
-        return True
+        # A read that resolved no requirement leaves the interaction as the way on: Jev chose the Flights
+        # "Nonstop" filter, the unfiltered list it read could not show the cheapest nonstop fare, and asked again
+        # Jev chose to read the same list, which was skipped as read, until the run stopped stuck. Reading changed
+        # nothing on the page, so the interaction still applies to it.
+        return state.notes.unresolved(plan) != unresolved
 
     async def _read(
         self, state: _RunState, capture: Capture | None = None, observation: Observation | None = None
