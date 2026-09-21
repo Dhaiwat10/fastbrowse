@@ -30,47 +30,45 @@ something that was never on the page. Every claim in an answer cites a verbatim 
 
 ### Against Browser Use
 
-The published comparison used fastbrowse 0.4.1: the same 14 answer tasks (lookups, sign-ins, checkout,
-Google Flights), three passes each, on the same kind of cloud browser, under a 600s ceiling neither arm
-reached. These are historical results; the agent and Flights grader have changed since that run.
+Measured on 2026-09-21 with the build released as 0.5.0: the same 14 answer tasks (lookups, sign-ins,
+checkout, Google Flights), three passes each, on the same kind of cloud browser, with no dollar limit.
 
 | | passed | cost per task | median time |
 |:--|:--|:--|:--|
-| **fastbrowse** | 41/42 | **$0.0057** (median), $0.0084 mean | **21.0s** |
-| Browser Use (hosted) | 42/42 | $0.4070 (median), $0.5304 mean | 24.8s |
+| **fastbrowse** | **42/42** | **$0.0042** (median), $0.0091 mean | **20.4s** |
+| Browser Use (hosted) | 40/42 | $0.4163 (median), $0.4433 mean | 24.6s |
 
-The whole suite cost $0.35 here and $22.28 there.
+The whole suite cost $0.38 here and $18.62 there. Both hosted failures are Google Flights, where it read
+the page's HTML, found no results table and answered with no price. 0.4.1 scored 41/42 at a $0.0057 median.
 
-The one failure in this table is fastbrowse's (`saucedemo-locked-out`, one pass of three).
-
-The published median cost ratios are 63x for lookups, 88x for checkout and 182x for sign-ins.
+Median cost ratios by category: 56x for lookups, 58x for checkout and 196x for sign-ins.
 Jev selects actions through classification; planning, field text and reading can still require LLM generation.
 
-The published task medians show where time went:
+Task medians show where time went:
 
 | task | fastbrowse | Browser Use (hosted) |
 |:--|:--|:--|
-| `saucedemo-checkout` two items, a shipping form and Finish | **36.3s** | 173.9s |
-| `saucedemo-cart` sign in, find a product, add it | **25.8s** | 119.8s |
-| `saucedemo-locked-out` report the site's error rather than claim success | **35.5s** | 115.8s |
-| `internet-login` sign in and confirm the signed-in page | **18.3s** | 71.7s |
-| `practice-login` the same on another practice site | **21.2s** | 36.3s |
+| `saucedemo-checkout` two items, a shipping form and Finish | **53.6s** | 149.5s |
+| `saucedemo-cart` sign in, find a product, add it | **24.7s** | 110.1s |
+| `saucedemo-locked-out` report the site's error rather than claim success | **19.1s** | 117.4s |
+| `expandtesting-login` sign in and confirm the signed-in page | **20.3s** | 130.1s |
+| `internet-login` the same on another practice site | **20.2s** | 40.4s |
 
-Lookup medians included `pypi-version` at 11.1s, `hn-top` at 12.0s and `github-license` at 12.7s.
-Google Flights took 71.7s here and 38.5s on hosted Browser Use. Its historical grades used the earlier grader.
+Lookup medians included `pypi-version` at 11.2s, `arxiv-title` at 15.0s and `github-license` at 16.5s,
+where hosted Browser Use is faster on some. Google Flights took 109.3s here, slower than 0.4.1's 71.7s.
 
-[Every run, what it cost, and how a failure is counted](docs/evals.md#head-to-head-2026-09-20).
+[Every run, what it cost, and how a failure is counted](docs/evals.md#head-to-head-2026-09-21).
 
 ### Why fastbrowse, against each kind of agent
 
 - **LLM agents that generate actions** (Browser Use and similar): Jev picks each action from the controls
   that are on the page, so there is no invented selector to retry. A task costs a fraction as much (a lookup,
-  $0.0052 against $0.3308 median across the lookup category in the published run), and every claim in the
-  answer cites a verbatim quote. The published answer-task pass counts are 41/42 and 42/42.
+  $0.0060 against $0.3313 median across the lookup category), and every claim in the answer links to the
+  page text it came from.
 - **Choice-model navigators** ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast)): the same
-  core technique, with page reading, cited answers, scoped secrets and an authorization gate. In the published
-  run on the six navigation tasks both can run, fastbrowse passed 18/18 against 11/18 - though six of those seven failures ran into
-  the shared 30-step limit rather than a wall, and jev-ultrafast is cheaper on all four tasks both finish.
+  core technique, with page reading, cited answers, scoped secrets and an authorization gate. On the six
+  navigation tasks both can run, fastbrowse passed 18/18 against 11/18, and jev-ultrafast is cheaper on
+  every task both finish.
 - **Scripts:** there are no selectors to maintain. The same agent handles a date picker, a checkout and
   a search box it has never seen.
 

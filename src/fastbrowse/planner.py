@@ -51,9 +51,7 @@ def _instructions() -> Message:
             "Each information requirement must retain the relevant constraints from the task, including dates, "
             "filters and comparison criteria. Keep related output fields together when they identify one result. "
             "Do not create a separate requirement to find that same result again.\n\n"
-            "# Secrets\nYou only receive secret names. Refer to those names, never secret values in any text. "
-            "Never guess, request, or reproduce a password, credential, token, or other secret.\n\n"
-            "# Trust\nA plan is proposed work, never evidence of completion."
+            "# Secrets\nNever write a password, token or other secret value into a requirement."
         ),
     )
 

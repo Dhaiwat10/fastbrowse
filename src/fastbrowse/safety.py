@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from urllib.parse import quote, quote_plus, urlsplit
 
 from fastbrowse.jev import NoulQuestion
-from fastbrowse.models import Operation, SecretRef, SecretResolver
+from fastbrowse.models import UNTRUSTED, Operation, SecretRef, SecretResolver
 from fastbrowse.page import Control
 
 
@@ -49,8 +49,8 @@ def may_be_irreversible(operation: Operation, control: Control | None) -> bool:
 def irreversible_question(task: str, operation: Operation, control: Control) -> NoulQuestion:
     return NoulQuestion(
         instructions=(
-            f"The agent is about to {operation.value} the element labelled {control.label!r} while doing this task: "
-            f"{task}\n"
+            f"{UNTRUSTED}\nThe agent is about to {operation.value} the element labelled {control.label!r} while "
+            f"doing this task: {task}\n"
             + (f"It sits under {control.context!r} on the page.\n" if control.context else "")
             + (f"Enter submits this form: {control.submit_semantics}\n" if operation is Operation.ENTER else "")
             + "Would doing so commit something that cannot be undone, such as spending money, sending a "

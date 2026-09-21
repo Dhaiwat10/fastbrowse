@@ -14,6 +14,8 @@ from fastbrowse.telemetry import BudgetExceeded, Ledger
 
 class Result(Frozen):
     count: int
+    tags: tuple[str, ...] = ()
+    """What was counted."""
 
 
 async def test_schema_repair_keeps_images_and_accounts_for_both_calls() -> None:
@@ -46,10 +48,16 @@ async def test_schema_repair_keeps_images_and_accounts_for_both_calls() -> None:
     assert result.cost.purpose is LLMPurpose.READ
     body = requests[0]
     assert body["model"] == "reader" and body["max_tokens"] == 42
-    assert body["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {"name": "Result", "schema": Result.model_json_schema(), "strict": False},
-    }
+    # Strict output requires every property and no defaults; a docstring is the field's only guidance.
+    response_format = TypeAdapter(dict[str, JsonValue]).validate_python(body["response_format"])
+    json_schema = TypeAdapter(dict[str, JsonValue]).validate_python(response_format["json_schema"])
+    schema = TypeAdapter(dict[str, JsonValue]).validate_python(json_schema["schema"])
+    properties = TypeAdapter(dict[str, dict[str, JsonValue]]).validate_python(schema["properties"])
+    assert json_schema["strict"] is True and schema["additionalProperties"] is False
+    assert schema["required"] == list(properties)
+    assert not any("default" in field for field in properties.values())
+    assert properties["tags"]["description"] == "What was counted."
+    assert body["provider"] == {"require_parameters": True}
     messages = body["messages"]
     assert isinstance(messages, list)
     assert messages[0] == {

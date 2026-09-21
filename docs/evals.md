@@ -110,14 +110,75 @@ score is no longer a clean before-and-after.
 
 ## Results
 
-These are historical runs of the builds named below, not measurements of the pending release. This branch
-changes action selection, reading, dispatch, failure recovery and the Flights grader. The Flights results
-below retain the grades from their original runs; they have not been regraded with URL decoding. A fresh
-run is needed to measure the branch's pass rate, cost and latency.
+The first section below measures the build released as 0.5.0. The sections after it are historical runs of
+the builds they name, kept as they were published.
 
 Both suites write per-run `would_fire` counts for shadow tripwires. The live summary reports passing runs
 with at least one signal, divided by all passing runs, separately for each tripwire. Repeated signals within
 one run count once in that summary. The local suite stores the counts without printing that rate.
+
+### Head-to-head, 2026-09-21
+
+The build released as 0.5.0, on every arm, same day, eight runs in flight, three passes, no dollar limit.
+
+| | passed | correct answer | median time | mean time | median cost | mean cost | suite total |
+|:--|:--|:--|:--|:--|:--|:--|:--|
+| fastbrowse (0.5.0) | 42/42 | 42/42 | 20.4s | 29.7s | $0.0042 | $0.0091 | $0.38 |
+| hosted Browser Use | 40/42 | 40/42 | 24.6s | 56.3s | $0.4163 | $0.4433 | $18.62 |
+| fastbrowse (0.4.1, 2026-09-20) | 41/42 | 41/42 | 21.0s | 25.4s | $0.0057 | $0.0084 | $0.35 |
+
+Per task, median of three passes:
+
+| task | fastbrowse | hosted Browser Use | cost ratio |
+|:--|:--|:--|:--|
+| `saucedemo-checkout` | 3/3, 53.6s, $0.0137 | 3/3, 149.5s, $0.7998 | 58x |
+| `expandtesting-login` | 3/3, 20.3s, $0.0027 | 3/3, 130.1s, $0.7617 | 282x |
+| `practice-login` | 3/3, 21.7s, $0.0039 | 3/3, 48.9s, $0.2421 | 63x |
+| `saucedemo-cart` | 3/3, 24.7s, $0.0030 | 3/3, 110.1s, $0.5930 | 198x |
+| `saucedemo-locked-out` | 3/3, 19.1s, $0.0023 | 3/3, 117.4s, $0.5806 | 252x |
+| `internet-login` | 3/3, 20.2s, $0.0033 | 3/3, 40.4s, $0.2136 | 64x |
+| `hn-top` | 3/3, 20.5s, $0.0041 | 3/3, 11.0s, $0.2149 | 52x |
+| `pypi-newer` | 3/3, 35.3s, $0.0115 | 3/3, 25.5s, $0.4816 | 42x |
+| `pypi-version` | 3/3, 11.2s, $0.0019 | 3/3, 23.4s, $0.3313 | 178x |
+| `github-license` | 3/3, 16.5s, $0.0048 | 3/3, 10.8s, $0.2221 | 46x |
+| `arxiv-title` | 3/3, 15.0s, $0.0039 | 3/3, 15.1s, $0.3035 | 78x |
+| `wiki-godel` | 3/3, 18.1s, $0.0070 | 3/3, 21.4s, $0.5572 | 80x |
+| `pypi-structured` | 3/3, 47.2s, $0.0070 | 3/3, 19.5s, $0.3658 | 52x |
+| `google-flights` | 3/3, 109.3s, $0.0409 | 1/3, 15.2s, $0.2510 | 6x |
+
+Per category, median cost and time:
+
+| category | fastbrowse | hosted Browser Use | cost ratio |
+|:--|:--|:--|:--|
+| lookup | 21/21, 17.4s, $0.0060 | 21/21, 19.5s, $0.3313 | 56x |
+| login | 15/15, 21.0s, $0.0030 | 15/15, 110.1s, $0.5797 | 196x |
+| checkout | 3/3, 53.6s, $0.0137 | 3/3, 149.5s, $0.7998 | 58x |
+| widget | 3/3, 109.3s, $0.0409 | 1/3, 15.2s, $0.2510 | 6x |
+
+Navigation tasks, fastbrowse against jev-ultrafast, three passes:
+
+| | passed | median time | median cost |
+|:--|:--|:--|:--|
+| fastbrowse | 18/18 | 12.0s | $0.0013 |
+| jev-ultrafast | 11/18 | 10.7s | $0.0004 |
+
+jev-ultrafast failed `arxiv-open` 0/3 and `flights-search` 0/3 (it ended on the start page, or on a search with no
+nonstop filter), and one `wiki-open` run ended on the Main Page. It is cheaper on every task both arms finish.
+`saucedemo-pause`, graded on fastbrowse alone, passed 3/3.
+
+**Dev and held-out**, one pass on fastbrowse: dev 8/8 (median 18.2s, $0.0455 in total) and held-out 9/9
+(median 17.4s, $0.1456 in total). Held-out was run before and after this round of changes and not debugged.
+One disclosure: `quotes-einstein-count` was used with the probe to develop the cited-block reader, so it no
+longer measures that change cleanly.
+
+**Reading it.** fastbrowse passed every run, where 0.4.1 missed one, and its median cost fell by a quarter.
+Both hosted failures are Google Flights: it fetched the page, found only the app shell, and answered with no
+price. Google Flights is also our regression: 3/3, but 109.3s and $0.0409 against 71.7s and $0.0279 in
+0.4.1, from extra date-picker steps (a stale "Done" click, then a recovery).
+
+**Failures counted.** One `wiki-godel` run ended before its first step on `Jev request failed; HTTP 503` from the
+gateway, which is an upstream outage under the rule below, so it was re-run and the re-run (pass, 18.6s,
+$0.0086) is what counts. Nothing else was re-run.
 
 ### Full suite
 
