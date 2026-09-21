@@ -241,8 +241,8 @@ with neither argument, it runs local Chrome. Passing both is an error.
 `RunResult.citations` is a tuple of `Citation` objects, also importable from `fastbrowse`. Each has `id`
 (the number in the answer), `text` (the Notes fact), `requirement_id` (or `None`), `url`, `quote` and
 `deep_link`. Each claim in `result.answer` carries numbered Markdown links to its supporting facts.
-Only verified Notes facts supply citation URLs and quotes; an unknown composer reference drops its claim
-and logs a warning. Facts omitted from the answer have no citation, and citation numbers can have gaps.
+Only verified Notes facts supply citation URLs and quotes; an answer citing an unknown reference fails the
+claim check, and the run falls back to an answer drafted from verified facts. Facts omitted from the answer have no citation, and citation numbers can have gaps.
 
 Deep links follow the [WICG Text Fragments syntax](https://wicg.github.io/scroll-to-text-fragment/#syntax):
 `url#existing-anchor:~:text=start`. Text is percent-encoded, including hyphens, ampersands and commas.
@@ -260,8 +260,8 @@ it can be `None` for an ordinary successful action.
 
 For continuous live images, pass an async `on_frame` handler accepting JPEG bytes. Frames follow the active
 tab and are acknowledged after delivery, with no fixed frame rate. Only the latest pending frame is kept.
-Handler failures are logged without stopping the run. These live frames, like recordings, show the rendered
-page without the secret check used for PNG step frames. No handler means no live capture.
+Handler failures are logged without stopping the run. Live frames and recordings are held back while a
+resolved secret may show on the page, as PNG step frames are. No handler means no live capture.
 
 Jev comes from Typesafe directly or through the Vercel AI Gateway, whichever key is set
 (`FASTBROWSE_JEV_SOURCE=typesafe` or `gateway` picks the first provider when both are set). With both keys,
@@ -317,7 +317,7 @@ seconds to minutes, so raise the client's tool timeout if it has one (`MCP_TOOL_
 
 ## Safety model
 
-- **Irreversible actions.** Jev judges clicks, including links, form-submitting Enter presses and acceptance
+- **Irreversible actions.** Jev judges clicks, including links, Enter presses and acceptance
   of confirm, prompt or before-unload dialogs. Code-selected pagination is exempt, as are authorized
   actions with sufficient confidence. A refusal appears as a failed step with a reason: an unauthorized,
   confident action stops at `needs_confirmation`; an uncertain action goes to recovery. This is a classifier,

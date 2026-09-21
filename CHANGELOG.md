@@ -12,8 +12,8 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 ## [Unreleased]
 
 - **Answer claims link to the words that support them.** `RunResult.citations` exposes each cited
-  fact, its requirement, source URL, verbatim quote and text-fragment deep link. Answer claims with unknown
-  citation references are dropped with a warning. `RunResult.answer` contains numbered Markdown links;
+  fact, its requirement, source URL, verbatim quote and text-fragment deep link. An answer citing an
+  unknown reference fails the claim check and falls back to one drafted from verified facts. `RunResult.answer` contains numbered Markdown links;
   integrations should render them as Markdown. MCP answers carry the links too, while its citation records
   retain their `quote` and `url` shape.
 - **See what each step learned and why it stopped.** `StepResult.facts` carries that step's added facts on
@@ -24,9 +24,9 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   switches and works with browsers reached over CDP. Delivery paces capture by acknowledging each frame
   after the handler returns, with no fixed frame rate; a later pending frame replaces an earlier one.
   Slow or failing handlers do not hold up the run. Capture is off unless a handler is supplied. Live
-  images and recordings show the rendered page without the secret check used for PNG step snapshots.
-- **Links pass the same authorization gate as buttons.** Jev judges whether a click, form submission by
-  Enter or dialog acceptance commits an irreversible change. Code-selected pagination is exempt, and
+  images and recordings are held back while a resolved secret may show on the page, as PNG step frames are.
+- **Links pass the same authorization gate as buttons.** Jev judges whether a click, an Enter press or
+  dialog acceptance commits an irreversible change. Code-selected pagination is exempt, and
   authorized actions with sufficient confidence go straight through. Refusals appear as failed steps
   with reasons before confirmation or recovery.
 - **Read evidence before a click can hide it.** Jev judges whether the page holds information the task

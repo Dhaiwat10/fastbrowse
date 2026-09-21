@@ -8,7 +8,7 @@ fastbrowse splits a browser agent into three owners:
 
 ## Authorization
 
-Jev judges every model-selected click, including links, plus Enter when it submits a form and acceptance of
+Jev judges every model-selected click, including links, every Enter press and acceptance of
 confirm, prompt and before-unload dialogs. Code-selected pagination is exempt. An authorized action whose
 confidence reaches `Thresholds.sensitive_act_from` proceeds without that classification.
 
@@ -28,8 +28,8 @@ reach the LLM reader. `FactReader` records `jev_choice` or `llm`. Both readers m
 the capture before a fact enters `Notes`.
 
 Answer claims use numbered Markdown links built from those notes. `RunResult.citations` exposes the cited
-facts and text-fragment deep links; unused facts have no citation. Unknown citation references drop the
-claim with a warning. Jev checks the answer's claims against their quotes before completion.
+facts and text-fragment deep links; unused facts have no citation. An answer citing an unknown reference
+fails the claim check, and the run falls back to an answer drafted from verified facts. Jev checks the answer's claims against their quotes before completion.
 
 ## Prompt limits and progress
 
@@ -53,8 +53,8 @@ their reader and source links in `StepResult.facts`, and any available explanati
 
 `on_frame` receives JPEG bytes from the active tab. Frames are acknowledged after the async handler returns;
 there is no fixed frame rate, and only the latest pending frame is retained. Delivery runs separately from
-the agent, and handler failures are logged. These live images and MP4 recordings show the rendered page;
-they do not use the secret check that suppresses PNG step frames.
+the agent, and handler failures are logged. Live images and MP4 recordings are held back from the moment a secret is typed, and whenever the page is read showing one, until a reading shows none;
+a recording holds its last clean frame meanwhile.
 
 ## Browser capabilities over plain CDP
 

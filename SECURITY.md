@@ -35,8 +35,8 @@ one where:
 Out of scope: missing features, cosmetic problems, and the behavior of the sites the
 agent is told to browse.
 
-Live JPEG frames (`on_frame`) and MP4 recordings show the rendered page without secret suppression.
-PNG step frames use a separate secret check. An irreversible action is classified by Jev, so a missed
+Live JPEG frames (`on_frame`), MP4 recordings and PNG step frames are held back from the moment a secret is typed, and whenever the page is read showing one, until a reading shows none.
+A secret a click reveals (a "show password" toggle) can reach live frames until the next reading. An irreversible action is classified by Jev, so a missed
 classification is possible and belongs in a security report.
 
 ## Supported versions
