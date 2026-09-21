@@ -127,12 +127,15 @@ def test_chunk_prefers_headings_and_preserves_block_coverage() -> None:
         assert part.end in {block.end for block in page.blocks}
 
 
-def test_chunk_overlap_and_indivisible_blocks_make_progress() -> None:
+def test_chunk_overlap_makes_progress_and_an_oversized_block_is_split_to_fit() -> None:
     page = capture(*((BlockKind.PARAGRAPH, text) for text in ("aaaa", "bbbb", "cccc", "dddd")))
     parts = chunk(page, 9)
     assert [part.block_ids for part in parts] == [("s0", "s1"), ("s1", "s2"), ("s2", "s3")]
-    huge = capture((BlockKind.CODE, "x" * 100), (BlockKind.PARAGRAPH, "tail"))
-    assert [part.text for part in chunk(huge, 10)] == ["x" * 100, "tail"]
+    # A whole results list can arrive as one block; carried whole, it left the reader's notes no room.
+    huge = capture((BlockKind.PARAGRAPH, "x" * 25 + "\nyyy"), (BlockKind.PARAGRAPH, "tail"))
+    parts = chunk(huge, 10, overlap_blocks=0)
+    assert [part.text for part in parts] == ["x" * 10, "x" * 10, "xxxxx\nyyy", "tail"]
+    assert [part.block_ids for part in parts] == [("s0",), ("s0",), ("s0",), ("s1",)]
     assert chunk(capture(), 10) == ()
     with pytest.raises(ValueError):
         chunk(page, 0)
@@ -390,12 +393,13 @@ async def test_choice_sees_unoffered_passages_or_defers_to_chunked_reader(repeti
     requirement = Requirement(id="r", text="Find the latest version", kind=RequirementKind.INFORMATION)
     jev = _ReadJev({"r": _choice("synthesis")})
     response: JsonValue = {"claims": [], "answered": False}
-    llm = ScriptedLLM([response, response])
-    await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,))
+    parts = len(chunk(page, 12_000))
+    llm = ScriptedLLM([response] * parts)
+    await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,), max_chars=12_000)
     if repetitions == 1:
         assert passage in str(jev.requests[0][0])
     else:
-        assert jev.requests == [] and len(llm.calls) == 2
+        assert jev.requests == [] and len(llm.calls) == parts > 2
 
 
 class Fields(Frozen):
@@ -860,6 +864,37 @@ async def test_a_later_chunk_saying_the_list_goes_on_reopens_an_earlier_chunks_c
     assert len(llm.calls) > 1, "a chunk claiming to have answered cannot end a read of a list that goes on"
     assert outcome.continues == ("r1",)
     assert len(notes.facts) == 1 and not notes.evidenced("r1")
+
+
+async def test_a_list_that_runs_on_into_the_next_chunk_is_settled_by_the_last_one() -> None:
+    # A results page too long for one chunk: the first chunk rightly says the list goes on, and the last chunk,
+    # holding the rest and the earlier records, names the winner. The first chunk's word must not outlive it.
+    page = capture(
+        (BlockKind.PARAGRAPH, "Virgin $1,200"),
+        (BlockKind.PARAGRAPH, "a" * 13000),
+        (BlockKind.PARAGRAPH, "JetBlue $1,061"),
+    )
+    notes = Notes()
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [{"text": "Virgin $1,200", "source_id": "s0", "quote": "Virgin $1,200"}],
+                "answered": False,
+                "continues": ["r1"],
+            },
+            {"claims": [], "answered": False, "continues": ["r1"]},
+            {
+                "claims": [
+                    {"requirement_id": "r1", "text": "JetBlue at $1,061", "source_id": "s2", "quote": "JetBlue $1,061"}
+                ],
+                "answered": True,
+            },
+        ]
+    )
+    outcome = await read(llm, page, "Cheapest?", ["r1"], notes)
+    assert len(llm.calls) == 3
+    assert outcome.continues == ()
+    assert notes.evidenced("r1")
 
 
 async def test_a_later_chunk_is_read_against_what_earlier_chunks_of_the_page_found() -> None:

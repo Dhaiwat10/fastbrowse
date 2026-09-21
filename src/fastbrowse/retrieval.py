@@ -10,7 +10,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from copy import deepcopy
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -64,13 +64,30 @@ def _table_header(capture: Capture, block: Block) -> Block | None:
     return None
 
 
+def _lines(capture: Capture, start: int, end: int, max_chars: int) -> Iterator[tuple[int, int]]:
+    """Line spans of `capture.text[start:end]`, a line longer than `max_chars` cut into spans that fit."""
+    offset = start
+    for line in capture.text[start:end].splitlines(keepends=True):
+        for cut in range(0, len(line), max_chars):
+            yield offset + cut, offset + min(cut + max_chars, len(line))
+        offset += len(line)
+
+
 def _pieces(capture: Capture, max_chars: int) -> tuple[_Piece, ...]:
     result: list[_Piece] = []
     header: Block | None = None
     for block in capture.blocks:
         if block.kind is not BlockKind.TABLE:
             header = None
-            result.append(_Piece(block=block, start=block.start, end=block.end))
+            # One block can hold a whole results list (Google Flights' "View more" rendered 39k characters as
+            # one), and a chunk carrying it whole left the reader's notes no room at all.
+            if block.end - block.start <= max_chars:
+                result.append(_Piece(block=block, start=block.start, end=block.end))
+            else:
+                result.extend(
+                    _Piece(block=block, start=start, end=end)
+                    for start, end in _lines(capture, block.start, block.end, max_chars)
+                )
             continue
         if header is not None and (header.frame_id, header.heading_path) != (block.frame_id, block.heading_path):
             header = None
@@ -80,10 +97,10 @@ def _pieces(capture: Capture, max_chars: int) -> tuple[_Piece, ...]:
             result.append(_Piece(block=block, start=block.start, end=block.end, header=header))
             continue
         result.append(_Piece(block=block, start=block.start, end=own_header.end, header=header))
-        offset = own_header.end
-        for row in capture.text[offset : block.end].splitlines(keepends=True):
-            result.append(_Piece(block=block, start=offset, end=offset + len(row), header=header))
-            offset += len(row)
+        result.extend(
+            _Piece(block=block, start=start, end=end, header=header)
+            for start, end in _lines(capture, own_header.end, block.end, max_chars)
+        )
     return tuple(result)
 
 
@@ -390,7 +407,10 @@ async def read(
         coverage.append(part.index)
         accepted = 0
         rejected_here = 0
-        continues |= dict.fromkeys(key for key in result.data.continues if key in requirement_ids)
+        # The latest chunk decides: it holds the page's foot, where a pager sits, reads every earlier chunk's
+        # records in its collected evidence, and is given the caller's next-page notice. An earlier chunk's
+        # "continues" meant the list went on into this chunk; a union let it block the last chunk's conclusion.
+        continues = dict.fromkeys(key for key in result.data.continues if key in requirement_ids)
         references = {key: key for key in offered.evidence_ids}
         for index, claim in enumerate(result.data.claims):
             # Carried to the next chunk without its requirement id, which only the whole page can settle.
