@@ -98,6 +98,8 @@ class ServerConfig:
     bitwarden: tuple[str, ...] = ()
     downloads: Path | None = None
     max_concurrent: int = 1
+    mcp_token: str | None = None
+    """Bearer token every HTTP request but `/healthz` must carry. `None` is allowed only on loopback."""
 
 
 FieldType = Literal["string", "integer", "number", "boolean", "date"]
@@ -532,6 +534,9 @@ async def configure(args: argparse.Namespace, settings: Settings, environ: Mappi
     settings.openrouter_key()
     async with httpx.AsyncClient() as http:
         settings.jev(http)
+    token = settings.mcp_token.get_secret_value() if settings.mcp_token is not None else None
+    if args.transport == "http" and token is None and not is_loopback(args.host):
+        raise ConfigurationError(f"set {TOKEN_VARIABLE} to serve on {args.host}; without it only loopback is allowed")
     return ServerConfig(
         browser_api_key=options.browser_key(settings, args.cloud),
         chrome=chrome,
@@ -542,6 +547,7 @@ async def configure(args: argparse.Namespace, settings: Settings, environ: Mappi
         bitwarden=tuple(dict.fromkeys(args.bitwarden)),
         downloads=args.downloads,
         max_concurrent=args.max_concurrent,
+        mcp_token=token,
     )
 
 
@@ -550,12 +556,9 @@ async def serve(args: argparse.Namespace, config: ServerConfig) -> None:
     if args.transport == "stdio":
         await server.run_stdio_async()
         return
-    token = os.environ.get(TOKEN_VARIABLE) or None
-    if token is None and not is_loopback(args.host):
-        raise ConfigurationError(f"set {TOKEN_VARIABLE} to serve on {args.host}; without it only loopback is allowed")
     app: ASGIApp = server.streamable_http_app()
-    if token is not None:
-        app = BearerAuth(app, token)
+    if config.mcp_token is not None:
+        app = BearerAuth(app, config.mcp_token)
     print(f"fastbrowse-mcp: serving on http://{args.host}:{args.port}/mcp", file=sys.stderr)
     await uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")).serve()
 

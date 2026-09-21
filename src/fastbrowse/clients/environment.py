@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     ai_gateway_api_key: SecretStr | None = _key("AI_GATEWAY_API_KEY")
     openrouter_api_key: SecretStr | None = _key("OPENROUTER_API_KEY")
     browser_use_api_key: SecretStr | None = _key("BROWSER_USE_API_KEY")
+    mcp_token: SecretStr | None = None
+    """Bearer token for `fastbrowse-mcp --transport http`. A declared field rather than a bare
+    `os.environ` read, because `.env.example` tells you to put it in `.env` and only a field reads that."""
     jev_source: JevSource | None = None
     jev_base_url: str | None = None
     jev_model: str = JEV_MODEL
