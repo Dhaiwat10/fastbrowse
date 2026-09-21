@@ -276,6 +276,8 @@ an old text directive is replaced. Pages that change or require a session may no
 To show a run as it happens, pass `on_event=`: a `BrowserEvent` arrives first with the live-view URL of a
 cloud browser, then a `StepEvent` per step. `Config(step_frames=True)` adds a PNG of the page each step acted
 on, for an interface that renders the run; a step whose page is showing a resolved secret sends no frame.
+`StepEvent.step.facts` (also `StepResult.facts`) holds only the facts added by that step: text, requirement id,
+quote, URL, deep link and reader (`jev_choice` or `llm`), with resolved secrets redacted before delivery.
 
 Jev comes from Typesafe directly or through the Vercel AI Gateway, whichever key is set
 (`FASTBROWSE_JEV_SOURCE` picks when both are, `FASTBROWSE_JEV_BASE_URL` adds a proxy). Any other source

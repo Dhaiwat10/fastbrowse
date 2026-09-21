@@ -19,8 +19,8 @@ from fastbrowse.jev import (
     Question,
 )
 from fastbrowse.llm import DEFAULT_MAX_OUTPUT_TOKENS, Generation, Message
-from fastbrowse.memory import Fact, FactReader, Notes, evidence_id
-from fastbrowse.models import CostBasis, CostComponent, CostLine, Frozen, Limits, LLMPurpose
+from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.models import CostBasis, CostComponent, CostLine, FactReader, Frozen, Limits, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.retrieval import (

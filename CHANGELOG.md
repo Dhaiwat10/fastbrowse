@@ -23,6 +23,11 @@ Older entries are kept verbatim rather than rewritten as the product moves.
   deletes is now judged for every click, links included, instead of exempting links whose label missed a
   fixed word list. An authorized, confident run still goes straight through.
 
+## [0.5.0] - 2026-09-21
+
+- **See what each step learned.** `StepResult.facts` carries that step's new facts on its `StepEvent`, with
+  quotes, source links and the reader (`jev_choice` or `llm`). Resolved secrets are redacted before delivery.
+
 ## [0.4.2] - 2026-09-20
 
 - **A form is set up in the order that works.** Its mode - which tab of a search, which kind of account or

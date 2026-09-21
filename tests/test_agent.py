@@ -26,12 +26,13 @@ from fastbrowse.citations import text_fragment
 from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation
-from fastbrowse.memory import Fact, FactReader, Notes, evidence_id
+from fastbrowse.memory import Fact, Notes, evidence_id
 from fastbrowse.models import (
     Authorization,
     BrowserEvent,
     Citation,
     Decider,
+    FactReader,
     Limits,
     LLMPurpose,
     Operation,
@@ -251,16 +252,25 @@ async def test_jev_still_unsure_after_recovery_takes_the_action_recovery_named()
     obs = observation(buttons)
     page = Mock(spec=Page)
     page.screenshot = AsyncMock(return_value=b"png")
-    recovery = {"diagnosis": "not submitted", "next_subgoal": "Click Search", "give_up": False}
+    recovery = {"diagnosis": "not submitted", "next_subgoal": "Click Search for hunter2", "give_up": False}
     llm = ScriptedLLM([{**recovery, "control": 1, "operation": "click"}])
     jev = ScriptedJev({"operation": "click", "click_target": "done"})
     state = await run_state()
-    await Agent(page, jev, llm)._recover(state, obs, "uncertain next step (0.49)")
+    agent = Agent(page, jev, llm)
+    agent._redactor.register("password", "hunter2")
+    await agent._recover(state, obs, "uncertain next step (0.49): hunter2")
+    assert state.steps[-1].note == (
+        "uncertain next step (0.49): [secret:password]\nnot submitted\nClick Search for [secret:password]"
+    )
     unsure = await decide(jev, obs, context(), Config())
     followed = _follow_recovery(state, obs, unsure, uncertain=True)
     assert followed is not None and followed.target == buttons[1]
     # Used once: the next unsure step is Jev's to recover from again.
     assert _follow_recovery(state, obs, unsure, uncertain=True) is None
+    state.authorization = Authorization(irreversible_actions=True)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    await agent._step(state, obs, followed, Decider.LLM)
+    assert state.steps[-1].note == "Click Search for [secret:password]"
 
 
 async def test_an_unsure_pick_is_acted_on_once_per_page_state() -> None:
@@ -275,12 +285,24 @@ async def test_an_unsure_pick_is_acted_on_once_per_page_state() -> None:
 async def test_an_unsure_pick_that_may_commit_something_recovers_rather_than_asking_the_user(
     confidence: float, raised: type[Exception]
 ) -> None:
-    button = _button("Place order")
+    button = _button("Place order for hunter2")
     jev = ScriptedJev({"operation": "click", "click_target": button.id}, noul=0.9)
     obs = observation((button,))
     decision = (await decide(jev, obs, context(), Config())).model_copy(update={"operation_confidence": confidence})
-    with pytest.raises(raised):
-        await Agent(Mock(spec=Page), jev, ScriptedLLM([]))._gate_irreversible(await run_state(), obs, decision)
+    state = await run_state()
+    page = Mock(spec=Page)
+    on_event = AsyncMock()
+    agent = Agent(page, jev, ScriptedLLM([]), on_event=on_event)
+    agent._redactor.register("password", "hunter2")
+    with pytest.raises(raised) as refused:
+        await agent._step(state, obs, decision)
+    step = state.steps[-1]
+    assert step.decided_by is Decider.CODE and step.outcome is StepOutcome.FAILED
+    assert step.note == agent._redactor.redact(str(refused.value))
+    assert step.facts == ()
+    on_event.assert_awaited_once_with(StepEvent(step=step))
+    assert "hunter2" not in step.model_dump_json()
+    page.act.assert_not_called()
 
 
 async def test_a_named_action_is_not_taken_over_a_confident_choice_or_on_a_control_that_went() -> None:
@@ -1168,12 +1190,50 @@ async def test_same_text_can_be_read_for_a_new_document_or_new_requirement() -> 
     assert len(llm.calls) == 3
 
 
-def test_a_secret_quoted_by_a_citation_is_redacted_from_its_links_too() -> None:
-    agent = Agent(Mock(spec=Page), ScriptedJev({}), ScriptedLLM([]))
-    agent._redactor.register("password", "hunter 2&x")
+@pytest.mark.parametrize("reader", list(FactReader))
+async def test_a_secret_quoted_by_a_citation_is_redacted_from_its_links_too(reader: FactReader) -> None:
     quote = "signed in as hunter 2&x today"
-    link = text_fragment("https://example.test/account", quote)
-    cited = Citation(id=1, text=quote, url="https://example.test/account", quote=quote, deep_link=link)
+    url = "https://example.test/account?token=hunter%202%26x"
+    requirement_id = "r1 hunter 2&x"
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id=requirement_id, text="Who is signed in?", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    state.notes.add(Fact(reader=FactReader.LLM, text="Already known", evidence=evidence()))
+    events: list[StepEvent] = []
+
+    async def collect(event: StepEvent | BrowserEvent) -> None:
+        if isinstance(event, StepEvent):
+            events.append(event)
+
+    claim: JsonValue = {"requirement_id": requirement_id, "text": quote, "source_id": "s0", "quote": quote}
+    llm = ScriptedLLM([{"claims": [claim], "answered": True}] if reader is FactReader.LLM else [])
+    jev = ScriptedJev({requirement_id: "synthesis" if reader is FactReader.LLM else "c0"})
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    agent = Agent(page, jev, llm, on_event=collect)
+    agent._redactor.register("password", "hunter 2&x")
+    captured = capture((BlockKind.PARAGRAPH, quote)).model_copy(update={"url": url})
+    await agent._step(state, observation(()), _code_decision(Operation.READ, None), capture=captured)
+
+    (fact,) = events[0].step.facts
+    assert events[0].step == state.steps[0]
+    assert fact.quote == "signed in as [secret:password] today"
+    assert fact.text == (f"Who is signed in?\n{fact.quote}" if reader is FactReader.JEV_CHOICE else fact.quote)
+    assert fact.requirement_id == "r1 [secret:password]"
+    assert fact.url == "https://example.test/account?token=[secret:password]"
+    assert fact.reader is reader
+    assert fact.deep_link == text_fragment(fact.url, fact.quote)
+    assert "hunter" not in events[0].model_dump_json()
+    assert len(state.notes.facts) == 2
+    assert state.notes.facts[-1].evidence.quote == quote
+    await agent._step(state, observation(()), _code_decision(Operation.SCROLL, None), Decider.CODE)
+    assert events[1].step.facts == ()
+    assert events[1].step.note is None
+
+    link = text_fragment(url, quote)
+    cited = Citation(id=1, text=quote, url=url, quote=quote, deep_link=link)
     composed = ComposedAnswer(answer=f"{quote} [1](<{link}>)", claims=(), citations=(cited,))
 
     answer, (public,) = agent._public_answer(composed)

@@ -102,6 +102,20 @@ class Citation(Frozen):
     deep_link: str
 
 
+class FactReader(StrEnum):
+    JEV_CHOICE = "jev_choice"
+    LLM = "llm"
+
+
+class StepFact(Frozen):
+    text: str
+    requirement_id: str | None = None
+    quote: str
+    url: str
+    reader: FactReader
+    deep_link: str
+
+
 class ArtifactKind(StrEnum):
     DOWNLOAD = "download"
 
@@ -188,6 +202,8 @@ class StepResult(Frozen):
     """Human-readable label of the chosen element; never contains a secret value."""
     confidence: float | None = Field(default=None, ge=0, le=1)
     note: str | None = None
+    facts: tuple[StepFact, ...] = ()
+    """Facts added to the notes by this step, with resolved secrets redacted."""
     page_changed: bool | None = None
     """Whether the page's fingerprint changed; None for steps that do not act (read, escalate)."""
     duration_ms: int = Field(ge=0)

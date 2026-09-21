@@ -22,8 +22,8 @@ from fastbrowse.citations import text_fragment
 from fastbrowse.config import TokenBudget
 from fastbrowse.jev import MAX_CHOICE_OPTIONS, ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, Message
-from fastbrowse.memory import Fact, FactReader, Notes, evidence_id
-from fastbrowse.models import Citation, CostComponent, CostLine, Evidence, Frozen, LLMPurpose
+from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.models import Citation, CostComponent, CostLine, Evidence, FactReader, Frozen, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.telemetry import Ledger

@@ -2,15 +2,9 @@
 
 import json
 from collections.abc import Iterable
-from enum import StrEnum
 
-from fastbrowse.models import Evidence, Frozen
+from fastbrowse.models import Evidence, FactReader, Frozen
 from fastbrowse.planner import Plan, Requirement
-
-
-class FactReader(StrEnum):
-    JEV_CHOICE = "jev_choice"
-    LLM = "llm"
 
 
 class Fact(Frozen):

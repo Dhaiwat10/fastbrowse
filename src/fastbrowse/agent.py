@@ -20,7 +20,7 @@ from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.effects import SETTING_ROLES, effect, state_key
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, LLMError, Message
-from fastbrowse.memory import Notes, NotesTooLarge
+from fastbrowse.memory import Fact, Notes, NotesTooLarge
 from fastbrowse.models import (
     Attachment,
     Authorization,
@@ -37,6 +37,7 @@ from fastbrowse.models import (
     SecretResolver,
     Status,
     StepEvent,
+    StepFact,
     StepOutcome,
     StepResult,
     TripwireMode,
@@ -530,6 +531,8 @@ class Agent:
         capture: Capture | None = None,
     ) -> None:
         started = time.monotonic()
+        facts_before = len(state.notes.facts)
+        reason = state.hint if decided_by is Decider.LLM else None
         label = _describe(decision.target) if decision.target else decision.tab_id
         typed: str | None = None
         effect_now: str | None = None
@@ -604,7 +607,8 @@ class Agent:
             url=observation.url,
             target=label,
             confidence=decision.confidence,
-            note=self._redactor.redact(act.detail) if act.detail else None,
+            note=self._redactor.redact("\n".join(part for part in (reason, act.detail) if part)) or None,
+            facts=tuple(self._public_fact(fact) for fact in state.notes.facts[facts_before:]),
             page_changed=None if decision.operation is Operation.READ else changed,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
@@ -939,9 +943,30 @@ class Agent:
             return
         what = f"{decision.operation.value} {label!r}"
         # An unsure pick that may commit something is more likely the wrong pick than the step to confirm.
-        if authorized or decision.confidence < thresholds.recover_below:
-            raise _Unsure(f"unsure {what} is the irreversible action the task means ({decision.confidence:.2f})")
-        raise _Stop(Status.NEEDS_CONFIRMATION, f"{what} needs confirmation")
+        unsure = authorized or decision.confidence < thresholds.recover_below
+        reason = (
+            f"unsure {what} is the irreversible action the task means ({decision.confidence:.2f})"
+            if unsure
+            else f"{what} needs confirmation"
+        )
+        await self._record_step(
+            state,
+            StepResult(
+                index=len(state.steps),
+                operation=decision.operation,
+                decided_by=Decider.CODE,
+                outcome=StepOutcome.FAILED,
+                url=observation.url,
+                target=self._redactor.redact(label),
+                confidence=decision.confidence,
+                note=self._redactor.redact(reason),
+                page_changed=False,
+                duration_ms=0,
+            ),
+        )
+        if unsure:
+            raise _Unsure(reason)
+        raise _Stop(Status.NEEDS_CONFIRMATION, reason)
 
     async def _text(self, state: _RunState, observation: Observation, target: Control) -> str:
         secrets = tuple(ref.name for ref in self._secrets.available()) if self._secrets else ()
@@ -1301,7 +1326,9 @@ class Agent:
                 url=observation.url,
                 target=None,
                 confidence=None,
-                note=self._redactor.redact(generation.data.next_subgoal),
+                note=self._redactor.redact(
+                    "\n".join((reason, generation.data.diagnosis, generation.data.next_subgoal))
+                ),
                 duration_ms=0,
             ),
         )
@@ -1496,6 +1523,18 @@ class Agent:
             cited.setdefault((item.url, item.quote), item)
         return self._result(
             state, state.ledger, status, answer=answer, data=data, evidence=tuple(cited.values()), citations=citations
+        )
+
+    def _public_fact(self, fact: Fact) -> StepFact:
+        redact = self._redactor.redact
+        url, quote = redact(fact.evidence.url), redact(fact.evidence.quote)
+        return StepFact(
+            text=redact(fact.text),
+            requirement_id=redact(fact.requirement_id) if fact.requirement_id is not None else None,
+            quote=quote,
+            url=url,
+            reader=fact.reader,
+            deep_link=text_fragment(url, quote),
         )
 
     def _public_answer(self, composed: ComposedAnswer) -> tuple[str, tuple[Citation, ...]]:

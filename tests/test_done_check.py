@@ -7,8 +7,8 @@ from pydantic import JsonValue
 
 from fastbrowse.config import Config, Thresholds, TokenBudget
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, Question
-from fastbrowse.memory import Fact, FactReader, Notes, evidence_id
-from fastbrowse.models import CostBasis, CostComponent, CostLine
+from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.models import CostBasis, CostComponent, CostLine, FactReader
 from fastbrowse.page import Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.retrieval import claim_check_questions, compose

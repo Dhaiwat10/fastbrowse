@@ -2,8 +2,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from fastbrowse.memory import Fact, FactReader, Notes, NotesTooLarge, evidence_id
-from fastbrowse.models import Evidence
+from fastbrowse.memory import Fact, Notes, NotesTooLarge, evidence_id
+from fastbrowse.models import Evidence, FactReader
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 
 
