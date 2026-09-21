@@ -18,6 +18,9 @@ Nothing yet.
 - **Watch the active tab as the agent works.** `run_task(on_frame=...)` sends JPEG bytes at up to five frames
   a second, follows tab switches, and works with browsers reached over CDP without exposing their endpoint.
   Slow or failing handlers do not hold up the run. Capture is off unless a handler is supplied.
+- **Every click is checked before it could commit something.** Whether a click spends money, sends or
+  deletes is now judged for every click, links included, instead of exempting links whose label missed a
+  fixed word list. An authorized, confident run still goes straight through.
 
 ## [0.4.2] - 2026-09-20
 

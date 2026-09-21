@@ -326,9 +326,9 @@ class Agent:
                 continue
             # Walking a list is dispatched before Jev is asked, because not asking is the point: the link is
             # already found and a decision would buy nothing. It therefore passes none of the gates below, which
-            # is safe only because of what it can be. A CLICK still goes through `_action`, so the irreversible
-            # gate stands. The login check needs a decision Jev has not made yet, and the page it opens is judged
-            # on the next turn. The confidence gates judge Jev's uncertainty, and there is none to judge here.
+            # is safe only because of what it can be: a pager link to another address. The login check needs a
+            # decision Jev has not made yet, and the page it opens is judged on the next turn. The confidence gates
+            # judge Jev's uncertainty, and there is none to judge here.
             if (paging := _paging(state, observation)) is not None:
                 await self._step(state, observation, paging, Decider.CODE)
                 continue
@@ -521,7 +521,7 @@ class Agent:
             state.read_here = True
             act = ActResult(outcome=StepOutcome.EXECUTED, page_changed=False)
         else:
-            action = await self._action(state, observation, decision)
+            action = await self._action(state, observation, decision, decided_by)
             await self._read_before_leaving(state, observation, decision)
             act = await self._page.act(action, self._raw_observation or observation)
             if act.outcome is StepOutcome.STALE and decision.target is not None:
@@ -802,11 +802,16 @@ class Agent:
             return None
         return await self._page.screenshot()
 
-    async def _action(self, state: _RunState, observation: Observation, decision: Decision) -> Action:
+    async def _action(
+        self, state: _RunState, observation: Observation, decision: Decision, decided_by: Decider
+    ) -> Action:
         target = decision.target
         match decision.operation:
             case Operation.CLICK | Operation.ENTER:
-                await self._gate_irreversible(state, observation, decision)
+                # Code only ever clicks a pager link to another address (`_next_page_control`), which opens a page
+                # and commits nothing, so asking Jev would buy a call per page and nothing else.
+                if decided_by is not Decider.CODE:
+                    await self._gate_irreversible(state, observation, decision)
                 return Action(operation=decision.operation, target_id=target.id if target else None)
             case Operation.FILL:
                 text = await self._text(state, observation, _require(target))
