@@ -138,6 +138,9 @@ class Decision(Frozen):
     input_tokens: int
     bot_check: float | None = None
     read_assessment: ReadAssessment = ReadAssessment.ABSENT
+    directed: bool = False
+    """Recovery's action on this decision's page. Its confidence scores the action Jev chose instead, so it
+    says nothing about this one."""
 
     @property
     def confidence(self) -> float:

@@ -13,7 +13,7 @@ from fastbrowse.page import Control
 
 
 def may_be_irreversible(operation: Operation, control: Control | None) -> bool:
-    """Whether Jev is asked before this dispatches: every click, and an Enter that submits a form.
+    """Whether Jev is asked before this dispatches: every click and every Enter.
 
     Whether a click commits is a judgment about the page, so Jev makes it rather than a word list. A list of
     committing labels is never complete ("Place your order", "Yes, I'm sure"), and a link commits as easily
@@ -24,8 +24,10 @@ def may_be_irreversible(operation: Operation, control: Control | None) -> bool:
     match operation:
         case Operation.CLICK:
             return True
+        # Not only a form's Enter: a chat, comment or DM box sends on Enter through its own script, with no
+        # form for the page to describe.
         case Operation.ENTER:
-            return control.submit_semantics is not None or control.input_type == "submit"
+            return True
         # A dialog's accept is asked about where the dialog is handled; the rest change nothing off the page.
         case (
             Operation.HOVER
