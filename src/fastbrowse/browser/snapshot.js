@@ -19,6 +19,15 @@
   const MAX_HOVER_CHECKS = 400;
   const excerpt = (text, cap) => text.length <= cap ? text :
     `${text.slice(0, cap)} [${text.length - cap} characters omitted]`;
+  // A transparent native checkbox is the one control TodoMVC shows, so only its own opacity is excused: a
+  // transparent ancestor still hides it. Walked by style, not layout box, as a `display: contents` parent
+  // generates no box yet hides nothing.
+  const nativeChoice = e => e.tagName === 'INPUT' && ['checkbox', 'radio'].includes(e.type);
+  const shownThrough = e => {
+    for (let a = e.parentElement ?? e.getRootNode().host; a; a = a.parentElement ?? a.getRootNode().host)
+      if (a.ownerDocument.defaultView.getComputedStyle(a).opacity === '0') return false;
+    return true;
+  };
   const registry = window.__fastbrowse ||= { ids: new WeakMap(), nodes: new Map(), next: 1 };
   // A visible loading indicator means the page is still fetching what it will draw, which network idle and a
   // quiet DOM both report as settled: a spinner mutates nothing while it spins. Named classes are a heuristic
@@ -58,9 +67,10 @@
         // A filter can change only its checkmark, so text alone reported "Nonstop only" as a no-op.
         // Field values stay out: the run judges fills by the value it wrote, even when a popup changes.
         // Only rendered controls: a hidden carousel's aria-selected dots churn on their own and would read as
-        // progress. Opacity is not checked, as a transparent native checkbox is the one TodoMVC shows.
+        // progress.
         if (('checked' in e || 'selected' in e || e.hasAttribute('aria-checked') || e.hasAttribute('aria-selected')) &&
-          e.checkVisibility({ checkVisibilityCSS: true }))
+          e.checkVisibility({ checkOpacity: !nativeChoice(e), checkVisibilityCSS: true }) &&
+          (!nativeChoice(e) || shownThrough(e)))
           hashText(JSON.stringify([e.checked ?? null, e.selected ?? null,
             e.getAttribute('aria-checked'), e.getAttribute('aria-selected')]));
         if (e.shadowRoot) include(e.shadowRoot);
@@ -98,14 +108,11 @@
     // The input still receives clicks; opacity alone must not remove the only control for that row.
     // A transparent input with a visible label of its own keeps the label as its click target: TodoMVC's
     // "Mark all as complete" input is 1px and off screen, and only its label can be clicked.
-    const choice = e.tagName === 'INPUT' && ['checkbox', 'radio'].includes(e.type) &&
+    const choice = nativeChoice(e) &&
       e.ownerDocument.defaultView.getComputedStyle(e).pointerEvents !== 'none' &&
       ![...(e.labels || [])].some(l => l.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
-    // Only the input's own opacity is excused: one inside a transparent container is hidden with it.
-    const container = e.parentElement ?? e.getRootNode().host;
     if (e.closest('[aria-hidden="true"],[inert]') ||
-      !e.checkVisibility({ checkOpacity: !choice, checkVisibilityCSS: true }) ||
-      (choice && container && !container.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }))) return false;
+      !e.checkVisibility({ checkOpacity: !choice, checkVisibilityCSS: true }) || (choice && !shownThrough(e))) return false;
     if (!choice) return true;
     const r = e.getBoundingClientRect();
     return r.width > 0 && r.height > 0 && !e.matches(':disabled') && !e.closest('[aria-disabled="true"]');

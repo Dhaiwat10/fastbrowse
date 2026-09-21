@@ -417,6 +417,19 @@ async def test_transparent_choice_exception_does_not_admit_hidden_or_disabled_co
     assert not await eval_value(browser_session, browser_session.active_session_id, "e.checked")
 
 
+async def test_transparent_choice_under_a_boxless_parent_is_offered(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    """A `display: contents` parent has no layout box, yet hides nothing."""
+    await page.navigate(f"{main_site}/todos.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.querySelectorAll('input')[1].parentElement.style.display = 'contents'",
+    )
+    assert any(c.context == "walk the dog" for c in (await page.observe()).controls)
+
+
 @pytest.mark.parametrize("kind", ["radio", "checkbox"])
 @pytest.mark.parametrize(
     "style",
