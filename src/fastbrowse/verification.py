@@ -251,7 +251,9 @@ async def llm_verify(
         "\n\n## Verdict\nDecide from the screenshot, set controls, page text and notes whether the task is finished. "
         "Be strict and name every requirement id that is not visibly satisfied. A requirement to "
         "compare, count or conclude from facts is satisfied when the notes hold those facts: the answer "
-        "draws the conclusion, and no page shows it."
+        "draws the conclusion, and no page shows it. A requirement to narrow a search or listing (a filter, "
+        "option or sort) is satisfied when the page shows it applied, in a set control, the address or the "
+        "page's own filter text, not when the rows in view happen to match it."
     )
     messages = [
         Message(
