@@ -166,6 +166,14 @@ class _ObservedAgent(Agent):
 
 
 _trace_events: ContextVar[list[object] | None] = ContextVar("live_trace_events", default=None)
+_running: ContextVar[str] = ContextVar("live_running", default="-")
+"""`<arm> <task>` for the run a log record came from: eight runs overlap, and a bare retry warning names none."""
+
+
+class _NameRun(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.run = _running.get()
+        return True
 
 
 class ArmReport(BaseModel):
@@ -442,6 +450,7 @@ async def run_arm(
     bitwarden: bool,
     record: Path | None,
 ) -> EvalRow:
+    _running.set(f"{arm} {task.id}")
     truth = await task.truth(http)
     started = time.monotonic()
     at = time.time()
@@ -519,6 +528,8 @@ async def _fast_report(
         unknown_cost=cost.has_unknown,
         observe_error=seen.observe_error,
         seconds_by_call=cost.seconds_by_call(),
+        model=f"jev {load_settings().jev_route()[0]}",
+        text_model=", ".join(sorted(set(load_settings().models().values()))),
         cost_by_component={
             c: round(sum(line.dollars or 0 for line in cost.lines if line.component == c), 5)
             for c in {line.component.value for line in cost.lines}
@@ -560,6 +571,17 @@ def summarize(rows: list[EvalRow], arms: list[str]) -> None:
                 shadow.update(set(r.would_fire))
         for tripwire, runs in shadow.most_common():
             print(f"  would-fire {tripwire:18} {runs}/{passed} passing runs")
+        for r in arm_rows:
+            if not r.passed:
+                print(f"  FAIL {r.task:22} {_cause(r)}")
+
+
+def _cause(row: EvalRow) -> str:
+    """Why a run failed, leading with how the run itself ended: a grader's "answer lacks X: None" only restates
+    that a run which died on a provider outage had no answer."""
+    if row.error and row.status is not None:
+        return f"{row.status}: {row.error}" + (f" | graded: {row.failure}" if row.failure else "")
+    return row.failure or f"status {row.status}"
 
 
 async def main(argv: list[str]) -> int:
@@ -586,6 +608,12 @@ async def main(argv: list[str]) -> int:
         for t in SUITES[suite]
         if (not args.only or t.id in args.only) and (not args.category or t.category.value in args.category)
     ]
+    handler = logging.StreamHandler(sys.stdout)
+    handler.addFilter(_NameRun())
+    handler.setFormatter(logging.Formatter("%(levelname)-7s %(run)s %(name)s: %(message)s"))
+    logging.basicConfig(level=logging.WARNING, handlers=[handler])
+    if "fast" in args.arms:
+        print(f"PROVIDERS {load_settings().providers()}", flush=True)
     if "ultrafast" in args.arms:
         await prepare_ultrafast()
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -617,7 +645,7 @@ async def main(argv: list[str]) -> int:
                 mark = "PASS" if row.passed else "FAIL"
                 print(
                     f"{mark} {arm:9} {task.id:20} {row.seconds!s:>6}s ${row.dollars!s:<8}",
-                    row.failure or "",
+                    "" if row.passed else _cause(row),
                     flush=True,
                 )
                 return row
