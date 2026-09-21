@@ -11,6 +11,8 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-22
+
 - **A page is read before it is scrolled.** A read takes in the whole page, so scrolling one nobody has read only
   spends steps: a lookup for Mongolia on a long country list scrolled until recovery ran out and stopped stuck
   with the answer on the page. Once a page is read, scrolling it goes ahead, as a list that draws more on scroll
@@ -277,7 +279,8 @@ Fixed in the same release, from tasks that failed in the field:
 - First release: a browser agent that picks its next action from the controls the page actually has, with an
   LLM to plan and read, and code owning verification, safety and secrets.
 
-[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.5.1...HEAD
+[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.5.2
 [0.5.1]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.5.1
 [0.5.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.5.0
 [0.4.2]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.2
