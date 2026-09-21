@@ -50,7 +50,7 @@ async def _once(
         if not wanted:
             break
         following = next_page_control(observation)
-        # As in an agent run, "this page" is pinned to the first page once the pages may be a list's several pages.
+        # As in an agent run, "this page" is pinned to the first page once a list may run past one page.
         began = pages[0][0].url if following is not None or index else None
         outcome = await read(
             llm,

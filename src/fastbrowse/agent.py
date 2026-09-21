@@ -1716,7 +1716,7 @@ def _signature(decision: Decision, observation: Observation) -> Signature:
 
 
 def read_question(task: str, wanted: Sequence[Requirement], *, began_at: str | None = None) -> str:
-    """The reader's question. `began_at` is the run's first page, given once a list may run over several pages:
+    """The reader's question. `began_at` is the run's first page, given once a list may run past one page:
     "this page and the next" was written there, and read from the second page it would otherwise mean the second
     and the third, or never say the list ends."""
     # Unresolved requirements may refer to an earlier one; keep the task's constraints in every read.
