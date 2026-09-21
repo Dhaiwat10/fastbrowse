@@ -11,6 +11,12 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **Counts, totals and superlatives cite their underlying records.** The reader preserves every compared
+  record across pages and records which facts a conclusion draws on. Drafted and composed answers carry
+  those records through claim checks, citation links and `RunResult.citations`. Required evidence keeps
+  its full basis within the notes budget or stops at `observation_limit`.
+- **Concurrent live evals keep separate traces.** Each run records only its own events, including events
+  from its child tasks. Finishing one run no longer disables trace collection for the others.
 - **Answer claims link to the words that support them.** `RunResult.citations` exposes each cited
   fact, its requirement, source URL, verbatim quote and text-fragment deep link. An answer citing an
   unknown reference fails the claim check and falls back to one drafted from verified facts. `RunResult.answer` contains numbered Markdown links;

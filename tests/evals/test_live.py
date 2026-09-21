@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import runpy
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import date, timedelta
@@ -11,12 +13,63 @@ import pytest
 
 from fastbrowse.evals import live, live_tasks
 from fastbrowse.evals.live_tasks import TASKS, LiveTask, Outcome
+from fastbrowse.telemetry import TRACE, trace
 
 RUNNER: dict[str, Any] = runpy.run_path(str(live.ULTRAFAST_RUNNER))
 
 
 def task(task_id: str) -> LiveTask:
     return next(t for t in TASKS if t.id == task_id)
+
+
+@pytest.mark.parametrize("cancel_first", [False, True])
+async def test_concurrent_traces_keep_only_their_runs_events(
+    cancel_first: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(TRACE, "level", logging.WARNING)
+    TRACE.setLevel(logging.WARNING)
+    handlers = tuple(TRACE.handlers)
+    started, overlapping, finish_first, finish_second = (asyncio.Event() for _ in range(4))
+    collected: dict[str, list[object]] = {}
+
+    async def child(name: str) -> None:
+        trace("child", run=name)
+
+    async def run(name: str, ready: asyncio.Event, finish: asyncio.Event) -> None:
+        with live._traced() as events:
+            collected[name] = events
+            trace("start", run=name)
+            await asyncio.create_task(child(name))
+            ready.set()
+            await finish.wait()
+            trace("end", run=name)
+
+    first = asyncio.create_task(run("first", started, finish_first))
+    await started.wait()
+    second = asyncio.create_task(run("second", overlapping, finish_second))
+    try:
+        await overlapping.wait()
+        trace("outside")
+        if cancel_first:
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+        else:
+            finish_first.set()
+            await first
+        assert TRACE.level == logging.DEBUG
+        finish_second.set()
+        await second
+        assert collected["first"] == [
+            {"event": event, "run": "first"}
+            for event in (("start", "child") if cancel_first else ("start", "child", "end"))
+        ]
+        assert collected["second"] == [{"event": event, "run": "second"} for event in ("start", "child", "end")]
+        assert TRACE.level == logging.WARNING and tuple(TRACE.handlers) == handlers
+    finally:
+        first.cancel()
+        second.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
 
 
 def test_videos_count_up_past_existing_files(tmp_path: Path) -> None:

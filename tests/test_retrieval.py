@@ -882,6 +882,112 @@ async def test_a_later_chunk_is_read_against_what_earlier_chunks_of_the_page_fou
     assert "the world as we have created it" in later, "chunk two cannot count what chunk one found unseen"
 
 
+@pytest.mark.parametrize("composed", [False, True], ids=["draft", "composer"])
+@pytest.mark.parametrize("answer", ["There are 4 books.", "The total is $53.", "Pine is the cheapest book at $7."])
+async def test_derived_answer_cites_and_checks_every_record_across_pages(composed: bool, answer: str) -> None:
+    from fastbrowse.verification import check_claims
+
+    first = capture(
+        (BlockKind.PARAGRAPH, "Oak $19"),
+        (BlockKind.PARAGRAPH, "Redwood $12"),
+        (BlockKind.PARAGRAPH, "Page 1 of 2"),
+    )
+    notes = Notes()
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {"text": "Oak $19", "source_id": "s0", "quote": "Oak $19"},
+                    {"text": "Redwood $12", "source_id": "s1", "quote": "Redwood $12"},
+                    {
+                        "text": "Two books on page one, total $31.",
+                        "source_id": "s2",
+                        "quote": "Page 1 of 2",
+                        "draws_on": ["claim:1", "claim:0"],
+                    },
+                ],
+                "answered": False,
+                "continues": ["r"],
+            }
+        ]
+    )
+    await read(llm, first, answer, ["r"], notes)
+    earlier = tuple(notes.evidence)
+    last = capture((BlockKind.PARAGRAPH, "Pine $7"), (BlockKind.PARAGRAPH, "Elm $15"))
+    llm.responses.append(
+        {
+            "claims": [
+                {"text": "Pine $7", "source_id": "s0", "quote": "Pine $7"},
+                {"text": "Elm $15", "source_id": "s1", "quote": "Elm $15"},
+                {
+                    "requirement_id": "r",
+                    "text": answer,
+                    "source_id": "s0",
+                    "quote": "Pine $7",
+                    "draws_on": ["claim:1", earlier[2], "claim:0", earlier[0]],
+                },
+            ],
+            "answered": True,
+        }
+    )
+    outcome = await read(llm, last, answer, ["r"], notes, continuing=("r",))
+    keys = tuple(notes.evidence)
+    assert all(f"[{key}]" in llm.calls[-1][1][-1].content for key in earlier)
+    assert outcome.facts[-1].basis == (keys[4], keys[2], keys[3], keys[0])
+    assert notes.supporting("r")[0][1].text == answer
+    plan = Plan(
+        requirements=(Requirement(id="r", text=answer, kind=RequirementKind.INFORMATION),), answer_expected=True
+    )
+    if composed:
+        llm.responses.append({"claims": [{"text": answer, "evidence_ids": [keys[3]]}]})
+        result = (await compose(llm, answer, plan, notes)).data
+    else:
+        result = draft_answer(plan, notes)
+    assert result is not None and result.answer == answer
+    assert result.claims[0].evidence_ids == keys
+    assert [citation.quote for citation in result.citations] == [fact.evidence.quote for fact in notes.facts]
+    assert [citation.id for citation in result.citations] == list(range(1, 6))
+    for citation in result.citations:
+        assert f"[{citation.id}](<{citation.deep_link}>)" in result.linked_answer
+    jev = _ReadJev(
+        {key: NoulAnswer(probability=0.05) for key in ("unsupported_0", "contradicted_0", "requirement_omitted")}
+    )
+    assert await check_claims(jev, result, notes, Thresholds()) is result
+    for name in ("unsupported_0", "contradicted_0"):
+        question = jev.requests[0][1][name]
+        assert all(fact.evidence.model_dump_json() in question.instructions for fact in notes.facts)
+
+
+async def test_basis_references_cannot_name_rejected_or_later_claims(caplog: pytest.LogCaptureFixture) -> None:
+    page = capture((BlockKind.PARAGRAPH, "A $3"), (BlockKind.PARAGRAPH, "B $5"))
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {"text": "Forged", "source_id": "s0", "quote": "Not on page"},
+                    {"text": "A $3", "source_id": "s0", "quote": "A $3"},
+                    {
+                        "requirement_id": "r",
+                        "text": "A is cheaper",
+                        "source_id": "s0",
+                        "quote": "A $3",
+                        "draws_on": ["claim:0", "claim:1", "claim:1", "claim:3", "invented:0:99"],
+                    },
+                    {"text": "B $5", "source_id": "s1", "quote": "B $5"},
+                ],
+                "answered": True,
+            }
+        ]
+    )
+    notes = Notes()
+    with caplog.at_level("DEBUG", logger="fastbrowse.retrieval"):
+        result = await read(llm, page, "Cheapest?", ["r"], notes)
+    assert result.rejected_quotes == 1
+    assert notes.supporting("r")[0][1].basis == (evidence_id(notes.facts[0].evidence),)
+    for reference in ("claim:0", "claim:3", "invented:0:99"):
+        assert f"dropped unknown basis reference='{reference}'" in caplog.text
+
+
 @pytest.mark.parametrize("confidence", [0.89, 0.95])
 async def test_only_confident_absence_skips_the_llm_without_evidencing_a_requirement(
     confidence: float, caplog: pytest.LogCaptureFixture

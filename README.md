@@ -241,6 +241,7 @@ with neither argument, it runs local Chrome. Passing both is an error.
 `RunResult.citations` is a tuple of `Citation` objects, also importable from `fastbrowse`. Each has `id`
 (the number in the answer), `text` (the Notes fact), `requirement_id` (or `None`), `url`, `quote` and
 `deep_link`. Each claim in `result.answer` carries numbered Markdown links to its supporting facts.
+Counts, totals and superlatives also cite the records they were derived from, including records read on earlier pages.
 Only verified Notes facts supply citation URLs and quotes; an answer citing an unknown reference fails the
 claim check, and the run falls back to an answer drafted from verified facts. Facts omitted from the answer have no citation, and citation numbers can have gaps.
 

@@ -11,6 +11,8 @@ class Fact(Frozen):
     requirement_id: str | None = None
     text: str
     evidence: Evidence
+    basis: tuple[str, ...] = ()
+    """Evidence ids of the facts this conclusion counts or compares."""
     reader: FactReader
     """Which reader verified the quote; citations are built from it."""
 
@@ -50,6 +52,11 @@ class Notes:
         if fact.requirement_id is not None:
             requirements.add(fact.requirement_id)
         if key in self._facts:
+            previous = self._facts[key]
+            basis = tuple(dict.fromkeys((*previous.basis, *fact.basis)))
+            # A winner can quote a row already collected as context; its answer must survive that reuse.
+            kept = fact if previous.requirement_id is None and fact.requirement_id is not None else previous
+            self._facts[key] = kept.model_copy(update={"basis": basis})
             return False
         self._facts[key] = fact
         return True
@@ -60,6 +67,19 @@ class Notes:
     def supporting(self, requirement_id: str) -> tuple[tuple[str, Fact], ...]:
         """The facts citing a requirement, keyed by evidence id, in the order they were read."""
         return tuple((key, self._facts[key]) for key, ids in self._requirements.items() if requirement_id in ids)
+
+    def expand_evidence_ids(self, keys: Iterable[str]) -> tuple[str, ...]:
+        """Cited facts and their transitive basis, once each in read order."""
+        pending = list(keys)
+        seen: set[str] = set()
+        while pending:
+            key = pending.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            if key in self._facts:
+                pending.extend(self._facts[key].basis)
+        return tuple(key for key in self._facts if key in seen)
 
     def unresolved(self, plan: Plan) -> tuple[Requirement, ...]:
         return tuple(requirement for requirement in plan.requirements if not self.evidenced(requirement.id))
@@ -72,8 +92,8 @@ class Notes:
     def render_with_ids(
         self, max_chars: int, *, preserve_requirements: bool = False, json_encoded: bool = False
     ) -> RenderedNotes:
-        """Every fact in read order when they all fit; otherwise uncited context is dropped before requirement
-        evidence, each group kept in read order.
+        """Every fact in read order when they all fit; otherwise unrelated context is dropped before requirement
+        evidence and its basis, each group kept in read order.
 
         Read order is what the composer weighs: listing requirement facts first put a reader's one-quote
         conclusion ("X is the most expensive") above the prices it compared, and the answer cited only that.
@@ -88,6 +108,7 @@ class Notes:
                 f"requirements={','.join(sorted(self._requirements[key])) or '-'} "
                 f"source={json.dumps(fact.evidence.source_id)} url={json.dumps(fact.evidence.url)} "
                 f"quote={json.dumps(fact.evidence.quote, ensure_ascii=False)}"
+                + (f" basis={json.dumps(fact.basis)}" if fact.basis else "")
             )
 
         def size(text: str) -> int:
@@ -97,13 +118,16 @@ class Notes:
         complete = "\n".join(line(key, fact) for key, fact in self._facts.items())
         if size(complete) <= max_chars:
             return RenderedNotes(text=complete, evidence_ids=tuple(self._facts))
-        ordered = sorted(self._facts.items(), key=lambda item: not self._requirements[item[0]])
-        required = sum(bool(ids) for ids in self._requirements.values())
+        required = set(self.expand_evidence_ids(key for key, ids in self._requirements.items() if ids))
+        ordered = sorted(self._facts.items(), key=lambda item: item[0] not in required)
         lines = [line(key, fact) for key, fact in ordered]
         keys = tuple(key for key, _ in ordered)
         for count in range(len(lines) - 1, -1, -1):
-            if preserve_requirements and count < required:
+            if preserve_requirements and count < len(required):
                 raise NotesTooLarge(f"Requirement evidence exceeds the {max_chars} character notes budget")
+            kept = set(keys[:count])
+            if any(set(fact.basis) - kept for _, fact in ordered[:count]):
+                continue
             result = "\n".join([*lines[:count], f"[{len(lines) - count} facts omitted]"])
             if size(result) <= max_chars:
                 return RenderedNotes(text=result, evidence_ids=keys[:count])

@@ -27,15 +27,23 @@ requirement absent from the page. Uncertain choices, comparisons, partial eviden
 reach the LLM reader. `FactReader` records `jev_choice` or `llm`. Both readers must locate their quotes in
 the capture before a fact enters `Notes`.
 
+For a count, total or superlative, the reader quotes every compared record and its value on every page.
+Its conclusion lists those facts in `draws_on`, using evidence ids from collected notes or `claim:N` for
+earlier claims in the same response, indexed from zero. Code resolves these references to verified spans
+and drops unknown references with a debug log. `Fact.basis` keeps the resolved ids, including when a span is reused.
+
 Answer claims use numbered Markdown links built from those notes. `RunResult.citations` exposes the cited
 facts and text-fragment deep links; unused facts have no citation. An answer citing an unknown reference
 fails the claim check, and the run falls back to an answer drafted from verified facts. Jev checks the answer's claims against their quotes before completion.
+Both drafted and composed claims include the transitive basis of each cited fact, deduplicated in read order.
+The claim check, numbered links and citation records all use those expanded ids.
 
 ## Prompt limits and progress
 
 `Config.observation` names the limits for viewport text, working notes and recent and earlier history.
 `Config.tokens` names the input budgets and reader/composer output limits. Working notes can omit facts
-with a count; verdict prompts retain all requirement evidence or stop at `observation_limit`. The Jev
+with a count; verdict prompts retain all requirement evidence or stop at `observation_limit`. The notes
+budget keeps a retained fact's basis with it; requirement evidence includes its transitive basis. The Jev
 completion check reduces page text first to make room for that evidence. Cut page text carries a marker
 when there is room for one; an excerpt too small to carry the marker is empty.
 

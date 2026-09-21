@@ -32,6 +32,7 @@ import time
 from collections import Counter
 from collections.abc import Generator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, cast
 from unittest import mock
@@ -147,27 +148,37 @@ class _ObservedAgent(Agent):
         return result
 
 
+_trace_events: ContextVar[list[object] | None] = ContextVar("live_trace_events", default=None)
+
+
 class _Collect(logging.Handler):
     def __init__(self) -> None:
         super().__init__(logging.DEBUG)
         self.events: list[object] = []
+        self.previous_level = next(
+            (handler.previous_level for handler in TRACE.handlers if isinstance(handler, _Collect)), TRACE.level
+        )
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.events.append(getattr(record, "trace", record.getMessage()))
+        if _trace_events.get() is self.events:
+            self.events.append(getattr(record, "trace", record.getMessage()))
 
 
 @contextmanager
 def _traced() -> Generator[list[object]]:
-    """The agent's trace events for one run; tasks run one at a time, so one handler at a time sees them."""
+    """Only this run and its child tasks contribute to its trace while other runs overlap."""
     handler = _Collect()
-    previous = TRACE.level
+    token = _trace_events.set(handler.events)
     TRACE.addHandler(handler)
     TRACE.setLevel(logging.DEBUG)
     try:
         yield handler.events
     finally:
         TRACE.removeHandler(handler)
-        TRACE.setLevel(previous)
+        _trace_events.reset(token)
+        # Runs can finish out of order; the last collector restores the level from before any run started.
+        if not any(isinstance(active, _Collect) for active in TRACE.handlers):
+            TRACE.setLevel(handler.previous_level)
 
 
 async def fast_arm(
