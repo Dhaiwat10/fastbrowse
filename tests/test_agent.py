@@ -380,9 +380,7 @@ async def test_url_edits_are_not_reads_but_each_result_in_one_document_is_preser
     for text in ("First result: 12", "Second result: 18"):
         obs = obs.model_copy(update={"url": results_url})
         page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, text)).model_copy(update={"url": obs.url}))
-        # The read is kept, but it resolved nothing, so the interaction Jev chose still applies.
-        assert not await agent._read_before_interaction(state, obs, relevant)
-        assert text in [fact.evidence.quote for fact in state.notes.facts]
+        assert await agent._read_before_interaction(state, obs, relevant)
         # Even a URL rewrite and another choice to READ cannot re-read this content and requirement set.
         obs = obs.model_copy(update={"url": obs.url + "&view=compact"})
         assert not await agent._read_before_interaction(state, obs, relevant)
@@ -452,6 +450,53 @@ async def test_a_message_is_read_before_mutation_and_the_next_action_is_reconsid
         assert not state.notes.facts
 
 
+@pytest.mark.parametrize("second", ["read", "click"])
+async def test_after_a_forced_read_jev_decides_again_but_a_repeat_read_takes_the_interaction_it_deferred(
+    second: str,
+) -> None:
+    fare = "Oslo to Rome, 1 stop, $320"
+    nonstop, pager = _button("Nonstop"), _button("Next")
+    obs = observation((nonstop, pager)).model_copy(update={"viewport_text": fare})
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the cheapest nonstop fare", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=obs)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, fare)))
+    page.screenshot = AsyncMock(return_value=b"")
+    page.artifacts = ()
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+
+    class RereadingJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            # Asked again with the fare in notes, Jev either re-reads the same list (Flights) or turns the page.
+            if "operation" in questions and isinstance(state, dict) and state.get("notes"):
+                self.pick = {
+                    "operation": second,
+                    "click_target": pager.id,
+                    "read_assessment": "evidence",
+                    "r1": "synthesis",
+                }
+            return await super().evaluate(state, questions)
+
+    jev = RereadingJev(
+        {"operation": "click", "click_target": nonstop.id, "read_assessment": "evidence", "r1": "synthesis"},
+        noul=0.0,
+    )
+    llm = ScriptedLLM([{"claims": [{"text": fare, "source_id": "s0", "quote": fare}], "answered": False}])
+    agent = Agent(page, jev, llm)
+    state.ledger.limits = Limits(max_steps=2)
+    from fastbrowse.telemetry import BudgetExceeded
+
+    with pytest.raises(BudgetExceeded):
+        await agent._loop(state, None, None)
+    assert [step.operation for step in state.steps] == [Operation.READ, Operation.CLICK]
+    expected = nonstop if second == "read" else pager
+    assert state.steps[1].target == expected.label
+
+
 async def test_unchanged_unsuccessful_preservation_does_not_loop_or_authorize_the_action() -> None:
     state = await run_state()
     state.ready_plan = Plan(
@@ -468,8 +513,7 @@ async def test_unchanged_unsuccessful_preservation_does_not_loop_or_authorize_th
     )
     decision = await decide(jev, obs, context(), Config())
     agent = Agent(page, jev, llm)
-    assert not await agent._read_before_interaction(state, obs, decision)
-    assert state.steps[-1].operation is Operation.READ
+    assert await agent._read_before_interaction(state, obs, decision)
     assert not await agent._read_before_interaction(state, obs, decision)
     assert not await agent._read(state, await agent._capture(), obs)
     assert len(llm.calls) == 1 and not state.notes.facts

@@ -215,6 +215,8 @@ class _RunState:
     """Page states where an unsure pick has been acted on instead of recovering; the next one there recovers."""
     reads: set[ReadKey] = field(default_factory=set)
     """Attempted reads by document, exact content and outstanding requirements, independent of URL edits."""
+    deferred: tuple[ReadKey, Decision] | None = None
+    """The interaction a forced read went before, with the content it read, offered again for one decision."""
     next_page: bool = False
     """Open this page's next page, set when the reader says a list the run needs goes on past the page it read."""
     paged_from: str | None = None
@@ -372,6 +374,14 @@ class Agent:
                 capture = await self._capture()
                 read_key = _read_key(state, observation, capture)
                 exhausted = read_key in state.reads
+            deferred, state.deferred = state.deferred, None
+            if deferred is not None and exhausted and decision.operation is Operation.READ and read_key == deferred[0]:
+                # Asked again after the forced read, Jev chose to read the list it had just read: on Flights the
+                # unfiltered list could not show the cheapest nonstop fare, the skipped re-read ended the run stuck,
+                # and the "Nonstop" filter it had chosen was never applied. Nothing on the page changed, so the
+                # interaction still applies to it.
+                decision = deferred[1]
+                uncertain = decision.confidence < self._config.thresholds.recover_below
             attempted = state.attempts.get(_signature(decision, observation, read_key))
             idle = exhausted and (decision.operation is Operation.DONE or (attempted is not None and attempted.idle))
             if (directed := _follow_recovery(state, observation, decision, uncertain=uncertain or idle)) is not None:
@@ -1161,17 +1171,14 @@ class Agent:
         if not _unread(plan, state.notes):
             return False
         capture = await self._capture()
-        if _read_key(state, observation, capture) in state.reads:
+        key = _read_key(state, observation, capture)
+        if key in state.reads:
             return False
         # A dismissal can remove the answer without committing anything. Read first, then reconsider with
         # the evidence in notes; the next decision still passes the ordinary authorization gate.
-        unresolved = state.notes.unresolved(plan)
         await self._step(state, observation, _code_decision(Operation.READ, None), Decider.CODE, capture=capture)
-        # A read that resolved no requirement leaves the interaction as the way on: Jev chose the Flights
-        # "Nonstop" filter, the unfiltered list it read could not show the cheapest nonstop fare, and asked again
-        # Jev chose to read the same list, which was skipped as read, until the run stopped stuck. Reading changed
-        # nothing on the page, so the interaction still applies to it.
-        return state.notes.unresolved(plan) != unresolved
+        state.deferred = (key, decision)
+        return True
 
     async def _read(
         self, state: _RunState, capture: Capture | None = None, observation: Observation | None = None
