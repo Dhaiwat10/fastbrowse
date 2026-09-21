@@ -14,6 +14,9 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 - **A reply the provider cut short is an outage, not a truncation.** JSON that ends mid-value short of the
   output cap is asked for again at the same cap; a second one ends the run `unavailable`, naming how many
   tokens came back. Only a reply that used the cap gets more room and, if cut again, is reported as truncated.
+- **A browser that cannot be reached yet is an outage, not a failed task.** A dropped or refused connection
+  when the run first connects, as a cloud browser still starting can give, ends the run `unavailable`, so the
+  eval runs it again; any other connection failure is still an error.
 - **An eval waits out a rate-limited answer key.** Fetching a task's expected answer from a public API now
   retries a 429, 5xx or dropped connection with the same backoff as a run, where it used to end the whole eval.
 
