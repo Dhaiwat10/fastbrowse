@@ -817,6 +817,10 @@ class Claim(Frozen):
 
 class ComposedAnswer(Frozen):
     answer: str
+    """The claims as plain text: what Jev judges. A link's percent-encoded quote read to it as more evidence
+    than the claim cited, so a draft with links was sent for rewriting and its one-quote claims were doubted."""
+    linked_answer: str
+    """The same claims, each followed by numbered Markdown links to its quotes: what the caller receives."""
     claims: tuple[Claim, ...]
     citations: tuple[Citation, ...] = ()
     dropped_claims: int = Field(default=0, ge=0)
@@ -847,12 +851,13 @@ def assemble_answer(
         for index, fact in enumerate(notes.facts, 1)
     }
     cited = {key for claim in claims for key in claim.evidence_ids}
-    paragraphs = []
+    linked = []
     for claim in claims:
         links = " ".join(f"[{known[key].id}](<{known[key].deep_link}>)" for key in dict.fromkeys(claim.evidence_ids))
-        paragraphs.append(f"{claim.text} {links}")
+        linked.append(f"{claim.text} {links}")
     return ComposedAnswer(
-        answer="\n\n".join(paragraphs),
+        answer="\n\n".join(claim.text for claim in claims),
+        linked_answer="\n\n".join(linked),
         claims=tuple(claims),
         citations=tuple(citation for key, citation in known.items() if key in cited),
         dropped_claims=dropped_claims,

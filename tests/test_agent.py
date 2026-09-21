@@ -1241,7 +1241,7 @@ async def test_a_secret_quoted_by_a_citation_is_redacted_from_its_links_too(read
 
     link = text_fragment(url, quote)
     cited = Citation(id=1, text=quote, url=url, quote=quote, deep_link=link)
-    composed = ComposedAnswer(answer=f"{quote} [1](<{link}>)", claims=(), citations=(cited,))
+    composed = ComposedAnswer(answer=quote, linked_answer=f"{quote} [1](<{link}>)", claims=(), citations=(cited,))
 
     answer, (public,) = agent._public_answer(composed)
 
@@ -1261,6 +1261,6 @@ async def test_a_link_sharing_another_links_start_is_still_redacted() -> None:
         for n, quote in enumerate(quotes, 1)
     )
     body = " ".join(f"[{c.id}](<{c.deep_link}>)" for c in cited)
-    answer, public = agent._public_answer(ComposedAnswer(answer=body, claims=(), citations=cited))
+    answer, public = agent._public_answer(ComposedAnswer(answer="", linked_answer=body, claims=(), citations=cited))
     assert "alpha" not in answer
     assert all(p.deep_link in answer for p in public)

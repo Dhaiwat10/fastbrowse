@@ -1575,7 +1575,7 @@ class Agent:
             citations.append(public)
         # Every link destination in one pass. Replacing one link at a time rewrote the start of any longer link
         # sharing its prefix, which then no longer matched and kept its percent-encoded secret.
-        answer = _ANSWER_LINK.sub(lambda link: f"](<{links[link.group(1)]}>)", composed.answer)
+        answer = _ANSWER_LINK.sub(lambda link: f"](<{links[link.group(1)]}>)", composed.linked_answer)
         return redact(answer), tuple(citations)
 
     def _plan_mark(self, state: _RunState) -> str:

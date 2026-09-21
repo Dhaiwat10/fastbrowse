@@ -465,7 +465,8 @@ async def test_compose_drops_uncited_and_unknown_claims_including_answer_text(ca
     )
     result = await compose(llm, "Find price and shipping", plan, notes, tokens=TokenBudget(compose_output_tokens=4096))
     assert llm.output_caps == [4096]
-    assert result.data.answer == "It is $12. [1](<https://example.test#:~:text=Price%20is%20%2412>)"
+    assert result.data.answer == "It is $12."
+    assert result.data.linked_answer == "It is $12. [1](<https://example.test#:~:text=Price%20is%20%2412>)"
     assert len(result.data.citations) == 1
     citation = result.data.citations[0]
     assert (citation.id, citation.text, citation.requirement_id) == (1, "Price is $12", "r1")
@@ -672,7 +673,7 @@ async def test_only_a_confident_jev_no_lets_the_read_facts_stand_as_the_answer(
         answer_expected=True,
     )
     draft = draft_answer(plan, notes)
-    assert draft is not None and draft.answer.startswith("The price is $12. [1](<")
+    assert draft is not None and draft.linked_answer.startswith("The price is $12. [1](<")
     assert draft.citations[0].quote == evidence.quote
     assert draft.claims[0].evidence_ids == (evidence_id(evidence),)
     observation = Observation(
@@ -699,7 +700,7 @@ async def test_action_only_completion_never_sends_empty_claim_check(answer: str,
 
     jev = Mock(spec=JevClient)
     jev.evaluate = AsyncMock(side_effect=AssertionError("empty request must not reach the provider"))
-    composed = ComposedAnswer(answer=answer, claims=(), dropped_claims=dropped)
+    composed = ComposedAnswer(answer=answer, linked_answer=answer, claims=(), dropped_claims=dropped)
     assert (await check_claims(jev, composed, Notes(), Thresholds()) is not None) is expected
     jev.evaluate.assert_not_called()
 
@@ -739,7 +740,7 @@ async def test_a_doubted_claim_is_dropped_only_if_the_rest_still_answers(omitted
     if omitted_after > 0.5:
         assert held is None
     else:
-        assert held is not None and held.answer.startswith("It says you are logged in. [1](<")
+        assert held is not None and held.linked_answer.startswith("It says you are logged in. [1](<")
         assert held.citations == composed.citations[:1]
 
 
@@ -778,7 +779,7 @@ async def test_pruning_the_only_claim_for_a_requirement_is_an_omission() -> None
         Claim(text="The most expensive is A Year in Provence.", evidence_ids=("c:0:18",)),
         Claim(text="It costs £56.88.", evidence_ids=("c:40:46",)),
     )
-    composed = ComposedAnswer(answer="unused", claims=claims, requirements=requirements)
+    composed = ComposedAnswer(answer="unused", linked_answer="unused", claims=claims, requirements=requirements)
     assert await check_claims(Jev(), composed, notes, Thresholds()) is None
 
 
