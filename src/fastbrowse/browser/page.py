@@ -798,9 +798,11 @@ class CdpPage(Page):
         deadline = time.monotonic() + _TARGET_STABILITY_SECONDS
         while True:
             await self._move(session_id, point)
+            # Bounded as in `_move`: a dialog the pointer opens in the next frame leaves this wait unanswered.
+            with suppress(TimeoutError):
+                await asyncio.wait_for(self._evaluate(self._session.active_session_id, _PRESENTED_JS), 0.5)
             if self._session.pending_dialog() is not None:
                 return StepOutcome.FAILED, "pointer movement opened a dialog before press"
-            await self._evaluate(self._session.active_session_id, _PRESENTED_JS)
             _, guard, fresh = await self._before_action(target, hit_test=True, prepare_fill=prepare_fill)
             if guard != target[3] or fresh is None:
                 return StepOutcome.STALE, "control changed before pointer press"
