@@ -1426,3 +1426,22 @@ async def test_a_provider_outage_ends_the_run_apart_from_a_failure(failure: JevE
     result = await agent.run("Buy it", limits=Limits(max_steps=2))
 
     assert result.status == status
+
+
+async def test_a_page_nobody_read_is_read_before_it_is_scrolled() -> None:
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find Mongolia's population", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    obs = observation((_button("Next"),)).model_copy(update={"document_key": "countries"})
+    page = Mock(spec=Page)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Mongolia: population 3086918")))
+    llm = ScriptedLLM([{"claims": [], "answered": False}])
+    jev = ScriptedJev({"operation": "scroll", "read_assessment": "absent", "r1": "synthesis"})
+    decision = await decide(jev, obs, context(), Config())
+    agent = Agent(page, jev, llm)
+    assert await agent._read_before_interaction(state, obs, decision)
+    assert len(llm.calls) == 1
+    # Once this document is read, scrolling it is how the rest of a lazily drawn list comes in.
+    assert not await agent._read_before_interaction(state, obs, decision)
