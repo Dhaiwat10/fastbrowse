@@ -201,6 +201,9 @@ class CdpPage(Page):
     def artifacts(self) -> tuple[Artifact, ...]:
         return self._session.artifacts
 
+    def withhold_frames(self, withheld: bool) -> None:
+        self._session.frames_withheld = withheld
+
     # -- observe / capture -------------------------------------------------------------------------
 
     async def observe(self) -> Observation:

@@ -267,10 +267,16 @@ async def test_jev_still_unsure_after_recovery_takes_the_action_recovery_named()
     assert followed is not None and followed.target == buttons[1]
     # Used once: the next unsure step is Jev's to recover from again.
     assert _follow_recovery(state, obs, unsure, uncertain=True) is None
+    # Even authorized, recovery's click is put to Jev: the decision's confidence was Jev's in "Done", not this.
     state.authorization = Authorization(irreversible_actions=True)
     page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    with pytest.raises(_Unsure):
+        await agent._step(state, obs, followed, Decider.LLM)
+    assert state.steps[-1].outcome is StepOutcome.FAILED and state.steps[-1].confidence is None
+    jev.noul = 0.1
     await agent._step(state, obs, followed, Decider.LLM)
     assert state.steps[-1].note == "Click Search for [secret:password]"
+    assert state.steps[-1].confidence is None
 
 
 async def test_an_unsure_pick_is_acted_on_once_per_page_state() -> None:
@@ -941,6 +947,7 @@ async def test_a_secret_the_step_itself_put_on_the_page_suppresses_its_frame() -
     await _click(agent, state, observation((save,)), "Save")
     assert [event.frame for event in events] == [None]
     page.screenshot.assert_not_awaited()
+    page.withhold_frames.assert_called_with(True)
 
 
 def test_a_plan_is_answered_when_what_it_asks_to_find_is_evidenced_whatever_actions_it_lists() -> None:
@@ -1241,3 +1248,19 @@ async def test_a_secret_quoted_by_a_citation_is_redacted_from_its_links_too(read
     assert "hunter" not in answer and "hunter" not in public.model_dump_json()
     assert public.deep_link == text_fragment(public.url, "signed in as [secret:password] today")
     assert public.deep_link in answer
+
+
+async def test_a_link_sharing_another_links_start_is_still_redacted() -> None:
+    # Rewriting one link at a time changed the start of the longer link, which then kept its encoded secret.
+    agent = Agent(Mock(spec=Page), ScriptedJev({}), ScriptedLLM([]))
+    agent._redactor.register("password", "alpha-beta")
+    url = "https://example.test/page"
+    quotes = ("token alpha-beta", "token alpha-beta repeated alpha-beta")
+    cited = tuple(
+        Citation(id=n, text=quote, url=url, quote=quote, deep_link=text_fragment(url, quote))
+        for n, quote in enumerate(quotes, 1)
+    )
+    body = " ".join(f"[{c.id}](<{c.deep_link}>)" for c in cited)
+    answer, public = agent._public_answer(ComposedAnswer(answer=body, claims=(), citations=cited))
+    assert "alpha" not in answer
+    assert all(p.deep_link in answer for p in public)

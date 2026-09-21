@@ -135,6 +135,8 @@ class BrowserSession:
         self._owned: set[str] = set()
         self._active_target_id = ""
         self._on_frame = on_frame
+        # Set while the page may show a secret: frames are still acked, so the cast keeps pace, but not delivered.
+        self.frames_withheld = False
         self._screencast_session_id: str | None = None
         self._screencast_lock = asyncio.Lock()
         self._pending_frame: _Frame | None = None
@@ -444,7 +446,12 @@ class BrowserSession:
                 self._pending_frame = None
                 try:
                     active = self._tabs.get(self._active_target_id)
-                    if self._on_frame is not None and active is not None and frame.session_id == active.session_id:
+                    if (
+                        self._on_frame is not None
+                        and not self.frames_withheld
+                        and active is not None
+                        and frame.session_id == active.session_id
+                    ):
                         await self._on_frame(base64.b64decode(frame.data, validate=True))
                 finally:
                     self._ack(frame)

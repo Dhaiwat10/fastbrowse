@@ -116,8 +116,10 @@ class Recording:
     def _on_frame(self, event: ScreencastFrameEvent, session_id: str | None) -> None:
         # CDP keeps one subscriber per event, so recording must also forward frames to the live view.
         self._session._on_screencast_frame(event, session_id)
-        self._frame = base64.b64decode(event["data"])
         self._frame_at = time.monotonic()
+        # The video holds its last clean frame rather than showing a secret.
+        if not self._session.frames_withheld:
+            self._frame = base64.b64decode(event["data"])
 
     async def _tick(self) -> None:
         if self._ffmpeg is None or self._ffmpeg.stdin is None:

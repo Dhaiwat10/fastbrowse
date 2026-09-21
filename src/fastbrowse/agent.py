@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -111,6 +112,9 @@ _IDLE_CHECKED = frozenset({Operation.CLICK, Operation.ENTER})
 alone, which leaves the DOM as it was, so it is not judged by the DOM."""
 
 logger = logging.getLogger(__name__)
+
+# A cited claim's link as the composer writes it: `[3](<https://page#:~:text=...>)`.
+_ANSWER_LINK = re.compile(r"\]\(<([^>]*)>\)")
 
 type _Prepared = ComposedAnswer | asyncio.Task[Generation[ComposedAnswer]] | None
 """An answer ready before conclusion: the reader's facts Jev accepted as written, or a composer in flight."""
@@ -554,6 +558,9 @@ class Agent:
             act = ActResult(outcome=StepOutcome.EXECUTED, page_changed=False, detail=effect_now)
         else:
             action = await self._action(state, observation, decision, decided_by)
+            if action.secret:
+                # Held from the keystrokes on: a page may mirror the value, and only the next reading shows it.
+                self._page.withhold_frames(True)
             act = await self._page.act(action, self._raw_observation or observation)
             if act.outcome is StepOutcome.STALE and decision.target is not None:
                 act = await self._act_on_twin(action, observation, decision.target) or act
@@ -606,7 +613,7 @@ class Agent:
             outcome=act.outcome,
             url=observation.url,
             target=label,
-            confidence=decision.confidence,
+            confidence=decision.confidence if decided_by is Decider.JEV else None,
             note=self._redactor.redact("\n".join(part for part in (reason, act.detail) if part)) or None,
             facts=tuple(self._public_fact(fact) for fact in state.notes.facts[facts_before:]),
             page_changed=None if decision.operation is Operation.READ else changed,
@@ -720,7 +727,7 @@ class Agent:
         """Every observation models see has resolved secret values blanked, wherever the page echoes them."""
         observation = await self._page.observe()
         self._raw_observation = observation
-        self._secret_on_screen = self._redactor.reveals(observation.model_dump_json())
+        self._secret_on_screen = self._reveals(observation)
         mask = self._redactor.mask
         controls = tuple(
             control.model_copy(
@@ -840,9 +847,15 @@ class Agent:
         action may be the one that put the secret there. A field a page mirrors into ordinary text would
         otherwise reach the caller as pixels, which is the one thing a frame must never carry.
         """
-        if self._redactor.reveals((await self._page.observe()).model_dump_json()):
+        if self._reveals(await self._page.observe()):
             return None
         return await self._page.screenshot()
+
+    def _reveals(self, observation: Observation) -> bool:
+        """Whether a resolved secret shows on the page; live and recorded frames are held back while one does."""
+        revealed = self._redactor.reveals(observation.model_dump_json())
+        self._page.withhold_frames(revealed)
+        return revealed
 
     async def _action(
         self, state: _RunState, observation: Observation, decision: Decision, decided_by: Decider
@@ -928,8 +941,10 @@ class Agent:
     ) -> None:
         thresholds = self._config.thresholds
         authorized = state.authorization.irreversible_actions
-        # Authorized and confident proceeds whatever Jev would say about the action, so it is not asked.
-        if authorized and decision.confidence >= thresholds.sensitive_act_from:
+        # Authorized and confident proceeds whatever Jev would say about the action, so it is not asked. Only Jev's
+        # own confidence counts: a directed action carries the score of the action Jev chose instead, and a
+        # confident READ would otherwise wave recovery's click through unasked.
+        if authorized and not decision.directed and decision.confidence >= thresholds.sensitive_act_from:
             return
         state.ledger.reserve(CostComponent.JEV)
         # Only the address goes with the question: the page's own text is what would argue a harmful action
@@ -958,7 +973,7 @@ class Agent:
                 outcome=StepOutcome.FAILED,
                 url=observation.url,
                 target=self._redactor.redact(label),
-                confidence=decision.confidence,
+                confidence=None if decision.directed else decision.confidence,
                 note=self._redactor.redact(reason),
                 page_changed=False,
                 duration_ms=0,
@@ -1544,8 +1559,8 @@ class Agent:
         from the redacted quote and swapped into the answer before the answer itself is redacted.
         """
         redact = self._redactor.redact
-        answer = composed.answer
         citations = []
+        links: dict[str, str] = {}
         for citation in composed.citations:
             url, quote = redact(citation.url), redact(citation.quote)
             public = citation.model_copy(
@@ -1556,8 +1571,11 @@ class Agent:
                     "deep_link": text_fragment(url, quote),
                 }
             )
-            answer = answer.replace(citation.deep_link, public.deep_link)
+            links[citation.deep_link] = public.deep_link
             citations.append(public)
+        # Every link destination in one pass. Replacing one link at a time rewrote the start of any longer link
+        # sharing its prefix, which then no longer matched and kept its percent-encoded secret.
+        answer = _ANSWER_LINK.sub(lambda link: f"](<{links[link.group(1)]}>)", composed.answer)
         return redact(answer), tuple(citations)
 
     def _plan_mark(self, state: _RunState) -> str:
@@ -1803,9 +1821,11 @@ def _follow_recovery(
         return None
     operation, control_id = directed
     if control_id is None:
-        return decision.model_copy(update={"operation": operation, "target": None})
+        return decision.model_copy(update={"operation": operation, "target": None, "directed": True})
     target = next((c for c in observation.controls if c.id == control_id and operation in c.operations), None)
-    return None if target is None else decision.model_copy(update={"operation": operation, "target": target})
+    if target is None:
+        return None
+    return decision.model_copy(update={"operation": operation, "target": target, "directed": True})
 
 
 async def _discard[T](task: asyncio.Task[T]) -> None:
