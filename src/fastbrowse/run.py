@@ -140,6 +140,7 @@ async def run_task(
             llm = llm or settings.llm(client)
             session: BrowserSession | None = None
             result: RunResult | None = None
+            recording: Recording | None = None
             try:
                 async with _browser(
                     browser_api_key,
@@ -178,8 +179,6 @@ async def run_task(
                             )
                             if recording is not None:
                                 await recording.show_result(task, result)
-                        if recording is not None:
-                            result = result.model_copy(update={"recordings": recording.outputs})
             except BrowserError as exc:
                 result = result or RunResult(
                     status=Status.ERROR,
@@ -191,6 +190,9 @@ async def run_task(
                     artifacts=session.artifacts if session is not None else (),
                 )
                 result = result.model_copy(update={"status": Status.ERROR, "error": str(exc)})
+            # Read after the browser closes either way: a failed result card still leaves the finished videos.
+            if recording is not None:
+                result = result.model_copy(update={"recordings": recording.outputs})
     assert result is not None
     return result.model_copy(update={"cost": CostBreakdown(lines=(*result.cost.lines, *browser_cost))})
 

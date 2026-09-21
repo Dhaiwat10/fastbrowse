@@ -187,8 +187,9 @@ class _RunState:
     directed: tuple[Operation, str | None] | None = None
     """The operation and control id recovery named, taken when Jev is still unsure of the next step."""
     unchanged: int = 0
-    written: set[str] = field(default_factory=set[str])
-    """Controls a fill or select has written, so only a field's first new value counts as progress by itself."""
+    written: dict[str, set[str]] = field(default_factory=dict[str, set[str]])
+    """Controls a fill or select has written, by document, so only a field's first new value counts as progress by
+    itself. A new document restarts control ids, and its fields would otherwise inherit the last page's writes."""
     recoveries: int = 0
     recovered_at: int = 0
     """`len(history)` when a tripwire last recovered the run. Evidence a recovery already acted on is
@@ -563,9 +564,10 @@ class Agent:
             # A value edit answers "was this progress" itself, and its answer beats `changed`: the popup a fill
             # draws IS a page change, so `changed` alone kept crediting the identical re-fill even once the
             # written-value check had stopped doing so. `changed` decides every other operation.
-            edit = self._edit_progress(decision, action, state.written)
+            written = state.written.setdefault(observation.document_key, set())
+            edit = self._edit_progress(decision, action, written)
             if act.outcome is StepOutcome.EXECUTED and edit is not None and decision.target is not None:
-                state.written.add(decision.target.id)
+                written.add(decision.target.id)
             progressed = act.outcome is StepOutcome.EXECUTED and (changed if edit is None else edit)
             # Moving between two pages changes the page every time, and a run went round "open the author,
             # back to the list" to its step limit with its stall budget reset at every hop. The same action
