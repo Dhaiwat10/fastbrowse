@@ -353,7 +353,7 @@ async def test_url_edits_are_not_reads_but_each_result_in_one_document_is_preser
     jev = ScriptedJev({"operation": operation.value, f"{operation.value}_target": control.id, "r1": "synthesis"})
     llm = ScriptedLLM(
         [
-            {"claims": [{"text": text, "source_id": "s0", "quote": text}], "answered": False}
+            {"claims": [{"text": text, "cites": ["s0"]}], "answered": False}
             for text in ("First result: 12", "Second result: 18")
         ]
     )
@@ -363,7 +363,7 @@ async def test_url_edits_are_not_reads_but_each_result_in_one_document_is_preser
 
     async def replace_content(*args: object) -> ActResult:
         if expected_quote is not None:
-            assert expected_quote in [fact.evidence.quote for fact in state.notes.facts]
+            assert expected_quote in [evidence.quote for evidence in state.notes.evidence.values()]
         page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "Editing")))
         return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
 
@@ -387,9 +387,9 @@ async def test_url_edits_are_not_reads_but_each_result_in_one_document_is_preser
         await agent._read(state, await agent._capture(), obs)
         expected_quote = text
         await agent._step(state, obs, decision)
-    assert [fact.evidence.quote for fact in state.notes.facts] == ["First result: 12", "Second result: 18"]
+    assert [evidence.quote for evidence in state.notes.evidence.values()] == ["First result: 12", "Second result: 18"]
     assert len(llm.calls) == 2
-    assert [fact.evidence.url for fact in state.notes.facts] == [results_url, results_url]
+    assert [evidence.url for evidence in state.notes.evidence.values()] == [results_url, results_url]
     assert [step.operation for step in state.steps].count(Operation.READ) == 2
     assert page.act.await_count == 5
 
@@ -436,7 +436,7 @@ async def test_a_message_is_read_before_mutation_and_the_next_action_is_reconsid
     agent._finish = AsyncMock(return_value=expected)
     if assessment is ReadAssessment.EVIDENCE:
         assert await agent._loop(state, None, None) is expected
-        assert state.notes.facts[0].evidence.quote == message
+        assert next(iter(state.notes.evidence.values())).quote == message
         assert state.steps[0].operation is Operation.READ
         page.act.assert_not_awaited()
         agent._finish.assert_awaited_once()
@@ -484,7 +484,7 @@ async def test_after_a_forced_read_jev_decides_again_and_a_repeat_read_recovers(
         {"operation": "click", "click_target": nonstop.id, "read_assessment": "evidence", "r1": "synthesis"},
         noul=0.0,
     )
-    llm = ScriptedLLM([{"claims": [{"text": fare, "source_id": "s0", "quote": fare}], "answered": False}])
+    llm = ScriptedLLM([{"claims": [{"text": fare, "cites": ["s0"]}], "answered": False}])
     agent = Agent(page, jev, llm)
     agent._recover = AsyncMock(side_effect=_Stop(Status.STUCK, "recovering"))
     state.ledger.limits = Limits(max_steps=2)
@@ -528,7 +528,7 @@ async def test_an_interaction_is_not_replayed_on_a_control_that_changed_during_t
         {"operation": "click", "click_target": preview.id, "read_assessment": "evidence", "r1": "synthesis"},
         noul=0.0,
     )
-    llm = ScriptedLLM([{"claims": [{"text": fare, "source_id": "s0", "quote": fare}], "answered": False}])
+    llm = ScriptedLLM([{"claims": [{"text": fare, "cites": ["s0"]}], "answered": False}])
     agent = Agent(page, jev, llm)
     agent._recover = AsyncMock(side_effect=_Stop(Status.STUCK, "recovering"))
     agent._finish = AsyncMock(side_effect=_Stop(Status.STUCK, "finishing"))
@@ -598,7 +598,7 @@ async def test_an_exhausted_read_recovers_instead_of_repeating_even_when_jev_is_
                 "give_up": False,
             },
             {
-                "claims": [{"text": "Total: $12", "source_id": "s0", "quote": "Total: $12", "requirement_id": "r1"}],
+                "claims": [{"text": "Total: $12", "cites": ["s0"], "requirement_id": "r1"}],
                 "answered": True,
             },
         ]
@@ -617,7 +617,7 @@ async def test_an_exhausted_read_recovers_instead_of_repeating_even_when_jev_is_
     page.act.assert_awaited_once()
     assert state.recoveries == 1
     assert [purpose for purpose, _ in llm.calls] == [LLMPurpose.READ, LLMPurpose.RECOVER, LLMPurpose.READ]
-    assert state.notes.facts[0].evidence.quote == "Total: $12"
+    assert next(iter(state.notes.evidence.values())).quote == "Total: $12"
 
 
 @pytest.mark.parametrize("operation", [Operation.READ, Operation.DONE])
@@ -874,7 +874,7 @@ def _at(url: str, *controls: Control) -> Observation:
 def test_the_next_page_of_a_list_is_one_link_to_another_address(
     controls: tuple[Control, ...], found: str | None
 ) -> None:
-    control = agent_module._next_page_control(_at("https://example.test/list/", *controls))
+    control = agent_module.next_page_control(_at("https://example.test/list/", *controls))
     assert (control.id if control else None) == found
 
 
@@ -899,8 +899,7 @@ async def test_a_list_the_reader_needs_whole_is_read_page_by_page_without_decidi
                 {
                     "requirement_id": "r1",
                     "text": "Sharp Objects is cheapest",
-                    "source_id": "s0",
-                    "quote": "Sharp Objects £47.82",
+                    "cites": ["s0"],
                 }
             ],
             "answered": True,
@@ -911,8 +910,7 @@ async def test_a_list_the_reader_needs_whole_is_read_page_by_page_without_decidi
                 {
                     "requirement_id": "r1",
                     "text": "Tastes Like Fear is cheapest at £10.69",
-                    "source_id": "s0",
-                    "quote": "Tastes Like Fear £10.69",
+                    "cites": ["s0"],
                 }
             ],
             "answered": True,
@@ -995,7 +993,7 @@ async def test_a_click_that_changed_nothing_is_not_taken_again_from_the_same_pag
 def test_a_pager_the_page_marks_rel_next_is_followed_whatever_its_label() -> None:
     # A pager drawn as an icon, or in another language, says so only in the markup.
     icon = _link("n", "→→→", "/page/2/").model_copy(update={"label": "Weiter", "next_page": True})
-    found = agent_module._next_page_control(_at("https://example.test/list/", icon))
+    found = agent_module.next_page_control(_at("https://example.test/list/", icon))
     assert found is not None and found.id == "n"
 
 
@@ -1308,7 +1306,7 @@ async def test_a_secret_quoted_by_a_citation_is_redacted_from_its_links_too(read
         if isinstance(event, StepEvent):
             events.append(event)
 
-    claim: JsonValue = {"requirement_id": requirement_id, "text": quote, "source_id": "s0", "quote": quote}
+    claim: JsonValue = {"requirement_id": requirement_id, "text": quote, "cites": ["s0"]}
     llm = ScriptedLLM([{"claims": [claim], "answered": True}] if reader is FactReader.LLM else [])
     jev = ScriptedJev({requirement_id: "synthesis" if reader is FactReader.LLM else "c0"})
     page = Mock(spec=Page)
@@ -1328,7 +1326,7 @@ async def test_a_secret_quoted_by_a_citation_is_redacted_from_its_links_too(read
     assert fact.deep_link == text_fragment(fact.url, fact.quote)
     assert "hunter" not in events[0].model_dump_json()
     assert len(state.notes.facts) == 2
-    assert state.notes.facts[-1].evidence.quote == quote
+    assert [*state.notes.evidence.values()][-1].quote == quote
     await agent._step(state, observation(()), _code_decision(Operation.SCROLL, None), Decider.CODE)
     assert events[1].step.facts == ()
     assert events[1].step.note is None

@@ -1,7 +1,11 @@
 """Small evidence-backed memory with stable citation ids and explicit truncation."""
 
+import hashlib
 import json
 from collections.abc import Iterable
+from typing import Self
+
+from pydantic import model_validator
 
 from fastbrowse.models import Evidence, FactReader, Frozen
 from fastbrowse.planner import Plan, Requirement
@@ -10,11 +14,18 @@ from fastbrowse.planner import Plan, Requirement
 class Fact(Frozen):
     requirement_id: str | None = None
     text: str
-    evidence: Evidence
+    evidence: Evidence | None
+    """The span the fact was read from; None for a count, total or winner concluded from its basis alone."""
     basis: tuple[str, ...] = ()
-    """Evidence ids of the facts this conclusion counts or compares."""
+    """Fact ids of the facts this conclusion counts or compares."""
     reader: FactReader
-    """Which reader verified the quote; citations are built from it."""
+    """Which reader produced the fact; citations are built from it."""
+
+    @model_validator(mode="after")
+    def grounded(self) -> Self:
+        if self.evidence is None and not self.basis:
+            raise ValueError("a fact with no evidence must be derived from a basis")
+        return self
 
 
 class NotesTooLarge(RuntimeError):
@@ -30,6 +41,14 @@ def evidence_id(evidence: Evidence) -> str:
     return f"{evidence.capture_sha256}:{evidence.start}:{evidence.end}"
 
 
+def fact_id(fact: Fact) -> str:
+    """A read fact is keyed by its span; a derived one by what it concludes from which facts."""
+    if fact.evidence is not None:
+        return evidence_id(fact.evidence)
+    digest = hashlib.sha256(json.dumps([fact.text, sorted(fact.basis)]).encode()).hexdigest()
+    return f"derived:{digest[:16]}"
+
+
 class Notes:
     def __init__(self, facts: Iterable[Fact] = ()) -> None:
         self._facts: dict[str, Fact] = {}
@@ -43,11 +62,14 @@ class Notes:
 
     @property
     def evidence(self) -> dict[str, Evidence]:
-        return {key: fact.evidence for key, fact in self._facts.items()}
+        return {key: fact.evidence for key, fact in self._facts.items() if fact.evidence is not None}
+
+    def derived(self, key: str) -> bool:
+        return key in self._facts and self._facts[key].evidence is None
 
     def add(self, fact: Fact) -> bool:
         """Return whether a new span was added; reused spans still evidence other requirements."""
-        key = evidence_id(fact.evidence)
+        key = fact_id(fact)
         requirements = self._requirements.setdefault(key, set())
         if fact.requirement_id is not None:
             requirements.add(fact.requirement_id)
@@ -56,7 +78,12 @@ class Notes:
             basis = tuple(dict.fromkeys((*previous.basis, *fact.basis)))
             # A winner can quote a row already collected as context; its answer must survive that reuse.
             kept = fact if previous.requirement_id is None and fact.requirement_id is not None else previous
-            self._facts[key] = kept.model_copy(update={"basis": basis})
+            # One block can answer two requirements (a card's title and its price): the draft answers each
+            # requirement with this fact's text, so every requirement's claim must survive the reuse.
+            text = kept.text
+            if fact is not kept and fact.requirement_id is not None and fact.text not in text:
+                text = f"{text}\n{fact.text}"
+            self._facts[key] = kept.model_copy(update={"basis": basis, "text": text})
             return False
         self._facts[key] = fact
         return True
@@ -108,11 +135,15 @@ class Notes:
             raise ValueError("max_chars must be nonnegative")
 
         def line(key: str, fact: Fact) -> str:
+            source = (
+                "derived"
+                if fact.evidence is None
+                else f"source={json.dumps(fact.evidence.source_id)} url={json.dumps(fact.evidence.url)} "
+                f"quote={json.dumps(fact.evidence.quote, ensure_ascii=False)}"
+            )
             return (
                 f"[{key}] {json.dumps(fact.text, ensure_ascii=False)} "
-                f"requirements={','.join(sorted(self._requirements[key])) or '-'} "
-                f"source={json.dumps(fact.evidence.source_id)} url={json.dumps(fact.evidence.url)} "
-                f"quote={json.dumps(fact.evidence.quote, ensure_ascii=False)}"
+                f"requirements={','.join(sorted(self._requirements[key])) or '-'} {source}"
                 + (f" basis={json.dumps(fact.basis)}" if fact.basis else "")
             )
 

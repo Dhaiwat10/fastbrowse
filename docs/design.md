@@ -24,17 +24,22 @@ capture hash and unresolved information requirements, so changed content can be 
 
 For a bounded set of short quoted spans, Jev chooses a scalar fact, requests synthesis, or judges the
 requirement absent from the page. Uncertain choices, comparisons, partial evidence and paginated lists
-reach the LLM reader. `FactReader` records `jev_choice` or `llm`. Both readers must locate their quotes in
-the capture before a fact enters `Notes`.
+reach the LLM reader. `FactReader` records `jev_choice` or `llm`. Neither reader writes page text: Jev picks a
+span code cut from the capture, and the LLM reader cites the capture's source blocks by id (one block, or
+consecutive blocks of one frame from the chunk it was shown). Code copies the quote from those blocks, so a
+table's escaped pipe or a record read as two lines cannot drop a fact, and a claim citing a block it was
+not shown is rejected.
 
-For a count, total or superlative, the reader quotes every compared record and its value on every page.
-Its conclusion lists those facts in `draws_on`, using evidence ids from collected notes or `claim:N` for
-earlier claims in the same response, indexed from zero. Code resolves these references to verified spans
-and drops unknown references with a debug log. `Fact.basis` keeps the resolved ids, including when a span is reused.
+For a count, total or superlative, the reader cites every compared record on every page. Its conclusion
+lists those facts in `draws_on`, using evidence ids from collected notes or `claim:N` for earlier claims in
+the same response, indexed from zero. Code resolves these references and drops unknown ones with a debug
+log. `Fact.basis` keeps the resolved ids, including when a span is reused. A conclusion the page does not
+state (a count it never prints) cites no blocks: it is a derived fact with no evidence of its own, keyed
+`derived:<hash>`, and it is judged and linked through its basis records.
 
 Answer claims use numbered Markdown links built from those notes. `RunResult.citations` exposes the cited
 facts and text-fragment deep links; unused facts have no citation. An answer citing an unknown reference
-fails the claim check, and the run falls back to an answer drafted from verified facts. Jev checks the answer's claims against their quotes before completion.
+fails the claim check, and the run falls back to an answer drafted from verified facts. Jev checks the answer's claims against their quotes before completion; a derived fact contributes its basis records, never its own conclusion.
 Both drafted and composed claims include the transitive basis of each cited fact, deduplicated in read order.
 The claim check, numbered links and citation records all use those expanded ids.
 

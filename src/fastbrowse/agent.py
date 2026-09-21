@@ -55,7 +55,7 @@ from fastbrowse.page import (
     pager_link,
     pages_forward,
 )
-from fastbrowse.planner import Plan, RequirementKind, make_plan
+from fastbrowse.planner import Plan, Requirement, RequirementKind, make_plan
 from fastbrowse.policy import (
     Decision,
     HistoryEntry,
@@ -859,7 +859,7 @@ class Agent:
         target = decision.target
         match decision.operation:
             case Operation.CLICK | Operation.ENTER:
-                # Code only ever clicks a pager link to another address (`_next_page_control`), which opens a page
+                # Code only ever clicks a pager link to another address (`next_page_control`), which opens a page
                 # and commits nothing, so asking Jev would buy a call per page and nothing else.
                 if decided_by is not Decider.CODE:
                     await self._gate_irreversible(state, observation, decision)
@@ -1175,25 +1175,10 @@ class Agent:
             # Nothing on the page can evidence anything, so the reader is not asked.
             trace("read", url=self._redactor.redact(capture.url), chars=0, wanted=[r.id for r in wanted])
             return False, False
-        # Unresolved requirements may refer to an earlier one; keep the task's constraints in every read.
-        question = state.task + "\n\nRequirements still to evidence:\n" + "\n".join(f"- {r.text}" for r in wanted)
-        following = _next_page_control(observation) if observation is not None else None
-        if state.first_url is not None and (following is not None or state.pages):
-            # "This page and the next" was written on the page the run started on. Read from the second, it would
-            # otherwise mean the second and the third, or never say the list ends.
-            question += (
-                f'\n\nThe task\'s "this page" is {self._redactor.redact(state.first_url)}, where the run began, '
-                'and "the next page" is the one after it. A task that names how many pages it covers ends at the '
-                "last one it names."
-            )
-        # The capture is text: a "Next" link reads the same as any other word unless the page's controls say so.
-        notice = (
-            f"This page has a next-page control ({following.label!r}): a list on it may continue. A requirement "
-            "about the page that control opens is not answered by this page, whatever this page holds: leave it "
-            "unanswered until that page is read."
-            if following is not None
-            else ""
-        )
+        following = next_page_control(observation) if observation is not None else None
+        began = state.first_url if following is not None or state.pages else None
+        question = read_question(state.task, wanted, began_at=None if began is None else self._redactor.redact(began))
+        notice = next_page_notice(following)
         before = len(state.notes.facts)
         outcome = await read(
             self._llm,
@@ -1216,7 +1201,7 @@ class Agent:
             chars=len(capture.text),
             wanted=[r.id for r in wanted],
             facts_added=len(state.notes.facts) - before,
-            rejected_quotes=outcome.rejected_quotes,
+            rejected_claims=outcome.rejected_claims,
             evidenced=[r.id for r in wanted if state.notes.evidenced(r.id)],
             continues=continues,
         )
@@ -1498,7 +1483,7 @@ class Agent:
         composed: ComposedAnswer | None = None
         citations: tuple[Citation, ...] = ()
         data: JsonValue | None = None
-        evidence: list[Evidence] = [fact.evidence for fact in state.notes.facts]
+        evidence: list[Evidence] = [fact.evidence for fact in state.notes.facts if fact.evidence is not None]
         verified = True
         # Writing the answer and filling the caller's schema read the same finished notes and neither
         # needs the other's output, so a task that wants both pays for the slower one rather than both.
@@ -1537,10 +1522,14 @@ class Agent:
 
     def _public_fact(self, fact: Fact) -> StepFact:
         redact = self._redactor.redact
+        text = redact(fact.text)
+        requirement_id = redact(fact.requirement_id) if fact.requirement_id is not None else None
+        if fact.evidence is None:
+            return StepFact(text=text, requirement_id=requirement_id, reader=fact.reader)
         url, quote = redact(fact.evidence.url), redact(fact.evidence.quote)
         return StepFact(
-            text=redact(fact.text),
-            requirement_id=redact(fact.requirement_id) if fact.requirement_id is not None else None,
+            text=text,
+            requirement_id=requirement_id,
             quote=quote,
             url=url,
             reader=fact.reader,
@@ -1726,7 +1715,32 @@ def _signature(decision: Decision, observation: Observation) -> Signature:
     return decision.operation, label, state_key(observation)
 
 
-def _next_page_control(observation: Observation) -> Control | None:
+def read_question(task: str, wanted: Sequence[Requirement], *, began_at: str | None = None) -> str:
+    """The reader's question. `began_at` is the run's first page, given once a list may run past one page:
+    "this page and the next" was written there, and read from the second page it would otherwise mean the second
+    and the third, or never say the list ends."""
+    # Unresolved requirements may refer to an earlier one; keep the task's constraints in every read.
+    question = task + "\n\nRequirements still to evidence:\n" + "\n".join(f"- {r.text}" for r in wanted)
+    if began_at is None:
+        return question
+    return (
+        f'{question}\n\nThe task\'s "this page" is {began_at}, where the run began, and "the next page" is the one '
+        "after it. A task that names how many pages it covers ends at the last one it names."
+    )
+
+
+def next_page_notice(following: Control | None) -> str:
+    # The capture is text: a "Next" link reads the same as any other word unless the page's controls say so.
+    if following is None:
+        return ""
+    return (
+        f"This page has a next-page control ({following.label!r}): a list on it may continue. A requirement "
+        "about the page that control opens is not answered by this page, whatever this page holds: leave it "
+        "unanswered until that page is read."
+    )
+
+
+def next_page_control(observation: Observation) -> Control | None:
     """The one control that opens the next page of a list on this page, or None when there is none or doubt.
 
     Only a link to another address counts: a load-more button leaves the earlier records in the page, and reading
@@ -1754,7 +1768,7 @@ def _paging(state: _RunState, observation: Observation) -> Decision | None:
     """
     if state.next_page:
         state.next_page = False
-        target = _next_page_control(observation)
+        target = next_page_control(observation)
         if target is None:
             return None
         state.pages += 1

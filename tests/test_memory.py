@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from fastbrowse.memory import Fact, Notes, NotesTooLarge, evidence_id
+from fastbrowse.memory import Fact, Notes, NotesTooLarge, fact_id
 from fastbrowse.models import Evidence, FactReader
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 
@@ -29,6 +29,10 @@ def test_notes_deduplicate_spans_without_losing_requirement_coverage() -> None:
     )
     assert notes.evidenced("r1") and notes.evidenced("r2")
     assert len(notes.facts) == 1
+    # One block answering two requirements keeps both claims: the draft answers each from this fact's text.
+    assert notes.facts[0].text == "First fact\nSame span, another requirement"
+    assert not notes.add(Fact(reader=FactReader.LLM, requirement_id="r2", text="First fact", evidence=evidence()))
+    assert notes.facts[0].text == "First fact\nSame span, another requirement"
     plan = Plan(
         requirements=tuple(
             Requirement(id=f"r{i}", text=f"Requirement {i}", kind=RequirementKind.INFORMATION) for i in range(1, 4)
@@ -49,7 +53,7 @@ def test_render_reports_omissions_and_never_slices_a_citation() -> None:
     second = Fact(reader=FactReader.LLM, text="A second cited fact", evidence=evidence(sha="second"))
     notes = Notes((first, second))
     complete = notes.render(1000)
-    assert evidence_id(first.evidence) in complete and evidence_id(second.evidence) in complete
+    assert fact_id(first) in complete and fact_id(second) in complete
     assert 'quote="fact"' in complete
     one_line = Notes((first,)).render(1000)
     bounded = notes.render(len(one_line) + len("\n[1 facts omitted]"))
@@ -87,15 +91,13 @@ def test_reused_span_keeps_the_answer_and_unions_its_basis_in_read_order() -> No
 @pytest.mark.parametrize("json_encoded", [False, True])
 def test_budget_keeps_transitive_basis_with_the_requirement_or_fails(json_encoded: bool) -> None:
     record = Fact(reader=FactReader.LLM, text="Compared record", evidence=evidence(sha="record"))
-    subtotal = Fact(
-        reader=FactReader.LLM, text="Subtotal", evidence=evidence(sha="subtotal"), basis=(evidence_id(record.evidence),)
-    )
+    subtotal = Fact(reader=FactReader.LLM, text="Subtotal", evidence=evidence(sha="subtotal"), basis=(fact_id(record),))
     total = Fact(
         reader=FactReader.LLM,
         requirement_id="r",
         text="Total",
         evidence=evidence(sha="total"),
-        basis=(evidence_id(subtotal.evidence),),
+        basis=(fact_id(subtotal),),
     )
     context = Fact(reader=FactReader.LLM, text="Unrelated " * 100, evidence=evidence(sha="context"))
     # A reused early span can acquire a basis read later, so a prefix alone need not preserve the comparison.
@@ -109,4 +111,4 @@ def test_budget_keeps_transitive_basis_with_the_requirement_or_fails(json_encode
     with pytest.raises(NotesTooLarge):
         notes.render_with_ids(budget - 1, preserve_requirements=True, json_encoded=json_encoded)
     shortened = notes.render_with_ids(budget - 1, json_encoded=json_encoded)
-    assert evidence_id(total.evidence) not in shortened.evidence_ids
+    assert fact_id(total) not in shortened.evidence_ids

@@ -19,7 +19,7 @@ from fastbrowse.jev import (
     Question,
 )
 from fastbrowse.llm import DEFAULT_MAX_OUTPUT_TOKENS, Generation, Message
-from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.memory import Fact, Notes, evidence_id, fact_id
 from fastbrowse.models import CostBasis, CostComponent, CostLine, FactReader, Frozen, Limits, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
@@ -179,7 +179,7 @@ def test_chunk_repeats_nearest_header_when_table_rows_are_separate_blocks() -> N
     assert "Age | Count" in last.text and "Name | Cost" not in last.text
 
 
-async def test_read_continues_after_forged_quote_tracks_coverage_and_cost() -> None:
+async def test_read_continues_after_an_unoffered_cite_tracks_coverage_and_cost() -> None:
     page = capture(
         (BlockKind.PARAGRAPH, "Price unknown"),
         (BlockKind.PARAGRAPH, "Price is $12"),
@@ -188,11 +188,11 @@ async def test_read_continues_after_forged_quote_tracks_coverage_and_cost() -> N
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "r1", "text": "Free", "source_id": "s0", "quote": "Price is free"}],
+                "claims": [{"requirement_id": "r1", "text": "Free", "cites": ["s1"]}],
                 "answered": True,
             },
             {
-                "claims": [{"requirement_id": "r1", "text": "Costs $12", "source_id": "s1", "quote": "Price is $12"}],
+                "claims": [{"requirement_id": "r1", "text": "Costs $12", "cites": ["s1"]}],
                 "answered": True,
             },
         ]
@@ -202,8 +202,8 @@ async def test_read_continues_after_forged_quote_tracks_coverage_and_cost() -> N
         llm, page, "What price?", ["r1"], notes, max_chars=15, tokens=TokenBudget(read_output_tokens=4096)
     )
     assert llm.output_caps == [4096, 4096]
-    assert result.coverage == (0, 1) and result.rejected_quotes == 1
-    assert len(result.facts) == 1 and result.facts[0].evidence.quote == "Price is $12"
+    assert result.coverage == (0, 1) and result.rejected_claims == 1
+    assert len(result.facts) == 1 and next(iter(Notes(result.facts).evidence.values())).quote == "Price is $12"
     assert notes.evidenced("r1")
     assert sum(line.dollars or 0 for line in result.cost_lines) == 0.002
     assert all(purpose is LLMPurpose.READ for purpose, _ in llm.calls)
@@ -215,9 +215,7 @@ async def test_read_reaches_end_and_does_not_evidence_unknown_requirements() -> 
     llm = ScriptedLLM(
         [
             {
-                "claims": [
-                    {"requirement_id": "invented", "text": "Known fact", "source_id": "s0", "quote": "Known fact"}
-                ],
+                "claims": [{"requirement_id": "invented", "text": "Known fact", "cites": ["s0"]}],
                 "answered": False,
             },
             {"claims": [], "answered": False},
@@ -270,7 +268,7 @@ async def test_short_read_batches_requirements_and_keeps_citations_without_llm()
         assert notes.evidenced(requirement.id)
         assert fact.text == f"{requirement.text}\n{quote}"
         assert fact.reader is FactReader.JEV_CHOICE
-        assert fact.evidence == locate_quote(page, fact.evidence.source_id, quote)
+        assert fact.evidence is not None and fact.evidence == locate_quote(page, fact.evidence.source_id, quote)
     _, questions = jev.requests[0]
     assert questions.keys() == {"version", "license"}
     assert all(
@@ -299,7 +297,7 @@ async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer:
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "license", "text": "MIT", "source_id": "s1", "quote": "License: MIT"}],
+                "claims": [{"requirement_id": "license", "text": "MIT", "cites": ["s1"]}],
                 "answered": True,
             }
         ]
@@ -317,7 +315,7 @@ async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer:
     )
     assert len(jev.requests) == 1 and len(llm.calls) == 1
     assert all(notes.evidenced(r.id) for r in requirements)
-    assert [fact.evidence.quote for fact in result.facts] == ["Version: 1.2.3", "License: MIT"]
+    assert [evidence.quote for evidence in Notes(result.facts).evidence.values()] == ["Version: 1.2.3", "License: MIT"]
     assert [cost.component for cost in result.cost_lines] == [CostComponent.JEV, CostComponent.LLM]
     assert ledger.lines == list(result.cost_lines) and ledger.jev_calls == ledger.llm_calls == 1
 
@@ -599,6 +597,25 @@ async def test_a_name_the_task_gives_can_be_chosen_on_a_note_that_quotes_only_a_
     assert not await propose_text_fields_from_notes(ScriptedLLM([{"fields": [partial]}]), task, notes, fields)
 
 
+async def test_a_name_chosen_on_a_derived_comparison_is_evidenced_by_the_record_read_for_it() -> None:
+    page = capture((BlockKind.PARAGRAPH, "Dec 6, 2024"), (BlockKind.PARAGRAPH, "May 14, 2026"))
+    records = [
+        Fact(reader=FactReader.LLM, text=f"{name}: {date}", evidence=locate_quote(page, source, date))
+        for name, source, date in (("httpx", "s0", "Dec 6, 2024"), ("requests", "s1", "May 14, 2026"))
+    ]
+    notes = Notes(records)
+    winner = Fact(reader=FactReader.LLM, text="requests is newer", evidence=None, basis=tuple(notes.evidence))
+    notes.add(winner)
+    proposal: dict[str, JsonValue] = {"field": "label", "value": "requests", "source_id": fact_id(winner), "quote": ""}
+    fields = {"label": Fields.model_fields["label"]}
+    task = "Which has the more recent release, httpx or requests?"
+    found = await propose_text_fields_from_notes(ScriptedLLM([{"fields": [proposal]}]), task, notes, fields)
+    assert found == {"label": ("requests", records[1].evidence)}
+    # A value the task does not name is not taken from a conclusion that quotes nothing.
+    invented: dict[str, JsonValue] = {**proposal, "value": "urllib3"}
+    assert not await propose_text_fields_from_notes(ScriptedLLM([{"fields": [invented]}]), task, notes, fields)
+
+
 @pytest.mark.parametrize("limit", ["calls", "dollars"])
 @pytest.mark.parametrize("reader", ["read", "fields"])
 async def test_each_chunk_reserves_budget_before_request(limit: str, reader: str) -> None:
@@ -785,7 +802,7 @@ async def test_pruning_the_only_claim_for_a_requirement_is_an_omission() -> None
     # The price was read as the winner's price, so its fact draws on the winner; citing the price must still not
     # count as stating which book won.
     winner = fact("r1", 0, "A Year in Provence")
-    price = fact("r2", 40, "£56.88").model_copy(update={"basis": (evidence_id(winner.evidence),)})
+    price = fact("r2", 40, "£56.88").model_copy(update={"basis": (fact_id(winner),)})
     notes = Notes((winner, price))
     requirements = (
         Requirement(id="r1", text="Which book is the most expensive?", kind=RequirementKind.INFORMATION),
@@ -805,9 +822,7 @@ async def test_a_winner_from_part_of_a_list_is_kept_but_does_not_answer() -> Non
     llm = ScriptedLLM(
         [
             {
-                "claims": [
-                    {"requirement_id": "r1", "text": "cheapest", "source_id": "s0", "quote": "Sharp Objects £47.82"}
-                ],
+                "claims": [{"requirement_id": "r1", "text": "cheapest", "cites": ["s0"]}],
                 "answered": True,
                 "continues": ["r1", "not-asked"],
             }
@@ -854,9 +869,7 @@ async def test_a_later_chunk_saying_the_list_goes_on_reopens_an_earlier_chunks_c
     llm = ScriptedLLM(
         [
             {
-                "claims": [
-                    {"requirement_id": "r1", "text": "cheapest", "source_id": "s0", "quote": "Sharp Objects £47.82"}
-                ],
+                "claims": [{"requirement_id": "r1", "text": "cheapest", "cites": ["s0"]}],
                 "answered": True,
             },
             {"claims": [], "answered": False, "continues": ["r1"]},
@@ -881,15 +894,13 @@ async def test_a_list_that_runs_on_into_the_next_chunk_is_settled_by_the_last_on
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"text": "Virgin $1,200", "source_id": "s0", "quote": "Virgin $1,200"}],
+                "claims": [{"text": "Virgin $1,200", "cites": ["s0"]}],
                 "answered": False,
                 "continues": ["r1"],
             },
             {"claims": [], "answered": False, "continues": ["r1"]},
             {
-                "claims": [
-                    {"requirement_id": "r1", "text": "JetBlue at $1,061", "source_id": "s2", "quote": "JetBlue $1,061"}
-                ],
+                "claims": [{"requirement_id": "r1", "text": "JetBlue at $1,061", "cites": ["s2"]}],
                 "answered": True,
             },
         ]
@@ -914,8 +925,7 @@ async def test_a_later_chunk_is_read_against_what_earlier_chunks_of_the_page_fou
                     {
                         "requirement_id": None,
                         "text": "an Einstein quote",
-                        "source_id": "s0",
-                        "quote": "Einstein: the world as we have created it",
+                        "cites": ["s0"],
                     }
                 ],
                 "answered": False,
@@ -944,12 +954,11 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
         [
             {
                 "claims": [
-                    {"text": "Oak $19", "source_id": "s0", "quote": "Oak $19"},
-                    {"text": "Redwood $12", "source_id": "s1", "quote": "Redwood $12"},
+                    {"text": "Oak $19", "cites": ["s0"]},
+                    {"text": "Redwood $12", "cites": ["s1"]},
                     {
                         "text": "Two books on page one, total $31.",
-                        "source_id": "s2",
-                        "quote": "Page 1 of 2",
+                        "cites": ["s2"],
                         "draws_on": ["claim:1", "claim:0"],
                     },
                 ],
@@ -964,13 +973,12 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
     llm.responses.append(
         {
             "claims": [
-                {"text": "Pine $7", "source_id": "s0", "quote": "Pine $7"},
-                {"text": "Elm $15", "source_id": "s1", "quote": "Elm $15"},
+                {"text": "Pine $7", "cites": ["s0"]},
+                {"text": "Elm $15", "cites": ["s1"]},
                 {
                     "requirement_id": "r",
                     "text": answer,
-                    "source_id": "s0",
-                    "quote": "Pine $7",
+                    "cites": ["s0"],
                     "draws_on": ["claim:1", earlier[2], "claim:0", earlier[0]],
                 },
             ],
@@ -992,7 +1000,7 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
         result = draft_answer(plan, notes)
     assert result is not None and result.answer == answer
     assert notes.expand_evidence_ids(result.claims[0].evidence_ids) == keys
-    assert [citation.quote for citation in result.citations] == [fact.evidence.quote for fact in notes.facts]
+    assert [citation.quote for citation in result.citations] == [evidence.quote for evidence in notes.evidence.values()]
     assert [citation.id for citation in result.citations] == list(range(1, 6))
     for citation in result.citations:
         assert f"[{citation.id}](<{citation.deep_link}>)" in result.linked_answer
@@ -1002,7 +1010,33 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
     assert await check_claims(jev, result, notes, Thresholds()) is result
     for name in ("unsupported_0", "contradicted_0"):
         question = jev.requests[0][1][name]
-        assert all(fact.evidence.model_dump_json() in question.instructions for fact in notes.facts)
+        assert all(evidence.model_dump_json() in question.instructions for evidence in notes.evidence.values())
+
+
+async def test_a_count_the_page_does_not_state_is_derived_and_judged_by_its_records() -> None:
+    page = capture((BlockKind.PARAGRAPH, "Oak $19"), (BlockKind.PARAGRAPH, "Pine $7"))
+    requirement = Requirement(id="r", text="How many trees are listed?", kind=RequirementKind.INFORMATION)
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {"text": "Oak $19", "cites": ["s0"]},
+                    {"text": "Pine $7", "cites": ["s1"]},
+                    {"requirement_id": "r", "text": "Two trees", "cites": [], "draws_on": ["claim:0", "claim:1"]},
+                ],
+                "answered": True,
+            }
+        ]
+    )
+    notes = Notes()
+    await read(llm, page, requirement.text, ["r"], notes, requirements=(requirement,))
+    ((key, count),) = notes.supporting("r")
+    assert count.evidence is None and notes.derived(key) and "derived" in notes.render(10_000)
+    draft = draft_answer(Plan(requirements=(requirement,), answer_expected=True), notes)
+    assert draft is not None
+    assert [citation.quote for citation in draft.citations] == ["Oak $19", "Pine $7"]
+    unsupported = claim_check_questions(draft, notes)["unsupported_0"].instructions
+    assert "Oak $19" in unsupported and "Pine $7" in unsupported and "MISSING" not in unsupported
 
 
 async def test_basis_references_cannot_name_rejected_or_later_claims() -> None:
@@ -1011,16 +1045,15 @@ async def test_basis_references_cannot_name_rejected_or_later_claims() -> None:
         [
             {
                 "claims": [
-                    {"text": "Forged", "source_id": "s0", "quote": "Not on page"},
-                    {"text": "A $3", "source_id": "s0", "quote": "A $3"},
+                    {"text": "Forged", "cites": ["s9"]},
+                    {"text": "A $3", "cites": ["s0"]},
                     {
                         "requirement_id": "r",
                         "text": "A is cheaper",
-                        "source_id": "s0",
-                        "quote": "A $3",
+                        "cites": ["s0"],
                         "draws_on": ["claim:0", "claim:1", "claim:1", "claim:3", "invented:0:99"],
                     },
-                    {"text": "B $5", "source_id": "s1", "quote": "B $5"},
+                    {"text": "B $5", "cites": ["s1"]},
                 ],
                 "answered": True,
             }
@@ -1028,8 +1061,8 @@ async def test_basis_references_cannot_name_rejected_or_later_claims() -> None:
     )
     notes = Notes()
     result = await read(llm, page, "Cheapest?", ["r"], notes)
-    assert result.rejected_quotes == 1
-    assert notes.supporting("r")[0][1].basis == (evidence_id(notes.facts[0].evidence),)
+    assert result.rejected_claims == 1
+    assert notes.supporting("r")[0][1].basis == (fact_id(notes.facts[0]),)
 
 
 @pytest.mark.parametrize("confidence", [0.89, 0.95])
@@ -1057,7 +1090,7 @@ async def test_mixed_read_routes_keep_provenance_and_narrow_the_llm_request() ->
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "names", "text": "One and Two", "source_id": "s1", "quote": "One Two"}],
+                "claims": [{"requirement_id": "names", "text": "One and Two", "cites": ["s1"]}],
                 "answered": True,
             }
         ]
@@ -1065,8 +1098,8 @@ async def test_mixed_read_routes_keep_provenance_and_narrow_the_llm_request() ->
     notes = Notes()
     result = await read(llm, page, "Read all", [r.id for r in requirements], notes, jev=jev, requirements=requirements)
     assert [fact.reader for fact in result.facts] == [FactReader.JEV_CHOICE, FactReader.LLM]
-    assert [fact.evidence.quote for fact in notes.facts] == ["Version 1.2.3", "One\n\tTwo"]
-    assert all(fact.evidence.url == page.url for fact in notes.facts)
+    assert [evidence.quote for evidence in notes.evidence.values()] == ["Version 1.2.3", "One\n\tTwo"]
+    assert all(evidence.url == page.url for evidence in notes.evidence.values())
     assert not notes.evidenced("fare")
     assert notes.evidenced("version") and notes.evidenced("names")
     request = llm.calls[0][1][-1].content
@@ -1074,39 +1107,28 @@ async def test_mixed_read_routes_keep_provenance_and_narrow_the_llm_request() ->
     assert "Version 1.2.3" in request.split("# Collected evidence\n")[1]
 
 
-@pytest.mark.parametrize("reader", list(FactReader))
-async def test_both_readers_verify_quotes_at_the_notes_write_and_log_bounded_rejections(
-    reader: FactReader, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("cites", [["s0", "s2"], ["unverified " * 50], []], ids=["gap", "invented", "none"])
+async def test_the_reader_keeps_only_claims_citing_consecutive_offered_blocks(
+    cites: list[JsonValue], caplog: pytest.LogCaptureFixture
 ) -> None:
-    from fastbrowse import retrieval
-
-    page = capture((BlockKind.PARAGRAPH, "The only page text"))
-    rejected = "unverified " * retrieval._READ_SPAN_CHARS
-    requirement = Requirement(id="r", text="Find the fact", kind=RequirementKind.INFORMATION)
-    if reader is FactReader.JEV_CHOICE:
-        candidate = read_candidates(page)[0]
-        # A malformed candidate must not bypass the same quote check used for generated claims.
-        bad = candidate.model_copy(update={"evidence": candidate.evidence.model_copy(update={"quote": rejected})})
-        monkeypatch.setattr(retrieval, "read_candidates", lambda _: (bad,))
-        jev = _ReadJev({"r": _choice(candidate.id)})
-        llm = ScriptedLLM([{"claims": [], "answered": False}])
-    else:
-        jev = None
-        llm = ScriptedLLM(
-            [
-                {
-                    "claims": [{"requirement_id": "r", "text": "Invented", "source_id": "s0", "quote": rejected}],
-                    "answered": True,
-                }
-            ]
-        )
+    page = capture((BlockKind.PARAGRAPH, "A $3"), (BlockKind.PARAGRAPH, "B $5"), (BlockKind.PARAGRAPH, "C $7"))
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {"requirement_id": "r", "text": "Rejected", "cites": cites},
+                    {"requirement_id": "r", "text": "A and B", "cites": ["s0", "s1"]},
+                ],
+                "answered": True,
+            }
+        ]
+    )
     notes = Notes()
     with caplog.at_level("DEBUG", logger="fastbrowse.retrieval"):
-        result = await read(llm, page, requirement.text, ["r"], notes, jev=jev, requirements=(requirement,))
-    assert result.rejected_quotes == 1 and not notes.facts
-    record = next(record for record in caplog.records if "rejected quote" in record.message)
-    assert record.args == (reader.value, rejected[: retrieval._READ_SPAN_CHARS])
-    assert page.text not in caplog.text and rejected not in caplog.text
+        result = await read(llm, page, "Find the prices", ["r"], notes)
+    assert result.rejected_claims == 1
+    assert [evidence.quote for evidence in notes.evidence.values()] == ["A $3\n\nB $5"]
+    assert "read rejected claim" in caplog.text and "unverified " * 5 not in caplog.text
 
 
 @pytest.mark.parametrize("count", [MAX_CHOICE_OPTIONS - 2, MAX_CHOICE_OPTIONS - 1])

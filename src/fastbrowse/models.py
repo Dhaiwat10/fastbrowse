@@ -121,10 +121,11 @@ class FactReader(StrEnum):
 class StepFact(Frozen):
     text: str
     requirement_id: str | None = None
-    quote: str
-    url: str
+    quote: str | None = None
+    """None for a count, total or winner derived from other facts rather than read from the page."""
+    url: str | None = None
     reader: FactReader
-    deep_link: str
+    deep_link: str | None = None
 
 
 class ArtifactKind(StrEnum):

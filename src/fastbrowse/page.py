@@ -154,6 +154,7 @@ class BlockKind(StrEnum):
     PARAGRAPH = "paragraph"
     LIST_ITEM = "list_item"
     TABLE = "table"
+    RECORD = "record"
     CODE = "code"
     LINK = "link"
 

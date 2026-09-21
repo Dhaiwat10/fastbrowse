@@ -70,6 +70,20 @@ Each task runs only on the arms it can grade on equal terms (`arms` in `live_tas
 
 Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys; the jev-ultrafast arm runs its text helper on the OpenRouter key, and reaches Jev through the AI Gateway when `TYPESAFE_API_KEY` is not set. Rows are appended to `artifacts/evals/live.jsonl` with category, status, error, step trace, `correct` (the task's check) and `passed` (the check plus the expected status: `complete` for fastbrowse unless the task expects a stop, `done` for jev-ultrafast, a stopped session for hosted) and `seconds_by_call` (wall time per model call, by component and purpose). The summary prints both, per arm.
 
+## Probing the reader
+
+A live task spends most of its time reaching the page where a reading bug shows. To measure a reader or
+claim-check change, load the pages once and repeat only those stages:
+
+```sh
+uv run --extra browser-use python -m fastbrowse.evals.probe --repeat 6 \
+  --task "How many quotes by Albert Einstein are on the first two pages of quotes.toscrape.com?" \
+  https://quotes.toscrape.com/ https://quotes.toscrape.com/page/2/
+```
+
+Each run prints the facts kept, the drafted answer and the claim-check scores as one JSON line. It does not
+navigate, so choosing what to click or read next still needs the live eval.
+
 ## Dev and held-out tasks
 
 `--suite` picks the task sets to run: `core` (the published suite above, the default), `dev` and `heldout`. The two

@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import re
+import reprlib
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from copy import deepcopy
 from datetime import date
@@ -22,7 +23,7 @@ from fastbrowse.citations import text_fragment
 from fastbrowse.config import TokenBudget
 from fastbrowse.jev import MAX_CHOICE_OPTIONS, ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, Message
-from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.memory import Fact, Notes, fact_id
 from fastbrowse.models import Citation, CostComponent, CostLine, Evidence, FactReader, Frozen, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture
 from fastbrowse.planner import Plan, Requirement, RequirementKind
@@ -202,11 +203,11 @@ def locate_quote(capture: Capture, source_id: str, quote: str) -> Evidence | Non
 class _ReadClaim(Frozen):
     requirement_id: str | None = None
     text: str
-    source_id: str = Field(
-        description="The label of the Source blocks line the quote starts in, without its brackets (main/:12 for a "
-        "line shown as [main/:12]); never an evidence id."
+    cites: tuple[str, ...] = Field(
+        description="The Source blocks the claim is read from, by label without brackets (main/:12 for a line shown "
+        "as [main/:12]): one block, or several consecutive ones when the claim spans them; never an evidence id. "
+        "Empty for a count, total or winner the page does not state, which rests on draws_on alone."
     )
-    quote: str
     draws_on: tuple[str, ...] = Field(
         default=(),
         description=(
@@ -216,32 +217,52 @@ class _ReadClaim(Frozen):
     )
 
 
+def _cited(capture: Capture, part: Chunk, cites: Sequence[str]) -> Evidence | None:
+    """The text a claim's cited blocks showed the reader, when they are consecutive blocks of one frame in this chunk.
+
+    The reader names blocks and code copies their text: a model asked to reproduce a quote writes the page as it
+    reads it, and a table's escaped pipe, a record split over two quotes or a placeholder for a count followed.
+    """
+    offered = [
+        block
+        for block in capture.blocks
+        if block.source_id in part.block_ids and block.start < part.end and block.end > part.start
+    ]
+    positions = {block.source_id: index for index, block in enumerate(offered)}
+    cited = sorted({positions[source_id] for source_id in cites if source_id in positions})
+    if not cited or len(cited) != len(set(cites)) or cited[-1] - cited[0] != len(cited) - 1:
+        return None
+    first, last = offered[cited[0]], offered[cited[-1]]
+    if any(offered[index].frame_id != first.frame_id for index in cited):
+        return None
+    return _evidence(capture, first, max(first.start, part.start), min(last.end, part.end))
+
+
 def _remember(
     capture: Capture,
+    part: Chunk,
     claim: _ReadClaim,
-    reader: FactReader,
     notes: Notes,
-    *,
-    source_ids: Collection[str] | None = None,
-    references: Mapping[str, str] | None = None,
+    references: Mapping[str, str],
 ) -> Fact | None:
-    evidence = (
-        locate_quote(capture, claim.source_id, claim.quote)
-        if source_ids is None or claim.source_id in source_ids
-        else None
-    )
-    if evidence is None:
-        logger.debug("read rejected quote reader=%s quote=%r", reader.value, claim.quote[:_READ_SPAN_CHARS])
-        return None
     basis: list[str] = []
     for reference in claim.draws_on:
-        key = (references or {}).get(reference)
+        key = references.get(reference)
         if key is None:
             logger.debug("read dropped unknown basis reference=%r", reference)
         elif key not in basis:
             basis.append(key)
+    evidence = _cited(capture, part, claim.cites)
+    # A derived claim cites nothing and rests on its basis; one that cites blocks must cite them correctly.
+    if evidence is None and (claim.cites or not basis):
+        logger.debug("read rejected claim cites=%s basis=%d", reprlib.repr(claim.cites), len(basis))
+        return None
     fact = Fact(
-        requirement_id=claim.requirement_id, text=claim.text, evidence=evidence, basis=tuple(basis), reader=reader
+        requirement_id=claim.requirement_id,
+        text=claim.text,
+        evidence=evidence,
+        basis=tuple(basis),
+        reader=FactReader.LLM,
     )
     notes.add(fact)
     return fact
@@ -262,7 +283,7 @@ class _ReadResponse(Frozen):
 class ReadOutcome(Frozen):
     facts: tuple[Fact, ...]
     coverage: tuple[int, ...]
-    rejected_quotes: int
+    rejected_claims: int
     cost_lines: tuple[CostLine, ...]
     continues: tuple[str, ...] = ()
     """Requirements whose list goes on past this capture, so no claim from it closes them."""
@@ -329,17 +350,14 @@ async def read(
     if jev is not None and wanted and not notice:
         chosen = await _read_choices(jev, capture, wanted, tokens=tokens, ledger=ledger)
         costs.extend(chosen.cost_lines)
-        for claim in chosen.claims:
-            fact = _remember(capture, claim, FactReader.JEV_CHOICE, notes)
-            if fact is None:
-                rejected += 1
-            else:
-                facts[(evidence_id(fact.evidence), fact.requirement_id)] = fact
+        for fact in chosen.facts:
+            notes.add(fact)
+            facts[(fact_id(fact), fact.requirement_id)] = fact
         answered = {fact.requirement_id for fact in facts.values()}
         requirement_ids = [key for key in requirement_ids if key not in answered and key not in chosen.absent]
         if not requirement_ids:
             return ReadOutcome(
-                facts=tuple(facts.values()), coverage=(), rejected_quotes=rejected, cost_lines=tuple(costs)
+                facts=tuple(facts.values()), coverage=(), rejected_claims=rejected, cost_lines=tuple(costs)
             )
         # Narrow the obligations without dropping the task's constraints or separating ids from their meaning.
         question += "\n\nRead only these remaining requirements:\n" + "\n".join(
@@ -356,29 +374,28 @@ async def read(
             Message(
                 role="system",
                 content=(
-                    "# Reader\nAnswer using this capture only. Each claim needs its source_id "
-                    "and a verbatim quote, and says only what that quote (with the claims it draws on) shows: "
-                    "a claim naming two messages or values quotes both. "
+                    "# Reader\nAnswer using this capture only. Each claim cites the Source blocks it is read from "
+                    "and says only what those blocks (with the claims it draws on) show: a claim naming two "
+                    "messages or values cites the blocks of both. "
                     "Use only the supplied requirement ids (or null). Mark answered only when collected evidence "
                     "fully answers the question; otherwise continue. Assign a requirement id only when the claim "
                     "answers that whole requirement with its constraints; use null for partial information. "
                     "Query inputs, calendar prices and previews do not establish a matching filtered result.\n\n"
                     "# Evidence context\nThe capture will not be available when the answer is checked. For a "
-                    "comparison, quote separate supporting facts for the active query, filters, date and "
+                    "comparison, cite separate supporting facts for the active query, filters, date and "
                     "ranking or minimum, as well as the winning record. These contextual facts may use a null "
                     "requirement id. A record alone does not prove a superlative or a count, but a comparison "
                     "does: when the capture holds the complete set being compared (no further pages or "
-                    "unloaded results), quote each compared record's value and the winner or total may be "
+                    "unloaded results), cite each compared record and the winner or total may be "
                     "assigned the requirement id. A count, total or winner must list in draws_on every record "
-                    "it counts or compares, including the contextual facts it relies on. A table row means what "
-                    "its header says: quote the header row too and list it in draws_on of a claim read from a "
-                    "row. Use evidence ids from "
-                    "the collected notes' [sha:start:end] labels without brackets. For records quoted earlier "
+                    "it counts or compares, including the contextual facts it relies on; one the page does not "
+                    "state itself cites no blocks. Use evidence ids from "
+                    "the collected notes' [sha:start:end] labels without brackets. For records cited earlier "
                     "in this response, use claim:0 for the first claim, claim:1 for the second, and so on. "
-                    "Quote the records before the conclusion; never refer to a later claim.\n\n"
+                    "Cite the records before the conclusion; never refer to a later claim.\n\n"
                     "# Lists over several pages\nWhen the set a requirement ranges over continues past this "
                     "capture (a next page, a later page number, a load-more control) and the collected evidence "
-                    "does not already cover the rest, list that requirement id in continues and still quote "
+                    "does not already cover the rest, list that requirement id in continues and still cite "
                     "what this capture adds, with a null requirement id: every compared record and its value "
                     "for a count, total or superlative. Earlier pages are in the "
                     "collected evidence under their own URLs. On the last page, when the collected evidence and "
@@ -415,18 +432,11 @@ async def read(
         references = {key: key for key in offered.evidence_ids}
         for index, claim in enumerate(result.data.claims):
             # Carried to the next chunk without its requirement id, which only the whole page can settle.
-            fact = _remember(
-                capture,
-                claim.model_copy(update={"requirement_id": None}),
-                FactReader.LLM,
-                so_far,
-                source_ids=part.block_ids,
-                references=references,
-            )
+            fact = _remember(capture, part, claim.model_copy(update={"requirement_id": None}), so_far, references)
             if fact is None:
                 rejected_here += 1
                 continue
-            references[f"claim:{index}"] = evidence_id(fact.evidence)
+            references[f"claim:{index}"] = fact_id(fact)
             requirement_id = claim.requirement_id if claim.requirement_id in requirement_ids else None
             found.append(fact.model_copy(update={"requirement_id": requirement_id}))
             accepted += 1
@@ -447,11 +457,11 @@ async def read(
             fact = fact.model_copy(update={"requirement_id": None})
         # Its quote was verified against this capture when the chunk was read.
         notes.add(fact)
-        facts[(evidence_id(fact.evidence), fact.requirement_id)] = fact
+        facts[(fact_id(fact), fact.requirement_id)] = fact
     return ReadOutcome(
         facts=tuple(facts.values()),
         coverage=tuple(coverage),
-        rejected_quotes=rejected,
+        rejected_claims=rejected,
         cost_lines=tuple(costs),
         continues=tuple(continues),
     )
@@ -675,7 +685,8 @@ async def propose_text_fields_from_notes(
     three and returned no data, because it ended on httpx's results, and taken from that page the field came
     back "httpx". A value is kept only when the note it cites quotes it verbatim, or when it is a name the task
     itself gives: a choice between the task's own entities ("httpx or requests"), made on a cited note whose
-    quote is a date, invents nothing.
+    quote is a date, invents nothing. Cited on the derived comparison itself, which quotes nothing, such a name is
+    evidenced by the record the comparison read for it.
     """
     if not notes.facts:
         return {}
@@ -711,6 +722,8 @@ async def propose_text_fields_from_notes(
     for proposal in result.data.fields:
         value = " ".join(proposal.value.split())
         evidence = cited.get(proposal.source_id)
+        if evidence is None and notes.derived(proposal.source_id) and _names(task, value):
+            evidence = _compared(notes, proposal.source_id, value)
         if (
             proposal.field in fields
             and proposal.field not in found
@@ -720,6 +733,14 @@ async def propose_text_fields_from_notes(
         ):
             found[proposal.field] = (value, evidence)
     return found
+
+
+def _compared(notes: Notes, key: str, name: str) -> Evidence | None:
+    """The evidence for a name a derived conclusion picks, which quotes nothing itself: the record it compared that
+    was read for that name. A record read for another name does not evidence this one."""
+    facts = {fact_id(fact): fact for fact in notes.facts}
+    records = (facts[k] for k in notes.expand_evidence_ids((key,)) if k in facts)
+    return next((fact.evidence for fact in records if fact.evidence is not None and _names(fact.text, name)), None)
 
 
 def _names(task: str, value: str) -> bool:
@@ -764,7 +785,7 @@ def read_candidates(capture: Capture) -> tuple[Candidate, ...]:
 
 
 class _ChoiceRead(Frozen):
-    claims: tuple[_ReadClaim, ...] = ()
+    facts: tuple[Fact, ...] = ()
     absent: tuple[str, ...] = ()
     cost_lines: tuple[CostLine, ...] = ()
 
@@ -839,7 +860,7 @@ async def _read_choices(
         return _ChoiceRead()
     if ledger is not None:
         ledger.record(evaluation.cost)
-    claims: list[_ReadClaim] = []
+    facts: list[Fact] = []
     absent: list[str] = []
     for requirement in requirements:
         answer = evaluation.answers.get(requirement.id)
@@ -860,15 +881,16 @@ async def _read_choices(
             continue
         value, evidence = copied
         logger.debug("read reader=jev_choice requirement=%s reason=scalar_candidate", requirement.id)
-        claims.append(
-            _ReadClaim(
+        # The candidate's evidence was cut from this capture by code, so it is kept as selected, not re-found.
+        facts.append(
+            Fact(
                 requirement_id=requirement.id,
                 text=f"{requirement.text}\n{value}",
-                source_id=evidence.source_id,
-                quote=evidence.quote,
+                evidence=evidence,
+                reader=FactReader.JEV_CHOICE,
             )
         )
-    return _ChoiceRead(claims=tuple(claims), absent=tuple(absent), cost_lines=(evaluation.cost,))
+    return _ChoiceRead(facts=tuple(facts), absent=tuple(absent), cost_lines=(evaluation.cost,))
 
 
 class Claim(Frozen):
@@ -904,21 +926,24 @@ def assemble_answer(
     # A claim keeps what it cited, which is what it states; the records its facts were derived from are shown
     # with it, so the caller and the claim check see what a total or winner was compared against.
     supports = [notes.expand_evidence_ids(claim.evidence_ids) for claim in claims]
+    # A derived fact has no page to link; its basis records carry the citations.
     known = {
-        evidence_id(fact.evidence): Citation(
+        key: Citation(
             id=index,
             text=fact.text,
             requirement_id=fact.requirement_id,
-            url=fact.evidence.url,
-            quote=fact.evidence.quote,
-            deep_link=text_fragment(fact.evidence.url, fact.evidence.quote),
+            url=evidence.url,
+            quote=evidence.quote,
+            deep_link=text_fragment(evidence.url, evidence.quote),
         )
-        for index, fact in enumerate(notes.facts, 1)
+        for index, (key, fact, evidence) in enumerate(
+            ((fact_id(fact), fact, fact.evidence) for fact in notes.facts if fact.evidence is not None), 1
+        )
     }
     cited = {key for support in supports for key in support}
     linked = []
     for claim, support in zip(claims, supports, strict=True):
-        links = " ".join(f"[{known[key].id}](<{known[key].deep_link}>)" for key in support)
+        links = " ".join(f"[{known[key].id}](<{known[key].deep_link}>)" for key in support if key in known)
         linked.append(f"{claim.text} {links}")
     return ComposedAnswer(
         answer="\n\n".join(claim.text for claim in claims),
@@ -934,7 +959,7 @@ def _without_citation_markup(text: str) -> str:
     # The composer can echo bracketed references in prose; only its checked evidence_ids create links.
     def replace(match: re.Match[str]) -> str:
         label = match[1]
-        if label.isdecimal() or re.fullmatch(r"[\w-]+:\d+:\d+", label):
+        if label.isdecimal() or re.fullmatch(r"[\w-]+:\d+:\d+|derived:[0-9a-f]+", label):
             logger.warning("compose dropped inline citation reference %r", label)
             return ""
         return label if match[2] else match[0]
@@ -1030,9 +1055,11 @@ def claim_check_questions(
     questions: dict[str, NoulQuestion] = {}
     known = notes.evidence
     for index, claim in enumerate(composed.claims):
+        # A derived fact is judged from the records it expands to, never from the reader's own conclusion.
         evidence = "\n".join(
             known[key].model_dump_json() if key in known else f"MISSING: {key}"
             for key in notes.expand_evidence_ids(claim.evidence_ids)
+            if not notes.derived(key)
         )
         for issue in ("unsupported", "contradicted"):
             questions[f"{issue}_{index}"] = NoulQuestion(
