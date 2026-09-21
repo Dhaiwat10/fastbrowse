@@ -220,6 +220,13 @@ class ReadOutcome(Frozen):
     """Requirements whose list goes on past this capture, so no claim from it closes them."""
 
 
+def _notes_room(tokens: TokenBudget, messages: Sequence[Message], response: type[Frozen]) -> int:
+    """Characters left for the notes once the prompt and the response schema it must fit beside are counted."""
+    return tokens.remaining_chars(
+        "".join(message.content for message in messages) + json.dumps(response.model_json_schema())
+    )
+
+
 def _read_message(
     capture: Capture,
     part: Chunk,
@@ -329,9 +336,7 @@ async def read(
             ),
             _read_message(capture, part, question, requirement_ids),
         ]
-        room = tokens.remaining_chars(
-            "".join(message.content for message in messages) + json.dumps(_ReadResponse.model_json_schema())
-        )
+        room = _notes_room(tokens, messages, _ReadResponse)
         messages[-1] = messages[-1].model_copy(
             update={"content": messages[-1].content + so_far.render(room, preserve_requirements=True)}
         )
@@ -379,17 +384,8 @@ async def read(
     for fact in found:
         if fact.requirement_id in continues:
             fact = fact.model_copy(update={"requirement_id": None})
-        _remember(
-            capture,
-            _ReadClaim(
-                requirement_id=fact.requirement_id,
-                text=fact.text,
-                source_id=fact.evidence.source_id,
-                quote=fact.evidence.quote,
-            ),
-            FactReader.LLM,
-            notes,
-        )
+        # Its quote was verified against this capture when the chunk was read.
+        notes.add(fact)
         facts[(evidence_id(fact.evidence), fact.requirement_id)] = fact
     return ReadOutcome(
         facts=tuple(facts.values()),
@@ -636,9 +632,7 @@ async def propose_text_fields_from_notes(
         ),
         Message(role="user", content=f"# Task\n{task}\n\n# Fields\n{wanted}\n\n# Notes\n"),
     ]
-    room = tokens.remaining_chars(
-        "".join(message.content for message in messages) + json.dumps(_TextProposals.model_json_schema())
-    )
+    room = _notes_room(tokens, messages, _TextProposals)
     messages[-1] = messages[-1].model_copy(
         update={"content": messages[-1].content + notes.render(room, preserve_requirements=True)}
     )
@@ -913,9 +907,7 @@ async def compose(
             content=f"# Task\n{task}\n\n# Plan\n{plan.model_dump_json()}\n\n# Notes\n",
         ),
     ]
-    room = tokens.remaining_chars(
-        "".join(message.content for message in messages) + json.dumps(_AnswerDraft.model_json_schema())
-    )
+    room = _notes_room(tokens, messages, _AnswerDraft)
     offered = notes.render_with_ids(room, preserve_requirements=True)
     messages[-1] = messages[-1].model_copy(update={"content": messages[-1].content + offered.text})
     result = await llm.generate(
