@@ -8,8 +8,8 @@ from pydantic import JsonValue
 from fastbrowse.config import Config, Thresholds, TokenBudget
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, Question
 from fastbrowse.memory import Fact, Notes, evidence_id
-from fastbrowse.models import CostBasis, CostComponent, CostLine, FactReader
-from fastbrowse.page import Observation
+from fastbrowse.models import CostBasis, CostComponent, CostLine, FactReader, Operation
+from fastbrowse.page import Control, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.retrieval import claim_check_questions, compose
 from fastbrowse.verification import DoneVerdict, check_done, llm_verify, page_state
@@ -132,3 +132,43 @@ def test_a_page_too_long_for_the_evidence_is_cut_rather_than_ending_the_run() ->
     assert total_text in state["notes"]
     assert "[Viewport text cut:" in str(state["page"]["text"])
     assert len(json.dumps(state)) <= tokens.state_plus_all_questions * tokens.chars_per_token
+
+
+def test_off_screen_controls_give_way_to_the_evidence_before_the_run_ends() -> None:
+    # "View more flights" put hundreds of result rows on the page as controls, and those alone left the done check
+    # a 0 character notes budget, ending a run that had its evidence.
+    tokens = TokenBudget(state_plus_largest_question=1500, state_plus_all_questions=1500)
+    total_text = "Checkout total is $42"
+    notes = Notes(
+        [
+            Fact(
+                reader=FactReader.LLM,
+                requirement_id="r1",
+                text=total_text,
+                evidence=evidence(sha="total", end=len(total_text)).model_copy(update={"quote": total_text}),
+            )
+        ]
+    )
+    stops = Control(
+        id="stops",
+        frame_id=None,
+        role="checkbox",
+        label="Nonstop only",
+        operations=frozenset({Operation.CLICK}),
+        checked=True,
+    )
+    rows = tuple(
+        Control(
+            id=f"row{i}",
+            frame_id=None,
+            role="button",
+            label=f"From {100 + i} US dollars. Nonstop flight",
+            operations=frozenset({Operation.CLICK}),
+            offscreen=True,
+        )
+        for i in range(300)
+    )
+    state = page_state(_PAGE.model_copy(update={"controls": (stops, *rows)}), notes, tokens)
+    assert isinstance(state, dict) and isinstance(state["notes"], str)
+    assert total_text in state["notes"]
+    assert state["controls"] == [{"label": "Nonstop only", "role": "checkbox", "checked": True}]

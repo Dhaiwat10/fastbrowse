@@ -6,7 +6,7 @@ answer lands in the uncertain band.
 """
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from enum import StrEnum
 
 from pydantic import BaseModel, JsonValue, ValidationError
@@ -16,7 +16,7 @@ from fastbrowse.jev import JevClient, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation, LLMClient, Message
 from fastbrowse.memory import Notes, NotesTooLarge
 from fastbrowse.models import CostComponent, CostLine, Evidence, Frozen, LLMPurpose, StepResult
-from fastbrowse.page import Capture, Observation, cut_text
+from fastbrowse.page import Capture, Control, Observation, cut_text
 from fastbrowse.planner import Plan, RequirementKind
 from fastbrowse.retrieval import (
     ComposedAnswer,
@@ -75,12 +75,7 @@ def page_state(
         "page": page,
         # Inputs and ARIA selection states are absent from innerText; without them a preview can
         # pass completion even though the requested filters were never applied.
-        "controls": [
-            control.model_dump(
-                mode="json", include={"label", "context", "role", "value", "checked", "selected"}, exclude_none=True
-            )
-            for control in observation.controls
-        ],
+        "controls": _controls(observation.controls),
         "notes": "",
     }
 
@@ -91,11 +86,25 @@ def page_state(
         state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
     except NotesTooLarge:
         # Requirement evidence outranks the page's own text: a verdict without it is a guess, while cut text says
-        # it was cut. Only when the controls alone leave no room for the evidence does the verdict stop.
+        # it was cut. Off-screen controls go next, as they do for Jev's policy: a "View more" list of results can
+        # fill the budget with controls alone. Only when the on-screen controls leave no room does the verdict stop.
         page["text"] = ""
-        state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
+        try:
+            state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
+        except NotesTooLarge:
+            state["controls"] = _controls(control for control in observation.controls if not control.offscreen)
+            state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
         page["text"] = cut_text(observation.viewport_text, room(), json_encoded=True)
     return state
+
+
+def _controls(controls: Iterable[Control]) -> list[JsonValue]:
+    return [
+        control.model_dump(
+            mode="json", include={"label", "context", "role", "value", "checked", "selected"}, exclude_none=True
+        )
+        for control in controls
+    ]
 
 
 async def check_done(
