@@ -391,10 +391,13 @@ async def hosted_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path | 
 
     try:
         return await _hosted_run(task, http, record=record)
+    # The SDK's message quotes the response body, which can echo the key: report the status or type alone.
     except BrowserUseError as error:
-        if error.status_code in RETRYABLE_STATUS:
-            raise Unavailable(f"Browser Use {error}") from error
-        raise
+        failed = Unavailable if error.status_code in RETRYABLE_STATUS else RuntimeError
+        raise failed(f"Browser Use API returned HTTP {error.status_code}") from None
+    except httpx.HTTPError as error:
+        failed = Unavailable if isinstance(error, TRANSIENT_TRANSPORT) else RuntimeError
+        raise failed(f"Browser Use API request failed ({type(error).__name__})") from None
 
 
 async def _hosted_run(task: LiveTask, http: httpx.AsyncClient, *, record: Path | None) -> tuple[Outcome, ArmReport]:

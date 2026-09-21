@@ -13,6 +13,7 @@ import pytest
 
 from fastbrowse.evals import live, live_tasks
 from fastbrowse.evals.live_tasks import TASKS, LiveTask, Outcome
+from fastbrowse.models import Unavailable
 from fastbrowse.telemetry import TRACE, trace
 
 RUNNER: dict[str, Any] = runpy.run_path(str(live.ULTRAFAST_RUNNER))
@@ -351,3 +352,29 @@ async def test_a_hosted_session_whose_output_fails_the_schema_keeps_its_cost(mon
     outcome, report = await live.hosted_arm(task("pypi-newer"), httpx.AsyncClient(), record=None)
     assert outcome.answer == "[Session cost limit reached]"
     assert report.dollars == 0.37 and report.status == "stopped"
+
+
+async def test_a_hosted_outage_retries_without_quoting_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    import browser_use_sdk.v3  # an optional extra
+
+    class Run:
+        session_id = "s1"
+
+        def __await__(self) -> Any:
+            async def fail() -> None:
+                raise browser_use_sdk.v3.BrowserUseError(503, "upstream echoed bu_secret_key")
+
+            return fail().__await__()
+
+    class Client:
+        def __init__(self, **_: object) -> None:
+            self.sessions = SimpleNamespace(get=AsyncMock())
+
+        def run(self, *_: object, **__: object) -> Run:
+            return Run()
+
+    monkeypatch.setattr(browser_use_sdk.v3, "AsyncBrowserUse", Client)
+    monkeypatch.setattr(live, "load_settings", lambda: SimpleNamespace(browser_key=lambda: "bu_secret_key"))
+    with pytest.raises(Unavailable) as error:
+        await live.hosted_arm(task("pypi-newer"), httpx.AsyncClient(), record=None)
+    assert "bu_secret_key" not in str(error.value) and "HTTP 503" in str(error.value)

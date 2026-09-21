@@ -129,7 +129,7 @@ def _post(model: Any, url: str, headers: dict[str, str], body: dict[str, Any]) -
     for attempt in range(3):
         try:
             response = model.CLIENT.post(url, json=body, headers=headers)
-        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as error:
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, httpx.DecodingError) as error:
             raise Unavailable(f"Model connection failed ({type(error).__name__}); no action executed.") from None
         except httpx.HTTPError:
             raise RuntimeError("Model connection failed; no action executed.") from None
