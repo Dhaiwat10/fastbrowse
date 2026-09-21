@@ -57,7 +57,10 @@
       for (const e of root.querySelectorAll('*')) {
         // A filter can change only its checkmark, so text alone reported "Nonstop only" as a no-op.
         // Field values stay out: the run judges fills by the value it wrote, even when a popup changes.
-        if ('checked' in e || 'selected' in e || e.hasAttribute('aria-checked') || e.hasAttribute('aria-selected'))
+        // Only rendered controls: a hidden carousel's aria-selected dots churn on their own and would read as
+        // progress. Opacity is not checked, as a transparent native checkbox is the one TodoMVC shows.
+        if (('checked' in e || 'selected' in e || e.hasAttribute('aria-checked') || e.hasAttribute('aria-selected')) &&
+          e.checkVisibility({ checkVisibilityCSS: true }))
           hashText(JSON.stringify([e.checked ?? null, e.selected ?? null,
             e.getAttribute('aria-checked'), e.getAttribute('aria-selected')]));
         if (e.shadowRoot) include(e.shadowRoot);

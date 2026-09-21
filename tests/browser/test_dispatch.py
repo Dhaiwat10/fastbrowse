@@ -106,7 +106,8 @@ async def test_fingerprint_tracks_selection_without_counting_text_field_values(
         }[nested]
         + "; fixtureRoot.innerHTML = '<input type=checkbox><select multiple><option>First</option>' "
         "+ '<option>Second</option></select><button role=switch aria-checked=false>Nonstop only</button>' "
-        "+ '<button role=option aria-selected=false>One way</button><input type=text>';",
+        "+ '<button role=option aria-selected=false>One way</button><input type=text>' "
+        "+ '<button hidden role=tab aria-selected=false>Slide 2</button>';",
     )
     before = await page._fingerprint()
     for change in (
@@ -122,8 +123,10 @@ async def test_fingerprint_tracks_selection_without_counting_text_field_values(
     await eval_value(
         browser_session,
         browser_session.active_session_id,
-        "fixtureRoot.querySelector('[type=text]').value = 'requests'",
+        "fixtureRoot.querySelector('[type=text]').value = 'requests'; "
+        "fixtureRoot.querySelector('[role=tab]').setAttribute('aria-selected', 'true')",
     )
+    # Neither a typed value nor a hidden carousel's selection is progress.
     assert await page._fingerprint() == before
 
 
