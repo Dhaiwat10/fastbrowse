@@ -479,14 +479,16 @@ def summarize(rows: list[dict[str, object]], arms: list[str]) -> None:
                 calls[label] = calls.get(label, 0.0) + spent
         for label, spent in sorted(calls.items(), key=lambda item: -item[1]):
             print(f"  {label:18} {spent / len(arm_rows):5.1f}s a task")
-        # Reported against the PASSING runs, because that is the false-positive rate the arming decision
-        # turns on: a tripwire firing on a run that failed anyway costs nothing.
+        # RUNS affected, not fires, and only among the passing ones - that is the false-positive rate the
+        # arming decision turns on. Summing fires reads like a rate and is not one: four repetitions inside
+        # a single grinding run reported as "4 on 19" invites the reading "4 runs of 19", which is 5%
+        # misread as 21%. A tripwire firing on a run that failed anyway costs nothing and is excluded.
         shadow: Counter[str] = Counter()
         for r in arm_rows:
             if r["passed"]:
-                shadow.update(cast(dict[str, int], r.get("would_fire", {})))
-        for tripwire, count in shadow.most_common():
-            print(f"  would-fire {tripwire:18} {count} on {passed} passing runs")
+                shadow.update(set(cast(dict[str, int], r.get("would_fire", {}))))
+        for tripwire, runs in shadow.most_common():
+            print(f"  would-fire {tripwire:18} {runs}/{passed} passing runs")
 
 
 async def main(argv: list[str]) -> int:
