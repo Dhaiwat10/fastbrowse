@@ -49,6 +49,8 @@ class Chunk(Frozen):
     """Bounds of the payload; a repeated header may precede start in the capture."""
     text: str
     block_ids: tuple[str, ...]
+    header: str = ""
+    """A table's header repeated before a continuation of its rows, which lies before `start`."""
 
 
 class _Piece(Frozen):
@@ -104,14 +106,17 @@ def _pieces(capture: Capture, max_chars: int) -> tuple[_Piece, ...]:
     return tuple(result)
 
 
-def _chunk_text(capture: Capture, pieces: Sequence[_Piece]) -> tuple[str, tuple[str, ...]]:
+def _chunk_text(capture: Capture, pieces: Sequence[_Piece]) -> tuple[str, tuple[str, ...], str]:
     spans = [(piece.start, piece.end) for piece in pieces]
     ids = [piece.block.source_id for piece in pieces]
     first = pieces[0]
+    header = ""
     if first.header is not None and first.header.end <= first.start:
+        header = capture.text[first.header.start : first.header.end].rstrip("\n")
         spans.insert(0, (first.header.start, first.header.end))
         ids.insert(0, first.header.source_id)
-    return "\n".join(capture.text[start:end].rstrip("\n") for start, end in spans), tuple(dict.fromkeys(ids))
+    text = "\n".join(capture.text[start:end].rstrip("\n") for start, end in spans)
+    return text, tuple(dict.fromkeys(ids)), header
 
 
 def chunk(capture: Capture, max_chars: int, overlap_blocks: int = _CHUNK_OVERLAP_BLOCKS) -> tuple[Chunk, ...]:
@@ -151,10 +156,16 @@ def chunk(capture: Capture, max_chars: int, overlap_blocks: int = _CHUNK_OVERLAP
             headings = [i for i in range(cursor + 1, end) if pieces[i].block.kind is BlockKind.HEADING]
             if headings:
                 end = headings[-1]
-        text, ids = _chunk_text(capture, pieces[start:end])
+        text, ids, header = _chunk_text(capture, pieces[start:end])
         chunks.append(
             Chunk(
-                index=len(chunks), total=0, start=pieces[start].start, end=pieces[end - 1].end, text=text, block_ids=ids
+                index=len(chunks),
+                total=0,
+                start=pieces[start].start,
+                end=pieces[end - 1].end,
+                text=text,
+                block_ids=ids,
+                header=header,
             )
         )
         cursor = end
@@ -286,10 +297,17 @@ def _read_message(
     requirement_ids: Sequence[str],
     evidence: str = "",
 ) -> Message:
-    sources = "\n".join(
-        f"[{block.source_id}] {capture.text[max(block.start, part.start) : min(block.end, part.end)]}"
+    offered = [
+        block
         for block in capture.blocks
         if block.source_id in part.block_ids and block.start < part.end and block.end > part.start
+    ]
+    # A table cut mid-rows is shown under its header, which lies before the chunk, so its columns keep their names.
+    sources = "\n".join(
+        f"[{block.source_id}] "
+        + (f"{part.header}\n" if part.header and block.start < part.start else "")
+        + capture.text[max(block.start, part.start) : min(block.end, part.end)]
+        for block in offered
     )
     # Context first and the question last, as long-context guidance for Gemini and Claude recommends.
     content = (

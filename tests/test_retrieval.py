@@ -25,6 +25,7 @@ from fastbrowse.page import Block, BlockKind, Capture, Observation
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.retrieval import (
     UnsupportedField,
+    _read_message,
     chunk,
     claim_check_questions,
     compose,
@@ -144,6 +145,8 @@ def test_chunk_repeats_markdown_table_header_and_keeps_rows_grounded() -> None:
     assert all(len(part.text) <= 65 for part in parts)
     for row in rows:
         assert any(row in part.text for part in parts)
+    # The reader is shown each continuation under the header too, or its columns lose their names.
+    assert all(header in _read_message(page, part, "Find the cost", ["r"]).content for part in parts)
 
 
 def test_chunk_repeats_nearest_header_when_table_rows_are_separate_blocks() -> None:

@@ -29,6 +29,9 @@ class WallJev(ScriptedJev):
         answers: dict[str, Answer] = dict(evaluation.answers)
         if isinstance(questions.get("bot_check"), NoulQuestion):
             answers["bot_check"] = NoulAnswer(probability=self.bot_check)
+        # The task gives no credentials, so the wall cannot be passed.
+        if isinstance(questions.get("login_credentials"), NoulQuestion):
+            answers["login_credentials"] = NoulAnswer(probability=0.05)
         return Evaluation(model="test", answers=answers, input_tokens=10, cost=FREE)
 
 
