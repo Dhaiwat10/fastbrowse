@@ -156,6 +156,13 @@ def test_chunk_repeats_markdown_table_header_and_keeps_rows_grounded() -> None:
         assert evidence is not None and page.text[evidence.start : evidence.end] == row
 
 
+def test_a_quote_matches_a_table_cell_whose_pipe_the_capture_escaped() -> None:
+    page = capture((BlockKind.TABLE, r"| Story | 244 points \| hide \| 115 comments |"))
+    for quote in ("Story | 244 points | hide | 115 comments", r"244 points \| hide"):
+        evidence = locate_quote(page, "s0", quote)
+        assert evidence is not None and "\\| hide" in page.text[evidence.start : evidence.end]
+
+
 def test_chunk_repeats_nearest_header_when_table_rows_are_separate_blocks() -> None:
     page = capture(
         (BlockKind.TABLE, "Name | Cost"),

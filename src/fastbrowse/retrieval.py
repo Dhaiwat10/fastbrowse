@@ -184,7 +184,9 @@ def locate_quote(capture: Capture, source_id: str, quote: str) -> Evidence | Non
     words = quote.split()
     if not words:
         return None
-    pattern = re.compile(r"\s+".join(re.escape(word) for word in words))
+    # A table cell's pipe is escaped in the capture so the row stays one Markdown row; a reader quotes it as the
+    # page shows it. Either spelling matches, and the evidence keeps the capture's own offsets.
+    pattern = re.compile(r"\s+".join(re.escape(word.replace("\\|", "|")).replace(r"\|", r"\\?\|") for word in words))
     for block in capture.blocks:
         if block.source_id != source_id:
             continue
