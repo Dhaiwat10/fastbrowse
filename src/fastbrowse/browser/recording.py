@@ -131,9 +131,10 @@ class Recording:
         timed = [*self._captions, (self._card_at or time.monotonic(), "")]
         cues = [
             # libass reads `{...}` as a style override, so a page's braces are escaped to stay text.
-            f"{_srt_time(at - origin)} --> {_srt_time(until - origin)}\n{text.replace('{', '\\{')}\n"
+            f"{_srt_time(max(0.0, at - origin))} --> {_srt_time(until - origin)}\n{text.replace('{', '\\{')}\n"
             for (at, text), (until, _) in itertools.pairwise(timed)
-            if until > at
+            # A step can end before the browser sends its first frame; its caption starts with the video.
+            if until > max(at, origin)
         ]
         await asyncio.to_thread(
             subtitles.write_text, "\n".join(f"{n}\n{cue}" for n, cue in enumerate(cues, 1)), encoding="utf-8"
