@@ -11,6 +11,16 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **Runs use a Browser Use Cloud browser by default** (`BROWSER_USE_API_KEY`). `--local` runs local Chrome;
+  `--headed`, `--profile`, `FASTBROWSE_HEADED` and `FASTBROWSE_PROFILE` imply it. `--cloud` is removed.
+  `--cloud-profile` with local Chrome is refused at startup.
+- **A failure says what happened.** Each retry logs the call, the provider's status and error, and the
+  backoff; a call that gives up names how many requests failed, over how long, and the last cause. Evals
+  lead every failed run with how it ended, and print which providers (and whether a backup) they use.
+- **Recordings are captioned and kept plain beside them** (`<name>.plain.mp4`). Captions are timed from the
+  video's first frame; an ffmpeg without libass still writes both videos, uncaptioned.
+- **Clicks are safer on covered controls.** A covered control is clicked at an exposed edge only when no
+  other control (a row's own Delete button) sits under that point. A select the page reverts is a failed step.
 - **A recording ends on a readable answer.** The closing card shows each citation as a number beside the
   claim and lists the cited site and quote underneath, instead of the raw text-fragment link.
 
