@@ -104,7 +104,7 @@ To work on fastbrowse itself:
 
 ```sh
 git clone https://github.com/agent-labs-dev/fastbrowse.git && cd fastbrowse
-uv sync
+uv sync --all-extras   # the extras carry mcp and browser_use_sdk, which the tests and evals import
 cp .env.example .env
 uv run fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
