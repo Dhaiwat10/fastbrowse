@@ -1,7 +1,7 @@
 """Head-to-head on live sites: fastbrowse, jev-ultrafast and hosted Browser Use, same prompts, no dollar or time caps.
 
     uv run --extra browser-use python -m fastbrowse.evals.live [--only TASK_ID ...] [--category CATEGORY ...]
-        [--arms fastbrowse jev-ultrafast hosted] [--bitwarden] [--repeat N] [--record DIR]
+        [--arms fastbrowse jev-ultrafast browser-use] [--bitwarden] [--repeat N] [--record DIR]
         [--out artifacts/evals/live.jsonl]
 
 Needs BROWSER_USE_API_KEY (every arm), and the Jev and LLM keys in fastbrowse.clients.environment (fastbrowse and
@@ -58,7 +58,7 @@ from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
 from fastbrowse.telemetry import TRACE
 
-ARMS = ("fastbrowse", "jev-ultrafast", "hosted")
+ARMS = ("fastbrowse", "jev-ultrafast", "browser-use")
 MAX_STEPS = 30
 LIMITS = Limits(max_steps=MAX_STEPS)
 """No arm has a dollar or time cap: a cap one arm reaches measures the budget, not the arm, so every run ends
@@ -417,7 +417,7 @@ async def _hosted_run(task: LiveTask, http: httpx.AsyncClient, *, record: Path |
     while run.session_id is None and not finishing.done():
         await asyncio.wait({finishing}, timeout=0.2)
     if run.session_id is not None:
-        _watch("hosted", task, (await client.sessions.get(run.session_id)).live_url)
+        _watch("browser-use", task, (await client.sessions.get(run.session_id)).live_url)
     # gather, not await: the SDK raises on output that fails the task's schema, before the session's cost is read.
     await asyncio.gather(finishing, return_exceptions=True)
     seconds = time.monotonic() - started

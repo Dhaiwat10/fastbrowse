@@ -25,11 +25,11 @@ Needs Jev and LLM keys (see `fastbrowse.clients.environment`). Costs about $0.00
 ## Live head-to-head
 
 ```sh
-uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse jev-ultrafast hosted
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse jev-ultrafast browser-use
 uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse --category lookup --repeat 3
 ```
 
-The same prompts run through three arms: fastbrowse on a Browser Use Cloud browser, [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (pinned commit, run in its own environment by `scripts/ultrafast_arm.py`) on the same kind of browser, and hosted Browser Use. Every run ends when its agent does; fastbrowse and jev-ultrafast share a 30-step limit, and hosted Browser Use exposes none. Tasks are defined in `src/fastbrowse/evals/live_tasks.py`. Truth is fetched at run time from PyPI's JSON API, the Hacker News API and GitHub's REST API, so grades follow the live site; the rest are fixed by the site (an arXiv title, a practice shop's prices). Cost includes reported model charges, estimates where only token usage is available, and the browser and proxy cost returned when the cloud browser stops; the hosted arm reports `total_cost_usd`.
+The same prompts run through three arms: fastbrowse on a Browser Use Cloud browser, [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) (pinned commit, run in its own environment by `scripts/ultrafast_arm.py`) on the same kind of browser, and hosted Browser Use, Browser Use's own agent run through its API (arm `browser-use`). Every run ends when its agent does; fastbrowse and jev-ultrafast share a 30-step limit, and hosted Browser Use exposes none. Tasks are defined in `src/fastbrowse/evals/live_tasks.py`. Truth is fetched at run time from PyPI's JSON API, the Hacker News API and GitHub's REST API, so grades follow the live site; the rest are fixed by the site (an arXiv title, a practice shop's prices). Cost includes reported model charges, estimates where only token usage is available, and the browser and proxy cost returned when the cloud browser stops; the `browser-use` arm reports `total_cost_usd`.
 
 Use `--suite`, `--only` and `--category` to select tasks, `--bitwarden` for vault credentials, and
 `--record DIR` for videos. `--concurrency N` sets how many runs overlap, across all arms (default 8). The current jev-ultrafast pin is `1231850a0bf1a0c0341fe408ef1668dbbfdfac46`.

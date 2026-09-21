@@ -128,7 +128,7 @@ def test_each_task_runs_only_where_it_grades_on_equal_terms() -> None:
         if "jev-ultrafast" in live_task.arms:
             # jev-ultrafast has no answer, so its tasks must be graded on the page alone.
             assert live_task.output_schema is None
-            assert "hosted" not in live_task.arms
+            assert "browser-use" not in live_task.arms
     assert {t.id for t in TASKS if "jev-ultrafast" in t.arms} >= {"wiki-open", "flights-search"}
 
 
