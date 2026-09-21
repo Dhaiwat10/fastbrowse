@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import re
+import reprlib
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from copy import deepcopy
 from datetime import date
@@ -202,11 +203,10 @@ def locate_quote(capture: Capture, source_id: str, quote: str) -> Evidence | Non
 class _ReadClaim(Frozen):
     requirement_id: str | None = None
     text: str
-    source_id: str = Field(
-        description="The label of the Source blocks line the quote starts in, without its brackets (main/:12 for a "
-        "line shown as [main/:12]); never an evidence id."
+    cites: tuple[str, ...] = Field(
+        description="The Source blocks the claim is read from, by label without brackets (main/:12 for a line shown "
+        "as [main/:12]): one block, or several consecutive ones when the claim spans them; never an evidence id."
     )
-    quote: str
     draws_on: tuple[str, ...] = Field(
         default=(),
         description=(
@@ -216,32 +216,51 @@ class _ReadClaim(Frozen):
     )
 
 
+def _cited(capture: Capture, part: Chunk, cites: Sequence[str]) -> Evidence | None:
+    """The text a claim's cited blocks showed the reader, when they are consecutive blocks of one frame in this chunk.
+
+    The reader names blocks and code copies their text: a model asked to reproduce a quote writes the page as it
+    reads it, and a table's escaped pipe, a record split over two quotes or a placeholder for a count followed.
+    """
+    offered = [
+        block
+        for block in capture.blocks
+        if block.source_id in part.block_ids and block.start < part.end and block.end > part.start
+    ]
+    positions = {block.source_id: index for index, block in enumerate(offered)}
+    cited = sorted({positions[source_id] for source_id in cites if source_id in positions})
+    if not cited or len(cited) != len(set(cites)) or cited[-1] - cited[0] != len(cited) - 1:
+        return None
+    first, last = offered[cited[0]], offered[cited[-1]]
+    if any(offered[index].frame_id != first.frame_id for index in cited):
+        return None
+    return _evidence(capture, first, max(first.start, part.start), min(last.end, part.end))
+
+
 def _remember(
     capture: Capture,
+    part: Chunk,
     claim: _ReadClaim,
-    reader: FactReader,
     notes: Notes,
-    *,
-    source_ids: Collection[str] | None = None,
-    references: Mapping[str, str] | None = None,
+    references: Mapping[str, str],
 ) -> Fact | None:
-    evidence = (
-        locate_quote(capture, claim.source_id, claim.quote)
-        if source_ids is None or claim.source_id in source_ids
-        else None
-    )
+    evidence = _cited(capture, part, claim.cites)
     if evidence is None:
-        logger.debug("read rejected quote reader=%s quote=%r", reader.value, claim.quote[:_READ_SPAN_CHARS])
+        logger.debug("read rejected claim cites=%s", reprlib.repr(claim.cites))
         return None
     basis: list[str] = []
     for reference in claim.draws_on:
-        key = (references or {}).get(reference)
+        key = references.get(reference)
         if key is None:
             logger.debug("read dropped unknown basis reference=%r", reference)
         elif key not in basis:
             basis.append(key)
     fact = Fact(
-        requirement_id=claim.requirement_id, text=claim.text, evidence=evidence, basis=tuple(basis), reader=reader
+        requirement_id=claim.requirement_id,
+        text=claim.text,
+        evidence=evidence,
+        basis=tuple(basis),
+        reader=FactReader.LLM,
     )
     notes.add(fact)
     return fact
@@ -262,7 +281,7 @@ class _ReadResponse(Frozen):
 class ReadOutcome(Frozen):
     facts: tuple[Fact, ...]
     coverage: tuple[int, ...]
-    rejected_quotes: int
+    rejected_claims: int
     cost_lines: tuple[CostLine, ...]
     continues: tuple[str, ...] = ()
     """Requirements whose list goes on past this capture, so no claim from it closes them."""
@@ -336,7 +355,7 @@ async def read(
         requirement_ids = [key for key in requirement_ids if key not in answered and key not in chosen.absent]
         if not requirement_ids:
             return ReadOutcome(
-                facts=tuple(facts.values()), coverage=(), rejected_quotes=rejected, cost_lines=tuple(costs)
+                facts=tuple(facts.values()), coverage=(), rejected_claims=rejected, cost_lines=tuple(costs)
             )
         # Narrow the obligations without dropping the task's constraints or separating ids from their meaning.
         question += "\n\nRead only these remaining requirements:\n" + "\n".join(
@@ -353,29 +372,27 @@ async def read(
             Message(
                 role="system",
                 content=(
-                    "# Reader\nAnswer using this capture only. Each claim needs its source_id "
-                    "and a verbatim quote, and says only what that quote (with the claims it draws on) shows: "
-                    "a claim naming two messages or values quotes both. "
+                    "# Reader\nAnswer using this capture only. Each claim cites the Source blocks it is read from "
+                    "and says only what those blocks (with the claims it draws on) show: a claim naming two "
+                    "messages or values cites the blocks of both. "
                     "Use only the supplied requirement ids (or null). Mark answered only when collected evidence "
                     "fully answers the question; otherwise continue. Assign a requirement id only when the claim "
                     "answers that whole requirement with its constraints; use null for partial information. "
                     "Query inputs, calendar prices and previews do not establish a matching filtered result.\n\n"
                     "# Evidence context\nThe capture will not be available when the answer is checked. For a "
-                    "comparison, quote separate supporting facts for the active query, filters, date and "
+                    "comparison, cite separate supporting facts for the active query, filters, date and "
                     "ranking or minimum, as well as the winning record. These contextual facts may use a null "
                     "requirement id. A record alone does not prove a superlative or a count, but a comparison "
                     "does: when the capture holds the complete set being compared (no further pages or "
-                    "unloaded results), quote each compared record's value and the winner or total may be "
+                    "unloaded results), cite each compared record and the winner or total may be "
                     "assigned the requirement id. A count, total or winner must list in draws_on every record "
-                    "it counts or compares, including the contextual facts it relies on. A table row means what "
-                    "its header says: quote the header row too and list it in draws_on of a claim read from a "
-                    "row. Use evidence ids from "
-                    "the collected notes' [sha:start:end] labels without brackets. For records quoted earlier "
+                    "it counts or compares, including the contextual facts it relies on. Use evidence ids from "
+                    "the collected notes' [sha:start:end] labels without brackets. For records cited earlier "
                     "in this response, use claim:0 for the first claim, claim:1 for the second, and so on. "
-                    "Quote the records before the conclusion; never refer to a later claim.\n\n"
+                    "Cite the records before the conclusion; never refer to a later claim.\n\n"
                     "# Lists over several pages\nWhen the set a requirement ranges over continues past this "
                     "capture (a next page, a later page number, a load-more control) and the collected evidence "
-                    "does not already cover the rest, list that requirement id in continues and still quote "
+                    "does not already cover the rest, list that requirement id in continues and still cite "
                     "what this capture adds, with a null requirement id: every compared record and its value "
                     "for a count, total or superlative. Earlier pages are in the "
                     "collected evidence under their own URLs. On the last page, when the collected evidence and "
@@ -412,14 +429,7 @@ async def read(
         references = {key: key for key in offered.evidence_ids}
         for index, claim in enumerate(result.data.claims):
             # Carried to the next chunk without its requirement id, which only the whole page can settle.
-            fact = _remember(
-                capture,
-                claim.model_copy(update={"requirement_id": None}),
-                FactReader.LLM,
-                so_far,
-                source_ids=part.block_ids,
-                references=references,
-            )
+            fact = _remember(capture, part, claim.model_copy(update={"requirement_id": None}), so_far, references)
             if fact is None:
                 rejected_here += 1
                 continue
@@ -448,7 +458,7 @@ async def read(
     return ReadOutcome(
         facts=tuple(facts.values()),
         coverage=tuple(coverage),
-        rejected_quotes=rejected,
+        rejected_claims=rejected,
         cost_lines=tuple(costs),
         continues=tuple(continues),
     )

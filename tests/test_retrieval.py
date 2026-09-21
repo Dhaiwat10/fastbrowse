@@ -179,7 +179,7 @@ def test_chunk_repeats_nearest_header_when_table_rows_are_separate_blocks() -> N
     assert "Age | Count" in last.text and "Name | Cost" not in last.text
 
 
-async def test_read_continues_after_forged_quote_tracks_coverage_and_cost() -> None:
+async def test_read_continues_after_an_unoffered_cite_tracks_coverage_and_cost() -> None:
     page = capture(
         (BlockKind.PARAGRAPH, "Price unknown"),
         (BlockKind.PARAGRAPH, "Price is $12"),
@@ -188,11 +188,11 @@ async def test_read_continues_after_forged_quote_tracks_coverage_and_cost() -> N
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "r1", "text": "Free", "source_id": "s0", "quote": "Price is free"}],
+                "claims": [{"requirement_id": "r1", "text": "Free", "cites": ["s1"]}],
                 "answered": True,
             },
             {
-                "claims": [{"requirement_id": "r1", "text": "Costs $12", "source_id": "s1", "quote": "Price is $12"}],
+                "claims": [{"requirement_id": "r1", "text": "Costs $12", "cites": ["s1"]}],
                 "answered": True,
             },
         ]
@@ -202,7 +202,7 @@ async def test_read_continues_after_forged_quote_tracks_coverage_and_cost() -> N
         llm, page, "What price?", ["r1"], notes, max_chars=15, tokens=TokenBudget(read_output_tokens=4096)
     )
     assert llm.output_caps == [4096, 4096]
-    assert result.coverage == (0, 1) and result.rejected_quotes == 1
+    assert result.coverage == (0, 1) and result.rejected_claims == 1
     assert len(result.facts) == 1 and result.facts[0].evidence.quote == "Price is $12"
     assert notes.evidenced("r1")
     assert sum(line.dollars or 0 for line in result.cost_lines) == 0.002
@@ -215,9 +215,7 @@ async def test_read_reaches_end_and_does_not_evidence_unknown_requirements() -> 
     llm = ScriptedLLM(
         [
             {
-                "claims": [
-                    {"requirement_id": "invented", "text": "Known fact", "source_id": "s0", "quote": "Known fact"}
-                ],
+                "claims": [{"requirement_id": "invented", "text": "Known fact", "cites": ["s0"]}],
                 "answered": False,
             },
             {"claims": [], "answered": False},
@@ -299,7 +297,7 @@ async def test_short_read_falls_back_only_for_the_unanswered_requirement(answer:
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "license", "text": "MIT", "source_id": "s1", "quote": "License: MIT"}],
+                "claims": [{"requirement_id": "license", "text": "MIT", "cites": ["s1"]}],
                 "answered": True,
             }
         ]
@@ -805,9 +803,7 @@ async def test_a_winner_from_part_of_a_list_is_kept_but_does_not_answer() -> Non
     llm = ScriptedLLM(
         [
             {
-                "claims": [
-                    {"requirement_id": "r1", "text": "cheapest", "source_id": "s0", "quote": "Sharp Objects £47.82"}
-                ],
+                "claims": [{"requirement_id": "r1", "text": "cheapest", "cites": ["s0"]}],
                 "answered": True,
                 "continues": ["r1", "not-asked"],
             }
@@ -854,9 +850,7 @@ async def test_a_later_chunk_saying_the_list_goes_on_reopens_an_earlier_chunks_c
     llm = ScriptedLLM(
         [
             {
-                "claims": [
-                    {"requirement_id": "r1", "text": "cheapest", "source_id": "s0", "quote": "Sharp Objects £47.82"}
-                ],
+                "claims": [{"requirement_id": "r1", "text": "cheapest", "cites": ["s0"]}],
                 "answered": True,
             },
             {"claims": [], "answered": False, "continues": ["r1"]},
@@ -881,15 +875,13 @@ async def test_a_list_that_runs_on_into_the_next_chunk_is_settled_by_the_last_on
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"text": "Virgin $1,200", "source_id": "s0", "quote": "Virgin $1,200"}],
+                "claims": [{"text": "Virgin $1,200", "cites": ["s0"]}],
                 "answered": False,
                 "continues": ["r1"],
             },
             {"claims": [], "answered": False, "continues": ["r1"]},
             {
-                "claims": [
-                    {"requirement_id": "r1", "text": "JetBlue at $1,061", "source_id": "s2", "quote": "JetBlue $1,061"}
-                ],
+                "claims": [{"requirement_id": "r1", "text": "JetBlue at $1,061", "cites": ["s2"]}],
                 "answered": True,
             },
         ]
@@ -914,8 +906,7 @@ async def test_a_later_chunk_is_read_against_what_earlier_chunks_of_the_page_fou
                     {
                         "requirement_id": None,
                         "text": "an Einstein quote",
-                        "source_id": "s0",
-                        "quote": "Einstein: the world as we have created it",
+                        "cites": ["s0"],
                     }
                 ],
                 "answered": False,
@@ -944,12 +935,11 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
         [
             {
                 "claims": [
-                    {"text": "Oak $19", "source_id": "s0", "quote": "Oak $19"},
-                    {"text": "Redwood $12", "source_id": "s1", "quote": "Redwood $12"},
+                    {"text": "Oak $19", "cites": ["s0"]},
+                    {"text": "Redwood $12", "cites": ["s1"]},
                     {
                         "text": "Two books on page one, total $31.",
-                        "source_id": "s2",
-                        "quote": "Page 1 of 2",
+                        "cites": ["s2"],
                         "draws_on": ["claim:1", "claim:0"],
                     },
                 ],
@@ -964,13 +954,12 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
     llm.responses.append(
         {
             "claims": [
-                {"text": "Pine $7", "source_id": "s0", "quote": "Pine $7"},
-                {"text": "Elm $15", "source_id": "s1", "quote": "Elm $15"},
+                {"text": "Pine $7", "cites": ["s0"]},
+                {"text": "Elm $15", "cites": ["s1"]},
                 {
                     "requirement_id": "r",
                     "text": answer,
-                    "source_id": "s0",
-                    "quote": "Pine $7",
+                    "cites": ["s0"],
                     "draws_on": ["claim:1", earlier[2], "claim:0", earlier[0]],
                 },
             ],
@@ -1011,16 +1000,15 @@ async def test_basis_references_cannot_name_rejected_or_later_claims() -> None:
         [
             {
                 "claims": [
-                    {"text": "Forged", "source_id": "s0", "quote": "Not on page"},
-                    {"text": "A $3", "source_id": "s0", "quote": "A $3"},
+                    {"text": "Forged", "cites": ["s9"]},
+                    {"text": "A $3", "cites": ["s0"]},
                     {
                         "requirement_id": "r",
                         "text": "A is cheaper",
-                        "source_id": "s0",
-                        "quote": "A $3",
+                        "cites": ["s0"],
                         "draws_on": ["claim:0", "claim:1", "claim:1", "claim:3", "invented:0:99"],
                     },
-                    {"text": "B $5", "source_id": "s1", "quote": "B $5"},
+                    {"text": "B $5", "cites": ["s1"]},
                 ],
                 "answered": True,
             }
@@ -1028,7 +1016,7 @@ async def test_basis_references_cannot_name_rejected_or_later_claims() -> None:
     )
     notes = Notes()
     result = await read(llm, page, "Cheapest?", ["r"], notes)
-    assert result.rejected_quotes == 1
+    assert result.rejected_claims == 1
     assert notes.supporting("r")[0][1].basis == (evidence_id(notes.facts[0].evidence),)
 
 
@@ -1057,7 +1045,7 @@ async def test_mixed_read_routes_keep_provenance_and_narrow_the_llm_request() ->
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "names", "text": "One and Two", "source_id": "s1", "quote": "One Two"}],
+                "claims": [{"requirement_id": "names", "text": "One and Two", "cites": ["s1"]}],
                 "answered": True,
             }
         ]
@@ -1074,29 +1062,28 @@ async def test_mixed_read_routes_keep_provenance_and_narrow_the_llm_request() ->
     assert "Version 1.2.3" in request.split("# Collected evidence\n")[1]
 
 
-async def test_the_reader_verifies_quotes_at_the_notes_write_and_logs_bounded_rejections(
-    caplog: pytest.LogCaptureFixture,
+@pytest.mark.parametrize("cites", [["s0", "s2"], ["unverified " * 50], []], ids=["gap", "invented", "none"])
+async def test_the_reader_keeps_only_claims_citing_consecutive_offered_blocks(
+    cites: list[JsonValue], caplog: pytest.LogCaptureFixture
 ) -> None:
-    from fastbrowse import retrieval
-
-    page = capture((BlockKind.PARAGRAPH, "The only page text"))
-    rejected = "unverified " * retrieval._READ_SPAN_CHARS
-    requirement = Requirement(id="r", text="Find the fact", kind=RequirementKind.INFORMATION)
+    page = capture((BlockKind.PARAGRAPH, "A $3"), (BlockKind.PARAGRAPH, "B $5"), (BlockKind.PARAGRAPH, "C $7"))
     llm = ScriptedLLM(
         [
             {
-                "claims": [{"requirement_id": "r", "text": "Invented", "source_id": "s0", "quote": rejected}],
+                "claims": [
+                    {"requirement_id": "r", "text": "Rejected", "cites": cites},
+                    {"requirement_id": "r", "text": "A and B", "cites": ["s0", "s1"]},
+                ],
                 "answered": True,
             }
         ]
     )
     notes = Notes()
     with caplog.at_level("DEBUG", logger="fastbrowse.retrieval"):
-        result = await read(llm, page, requirement.text, ["r"], notes, requirements=(requirement,))
-    assert result.rejected_quotes == 1 and not notes.facts
-    record = next(record for record in caplog.records if "rejected quote" in record.message)
-    assert record.args == (FactReader.LLM.value, rejected[: retrieval._READ_SPAN_CHARS])
-    assert page.text not in caplog.text and rejected not in caplog.text
+        result = await read(llm, page, "Find the prices", ["r"], notes)
+    assert result.rejected_claims == 1
+    assert [fact.evidence.quote for fact in notes.facts] == ["A $3\n\nB $5"]
+    assert "read rejected claim" in caplog.text and "unverified " * 5 not in caplog.text
 
 
 @pytest.mark.parametrize("count", [MAX_CHOICE_OPTIONS - 2, MAX_CHOICE_OPTIONS - 1])
