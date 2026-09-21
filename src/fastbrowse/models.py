@@ -279,5 +279,6 @@ class BrowserEvent(Frozen):
 
 
 type EventHandler = Callable[[StepEvent | BrowserEvent], Awaitable[None]]
+type FrameHandler = Callable[[bytes], Awaitable[None]]
 type UntilCheck = Callable[[str], Awaitable[bool]]
 """Caller assertion over the final page URL; COMPLETE requires it to return True when supplied."""

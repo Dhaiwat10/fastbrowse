@@ -13,6 +13,12 @@ Older entries are kept verbatim rather than rewritten as the product moves.
 
 Nothing yet.
 
+## [0.5.0] - 2026-09-21
+
+- **Watch the active tab as the agent works.** `run_task(on_frame=...)` sends JPEG bytes at up to five frames
+  a second, follows tab switches, and works with browsers reached over CDP without exposing their endpoint.
+  Slow or failing handlers do not hold up the run. Capture is off unless a handler is supplied.
+
 ## [0.4.2] - 2026-09-20
 
 - **A form is set up in the order that works.** Its mode - which tab of a search, which kind of account or

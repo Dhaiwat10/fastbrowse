@@ -32,6 +32,7 @@ from fastbrowse.models import (
     CostBreakdown,
     CostLine,
     EventHandler,
+    FrameHandler,
     Limits,
     LocalChrome,
     RunResult,
@@ -99,6 +100,7 @@ async def run_task(
     secrets: SecretResolver | None = None,
     downloads: Path | None = None,
     on_event: EventHandler | None = None,
+    on_frame: FrameHandler | None = None,
     until: UntilCheck | None = None,
     config: Config | None = None,
     http: httpx.AsyncClient | None = None,
@@ -121,6 +123,8 @@ async def run_task(
 
     Files the run downloads are discarded unless `downloads` names a directory to keep them in. `record` saves
     an MP4 of the tab, ending on the answer; it needs ffmpeg, and shows whatever the pages showed.
+    `on_frame` receives JPEG bytes from the active tab, at most five times a second. Frames are dropped while
+    the handler is busy; its failures are logged without interrupting the run. No handler means no live capture.
     """
     config = config or Config()
     settings = load_settings()
@@ -145,7 +149,9 @@ async def run_task(
                 ) as connection:
                     if on_event is not None:
                         await on_event(BrowserEvent(live_url=connection.live_url, browser_id=connection.browser_id))
-                    session = BrowserSession(connection, sink, refuse_cookie_banners=config.refuse_cookie_banners)
+                    session = BrowserSession(
+                        connection, sink, refuse_cookie_banners=config.refuse_cookie_banners, on_frame=on_frame
+                    )
                     async with session:
                         page = CdpPage(session, config)
                         agent = Agent(page, jev, llm, config=config, secrets=secrets, on_event=on_event)
