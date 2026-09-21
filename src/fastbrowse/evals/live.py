@@ -461,6 +461,20 @@ def _video(record: Path | None) -> str | None:
     return str(record) if record is not None and record.exists() and record.stat().st_size else None
 
 
+async def _truth(task: LiveTask, http: httpx.AsyncClient) -> object:
+    # Answer keys come from public APIs that rate-limit, so a transient failure is waited out, never a crashed eval.
+    for retries in itertools.count():
+        try:
+            return await task.truth(http)
+        except httpx.HTTPError as exc:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            if status not in RETRYABLE_STATUS and not isinstance(exc, TRANSIENT_TRANSPORT):
+                raise
+            wait = min(30 * (retries + 1), 300)
+            print(f"RETRY truth         {task.id:20} in {wait}s: {type(exc).__name__} {status or ''}", flush=True)
+            await asyncio.sleep(wait)
+
+
 async def run_arm(
     arm: str,
     task: LiveTask,
@@ -471,7 +485,7 @@ async def run_arm(
     record: Path | None,
 ) -> EvalRow:
     _running.set(f"{arm} {task.id}")
-    truth = await task.truth(http)
+    truth = await _truth(task, http)
     started = time.monotonic()
     at = time.time()
     try:
