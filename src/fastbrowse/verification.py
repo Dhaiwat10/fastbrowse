@@ -7,6 +7,7 @@ when those answers leave completion uncertain.
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from enum import StrEnum
+from typing import assert_never
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
@@ -136,12 +137,30 @@ async def check_done(
     }
     unmet = sorted(unevidenced)
     for requirement in plan.requirements:
-        if requirement.kind is RequirementKind.ACTION:
-            questions[f"unmet_{requirement.id}"] = NoulQuestion(
-                instructions=f"{UNTRUSTED}\nIs this requirement not visibly satisfied?\n\n{requirement.text}",
-                true="It is not satisfied, or there is no visible confirmation.",
-                false="The page visibly confirms it is satisfied.",
-            )
+        match requirement.kind:
+            case RequirementKind.ACTION:
+                questions[f"unmet_{requirement.id}"] = NoulQuestion(
+                    instructions=f"{UNTRUSTED}\nIs this requirement not visibly satisfied?\n\n{requirement.text}",
+                    true="It is not satisfied, or there is no visible confirmation.",
+                    false="The page visibly confirms it is satisfied.",
+                )
+            case RequirementKind.INFORMATION if requirement.id not in unevidenced:
+                # Evidence proves a quote came from a page, not that it answers: the wrong package's date is
+                # evidenced too. Asked per requirement, a lookup gets the per-requirement confirmation an action
+                # has, rather than every lookup going to the verifier on the strict holistic question alone.
+                questions[f"unmet_{requirement.id}"] = NoulQuestion(
+                    instructions=(
+                        f"{UNTRUSTED}\nDo the notes lack the facts this requirement needs? A comparison or conclusion "
+                        "needs every fact it is drawn from, for the right entities; the conclusion itself need not be "
+                        f"written.\n\n{requirement.text}"
+                    ),
+                    true="A fact it needs is missing, about something else, or only a preview.",
+                    false="The notes hold every fact it needs.",
+                )
+            case RequirementKind.INFORMATION:
+                pass
+            case unreachable:
+                assert_never(unreachable)
     if draft is not None:
         # Asked here rather than on its own because this call is already being paid for: judging the
         # draft costs one more answer in a request the run makes anyway, where a composer costs seconds.
@@ -167,10 +186,10 @@ async def check_done(
         if _probability(evaluation.answers, f"unmet_{requirement.id}") > thresholds.claim_problem_above:
             unmet.append(requirement.id)
     complete = _probability(evaluation.answers, "complete")
-    # Every action requirement confirmed one by one is stronger evidence than the strict holistic question alone,
+    # Every requirement confirmed one by one is stronger evidence than the strict holistic question alone,
     # which asks about the whole task at once and doubts a right page as often as it confirms it.
     # An answer Jev did not give confirms nothing, and a task with nothing to do keeps the verifier.
-    doubts = [evaluation.answers.get(f"unmet_{r.id}") for r in plan.requirements if r.kind is RequirementKind.ACTION]
+    doubts = [evaluation.answers.get(f"unmet_{r.id}") for r in plan.requirements]
     confirmed = bool(doubts) and all(
         isinstance(doubt, NoulAnswer) and doubt.probability < thresholds.requirement_confirmed_below for doubt in doubts
     )
@@ -213,8 +232,11 @@ async def llm_verify(
     history = "\n".join(
         f"- {s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in steps[max(0, len(steps) - count) :]
     )
+    # A filter's checked state is absent from page text, and a screenshot shows it only when it is in view: a flights
+    # search the verifier passed had matching rows and no nonstop filter applied.
+    stateful = [c for c in observation.controls if (c.value, c.checked, c.selected) != (None, None, None)]
     instruction = (
-        "\n\n## Verdict\nDecide from the screenshot, page text and notes whether the task is finished. "
+        "\n\n## Verdict\nDecide from the screenshot, set controls, page text and notes whether the task is finished. "
         "Be strict and name every requirement id that is not visibly satisfied. A requirement to "
         "compare, count or conclude from facts is satisfied when the notes hold those facts: the answer "
         "draws the conclusion, and no page shows it."
@@ -228,7 +250,7 @@ async def llm_verify(
             role="user",
             content=(
                 f"## Task\n{task}\n\n## Requirements\n{requirements}\n\n## Steps taken\n{history}\n\n"
-                f"## Page\n{observation.url}\n"
+                f"## Set controls\n{json.dumps(_controls(stateful))}\n\n## Page\n{observation.url}\n"
             ),
             images=screenshots,
         ),

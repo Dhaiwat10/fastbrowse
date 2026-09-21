@@ -62,6 +62,36 @@ async def test_confirmed_requirements_accept_a_doubted_page(answers: dict[str, f
     assert check.verdict is verdict
 
 
+# A lookup's evidenced requirements are confirmed one by one, as an action's are: pypi-newer's right pages scored
+# 0.49 to 0.91 complete, and every one went to the verifier.
+@pytest.mark.parametrize(
+    ("answers", "verdict"),
+    [
+        ({"complete": 0.55, "unmet_r1": 0.12}, DoneVerdict.ACCEPT),
+        ({"complete": 0.55, "unmet_r1": 0.52}, DoneVerdict.VERIFY),  # the evidence may be about something else
+        ({"complete": 0.40, "unmet_r1": 0.05}, DoneVerdict.VERIFY),  # the holistic floor still holds
+    ],
+)
+async def test_confirmed_lookups_accept_below_the_holistic_bar(answers: dict[str, float], verdict: DoneVerdict) -> None:
+    total = "Checkout total is $42"
+    notes = Notes(
+        [
+            Fact(
+                reader=FactReader.LLM,
+                requirement_id="r1",
+                text=total,
+                evidence=evidence(sha="total", end=len(total)).model_copy(update={"quote": total}),
+            )
+        ]
+    )
+    plan = Plan(
+        requirements=(Requirement(id="r1", text="Report the checkout total", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    check = await check_done(_Jev(answers), "Total?", plan, _PAGE, notes, Thresholds())
+    assert check.verdict is verdict
+
+
 async def test_a_task_with_nothing_to_do_keeps_the_verifier() -> None:
     plan = Plan(requirements=(), answer_expected=False)
     check = await check_done(_Jev({"complete": 0.7}), "Look around.", plan, _PAGE, Notes(), Thresholds())
