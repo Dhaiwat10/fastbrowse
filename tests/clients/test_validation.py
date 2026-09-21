@@ -4,7 +4,8 @@ import time
 import httpx
 import pytest
 
-from fastbrowse.clients.validation import RequestUsage, post_with_retry, with_discarded
+from fastbrowse.clients.validation import RequestUsage, post, post_with_retry, with_discarded
+from fastbrowse.jev import JevRetriesExhausted
 from fastbrowse.models import CostBasis, CostComponent, CostLine
 
 
@@ -125,3 +126,25 @@ def test_a_discarded_jev_request_is_charged_as_an_estimate() -> None:
 
     assert (charged.basis, charged.dollars, charged.input_tokens) == (CostBasis.ESTIMATED, 0.004, 1800)
     assert with_discarded(cost, RequestUsage()) is cost
+
+
+async def test_exhausted_status_keeps_timing_usage_and_redacts_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    times = iter([10.0, 37.0])
+    monkeypatch.setattr("fastbrowse.clients.validation.monotonic", lambda: next(times))
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("unanswered", request=request)
+        return httpx.Response(503, text="secret-key" + "x" * 1000)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(JevRetriesExhausted) as error:
+            await post(http, "https://jev.test/v1", "secret-key", {})
+    assert error.value.status_code == 503
+    assert error.value.seconds == 27
+    assert error.value.unaccounted_requests == 1
+    assert "secret-key" not in str(error.value)
+    assert len(str(error.value)) < 500

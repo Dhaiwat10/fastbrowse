@@ -21,6 +21,23 @@ evals rather than taken from Typesafe.
 | Latency | 70 to 500ms end to end, as advertised ([launch post](https://typesafe.ai/blog/introducing-system-one-models-and-jev)); no SLA is published | Measured through the gateway: 0.28s median and 0.62s worst over 25 policy-sized calls. The 1.5s hedge in `clients/validation.py` is **ours** |
 | Streaming | Gateway evaluation does not stream ([AI SDK evaluation](https://ai-sdk.dev/docs/ai-sdk-core/evaluation)) | Not needed: answers are a few numbers |
 
+## Provider failover
+
+With both keys set, **ours**: each run starts on `FASTBROWSE_JEV_SOURCE` (direct by default). If a retryable
+HTTP status outlasts that provider's retry budget, the client repeats the evaluation through the other
+provider and stays there for the rest of the run. A second outage raises; providers never alternate.
+Concurrent evaluations already in flight may finish on the first provider.
+
+Request and authentication errors, malformed answers, transport failures without a final retryable HTTP
+status, and cancellation do not switch providers. One key keeps the existing retry-and-raise behaviour.
+`FASTBROWSE_JEV_BASE_URL` or a nondefault `FASTBROWSE_JEV_MODEL` disables automatic failover: a backup
+must not bypass a proxy or silently replace a pinned model. Default backups use their own public endpoint,
+key and model (`jev-1.13.0` direct, `typesafe-ai/jev` through the gateway).
+
+The call's time includes both providers. HTTP errors add no charge; unanswered requests that may have been
+billed are estimated from the successful answer's input tokens at Jev's input price, without multiplying
+the backup's own retries or hedges. Both routes reach Typesafe, so an outage there can affect both.
+
 ## Confidence is not correctness
 
 Typesafe says Jev's probabilities are calibrated: across many answers, frequencies match the stated

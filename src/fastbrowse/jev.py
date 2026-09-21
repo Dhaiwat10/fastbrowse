@@ -72,6 +72,16 @@ class JevInputTooLarge(JevError):
     """The provider rejected the request for exceeding its input token limits."""
 
 
+class JevRetriesExhausted(JevError):
+    """A retryable HTTP status outlasted the provider's retry budget."""
+
+    def __init__(self, message: str, *, status_code: int, seconds: float, unaccounted_requests: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.seconds = seconds
+        self.unaccounted_requests = unaccounted_requests
+
+
 class JevClient(Protocol):
     async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
         """Answer every question against one state. Raises `JevInputTooLarge` or `JevError`."""
