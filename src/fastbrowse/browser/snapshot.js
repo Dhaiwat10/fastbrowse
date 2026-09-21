@@ -101,8 +101,11 @@
     const choice = e.tagName === 'INPUT' && ['checkbox', 'radio'].includes(e.type) &&
       e.ownerDocument.defaultView.getComputedStyle(e).pointerEvents !== 'none' &&
       ![...(e.labels || [])].some(l => l.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+    // Only the input's own opacity is excused: one inside a transparent container is hidden with it.
+    const container = e.parentElement ?? e.getRootNode().host;
     if (e.closest('[aria-hidden="true"],[inert]') ||
-      !e.checkVisibility({ checkOpacity: !choice, checkVisibilityCSS: true })) return false;
+      !e.checkVisibility({ checkOpacity: !choice, checkVisibilityCSS: true }) ||
+      (choice && container && !container.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }))) return false;
     if (!choice) return true;
     const r = e.getBoundingClientRect();
     return r.width > 0 && r.height > 0 && !e.matches(':disabled') && !e.closest('[aria-disabled="true"]');

@@ -76,7 +76,11 @@ _HIT_TEST_JS = (
     "let hit = doc.elementFromPoint(x, y); "
     "while (hit?.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); "
     "if (!inner || inner === hit) break; hit = inner; } "
-    "if (!node.contains(hit) && !(node === e && labels.some(label => label.contains(hit)))) return 'covered'; "
+    # A link or button inside the label takes the click itself instead of forwarding it to the input.
+    "const viaLabel = label => { if (!label.contains(hit)) return false; "
+    "const own = hit.closest('a[href],button,input,select,textarea,summary,[contenteditable],[role],[tabindex]'); "
+    "return !own || own === label || !label.contains(own); }; "
+    "if (!node.contains(hit) && !(node === e && labels.some(viaLabel))) return 'covered'; "
     "if (doc === document) break; "
     "node = view.frameElement; if (!node) return null; "
     "const frame = node.getBoundingClientRect(); "

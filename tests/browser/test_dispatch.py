@@ -89,6 +89,29 @@ async def test_transparent_input_hit_must_be_the_input_or_its_own_label(
     assert await eval_value(browser_session, browser_session.active_session_id, "input.checked") is associated
 
 
+async def test_link_inside_a_label_does_not_count_as_its_input(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    """A link filling the label takes the click itself; the input never toggles."""
+    await page.navigate(f"{main_site}/todos.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "const input = document.querySelectorAll('input')[1]; input.id = 'choice'; "
+        "input.style.opacity = '1'; const label = input.nextElementSibling; label.htmlFor = 'choice'; "
+        "label.style.cssText = 'position:absolute;inset:0;background:white'; "
+        "label.innerHTML = '<a href=\\'#linked\\' style=\\'display:block;height:100%\\'>walk the dog</a>';",
+    )
+    obs = await page.observe()
+    target = next(c for c in obs.controls if c.input_type == "checkbox" and "walk the dog" in (c.context, c.label))
+    result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), obs)
+    assert result.outcome is StepOutcome.COVERED
+    assert await eval_value(browser_session, browser_session.active_session_id, "[input.checked, location.hash]") == [
+        False,
+        "",
+    ]
+
+
 @pytest.mark.parametrize("nested", ["document", "shadow", "iframe"])
 async def test_fingerprint_tracks_selection_without_counting_text_field_values(
     page: CdpPage, browser_session: BrowserSession, main_site: str, nested: str

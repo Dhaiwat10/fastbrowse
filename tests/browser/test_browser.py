@@ -394,6 +394,7 @@ async def test_transparent_native_choices_keep_todo_context_and_change_only_stat
         "e.style.width = '0'",
         "e.parentElement.setAttribute('aria-hidden', 'true')",
         "e.parentElement.inert = true",
+        "e.parentElement.style.opacity = '0'",
         "e.disabled = true",
         "e.parentElement.setAttribute('aria-disabled', 'true')",
         "e.type = 'text'",

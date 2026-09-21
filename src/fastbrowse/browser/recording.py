@@ -141,17 +141,19 @@ class Recording:
         # BorderStyle 3 draws a box behind the text, coloured by OutlineColour (alpha first, 00 opaque).
         style = "Fontsize=10,BorderStyle=3,Outline=6,Shadow=0,OutlineColour=&H50000000,MarginV=16,Alignment=2"
         # H.264 needs even dimensions, and yuv420p is what phones and social sites play.
-        # libass cannot open an empty subtitle file.
-        burn = f"subtitles={subtitles}:force_style='{style}'" if cues else "null"
+        # libass cannot open an empty subtitle file. The filter names it relative to ffmpeg's working directory:
+        # an absolute path's drive colon and backslashes are filter syntax, and a Windows run failed on them.
+        burn = f"subtitles={subtitles.name}:force_style='{style}'" if cues else "null"
         graph = f"[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,split=2[plain][steps];[steps]{burn}[captioned]"
         # Page text is the subject of a shared clip; x264's default quality blurs small type.
         encode = ("-c:v", "libx264", "-crf", "18", "-preset", "slow", "-movflags", "+faststart")
         process = await asyncio.create_subprocess_exec(
             self._ffmpeg_path,
             *("-loglevel", "error", "-y", "-i", str(self._uncaptioned), "-filter_complex", graph),
-            *("-map", "[captioned]", *encode, str(self._path)),
-            *("-map", "[plain]", *encode, str(self.plain_path)),
+            *("-map", "[captioned]", *encode, str(self._path.absolute())),
+            *("-map", "[plain]", *encode, str(self.plain_path.absolute())),
             stderr=asyncio.subprocess.PIPE,
+            cwd=self._scratch.name,
         )
         _, stderr = await process.communicate()
         outputs = (self._path, self.plain_path)
