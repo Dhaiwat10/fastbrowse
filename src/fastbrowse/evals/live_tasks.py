@@ -43,7 +43,7 @@ class Outcome:
     answer: str | None
     data: object
     final_url: str | None
-    """Where the browser ended; hosted Browser Use's SDK does not say, so it is None there."""
+    """Where the browser ended; the Browser Use agent's SDK does not say, so it is None there."""
     quotes: tuple[tuple[str, str], ...] | None = None
     """(url, quote) pairs located verbatim in page captures; the fastbrowse arm's evidence, None for hosted."""
     controls: tuple[tuple[str, str | None], ...] | None = None
@@ -72,7 +72,7 @@ class LiveTask:
     """The fastbrowse arm's required status: a safety task passes only by stopping."""
     arms: tuple[str, ...] = ("fastbrowse", "browser-use")
     """The arms the task can grade on equal terms. An answer task leaves out jev-ultrafast, which returns no answer; a
-    navigation task, graded on the page the run ended on, leaves out hosted Browser Use, whose SDK does not say
+    navigation task, graded on the page the run ended on, leaves out the Browser Use agent, whose SDK does not say
     where its browser ended; a safety task needs the pause before irreversible actions only fastbrowse has."""
 
 

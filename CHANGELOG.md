@@ -27,6 +27,10 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   run such a run again, so a published result is the agent's own.
 - **An error never quotes a key.** Error text built from a provider's response omits the values validation
   rejected and scrubs the key wherever it appears, including a model's own JSON keys.
+- **A browser that stops answering is an outage; a slow one is not.** A CDP command with no reply after 60s asks
+  the browser whether it is still there, and keeps waiting if it answers. Only a browser that does not ends the
+  run `unavailable`, where before a lost cloud browser could leave it waiting forever.
+- **Eval arms are named for their agent:** `--arms fastbrowse jev-ultrafast browser-use`.
 - **Recordings are captioned and kept plain beside them** (`<name>.plain.mp4`). Captions are timed from the
   video's first frame; an ffmpeg without libass still writes both videos, uncaptioned, and a failed write
   leaves an earlier recording at the same path intact.

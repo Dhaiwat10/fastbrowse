@@ -193,7 +193,7 @@ def test_the_flights_answer_task_needs_the_search_and_a_price() -> None:
     page = _flights_page(date.today() + timedelta(days=28), trip="Round trip", nonstop=False)
     assert check(Outcome("JetBlue, $846", None, "https://www.google.com/travel/flights", controls=page), None) is None
     assert check(Outcome("JetBlue", None, "https://www.google.com/travel/flights", controls=page), None) is not None
-    # Hosted Browser Use reports no page, so only its answer is graded.
+    # The Browser Use agent reports no page, so only its answer is graded.
     assert check(Outcome("JetBlue, $846", None, None), None) is None
 
 

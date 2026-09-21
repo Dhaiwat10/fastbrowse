@@ -28,42 +28,45 @@ something that was never on the page. Every claim in an answer cites a verbatim 
 
 ![fastbrowse signing in to a shop, adding two products, filling the shipping form and placing the order](docs/assets/demo.gif)
 
+13 steps in 20.9s on local Chrome, shown 1.4x faster with pauses cut.
+
 ### Against Browser Use
 
-Measured on 2026-09-21 with the build released as 0.5.0: the same 14 answer tasks (lookups, sign-ins,
-checkout, Google Flights), three passes each, on the same kind of cloud browser, with no dollar limit.
+Measured on 2026-09-21 with the build released as 0.5.1: the same 14 answer tasks (lookups, sign-ins,
+checkout, Google Flights), three passes each, on the same kind of cloud browser.
 
 | | passed | cost per task | median time |
 |:--|:--|:--|:--|
-| **fastbrowse** | **42/42** | **$0.0042** (median), $0.0091 mean | **20.4s** |
-| Browser Use (hosted) | 40/42 | $0.4163 (median), $0.4433 mean | 24.6s |
+| **fastbrowse** | **42/42** | **$0.0044** (median), $0.0067 mean | **20.4s** |
+| Browser Use agent | 41/42 | $0.5569 (median), $0.6266 mean | 31.4s |
 
-The whole suite cost $0.38 here and $18.62 there. Both hosted failures are Google Flights, where it read
-the page's HTML, found no results table and answered with no price. 0.4.1 scored 41/42 at a $0.0057 median.
+The whole suite cost $0.28 here and $26.32 there. The Browser Use agent's one failure is Google Flights,
+where it read the page's HTML, found no results table and answered with no price.
 
-Median cost ratios by category: 56x for lookups, 58x for checkout and 196x for sign-ins.
+Median cost ratios by category: 65x for lookups, 147x for checkout and 198x for sign-ins.
 Jev selects actions through classification; planning, field text and reading can still require LLM generation.
 
 Task medians show where time went:
 
-| task | fastbrowse | Browser Use (hosted) |
+| task | fastbrowse | Browser Use agent |
 |:--|:--|:--|
-| `saucedemo-checkout` two items, a shipping form and Finish | **53.6s** | 149.5s |
-| `saucedemo-cart` sign in, find a product, add it | **24.7s** | 110.1s |
-| `saucedemo-locked-out` report the site's error rather than claim success | **19.1s** | 117.4s |
-| `expandtesting-login` sign in and confirm the signed-in page | **20.3s** | 130.1s |
-| `internet-login` the same on another practice site | **20.2s** | 40.4s |
+| `saucedemo-checkout` two items, a shipping form and Finish | **38.4s** | 121.5s |
+| `saucedemo-cart` sign in, find a product, add it | **22.3s** | 117.2s |
+| `saucedemo-locked-out` report the site's error rather than claim success | **18.5s** | 127.8s |
+| `expandtesting-login` sign in and confirm the signed-in page | **19.4s** | 89.2s |
+| `internet-login` the same on another practice site | **20.5s** | 119.0s |
+| `google-flights` search a route and date, answer with a price | **69.8s** | 160.2s |
 
-Lookup medians included `pypi-version` at 11.2s, `arxiv-title` at 15.0s and `github-license` at 16.5s,
-where hosted Browser Use is faster on some. Google Flights took 109.3s here, slower than 0.4.1's 71.7s.
+Lookup medians included `arxiv-title` at 11.3s, `pypi-version` at 17.5s and `github-license` at 16.5s,
+where the Browser Use agent is faster on some.
 
-[Every run, what it cost, and how a failure is counted](docs/evals.md#head-to-head-2026-09-21).
+[Every run, what it cost, and how a failure is counted](docs/evals.md#051-2026-09-21).
 
 ### Why fastbrowse, against each kind of agent
 
 - **LLM agents that generate actions** (Browser Use and similar): Jev picks each action from the controls
   that are on the page, so there is no invented selector to retry. A task costs a fraction as much (a lookup,
-  $0.0060 against $0.3313 median across the lookup category), and every claim in the answer links to the
+  $0.0051 against $0.3322 median across the lookup category), and every claim in the answer links to the
   page text it came from.
 - **Choice-model navigators** ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast)): the same
   core technique, with page reading, cited answers, scoped secrets and an authorization gate. On the six
@@ -190,7 +193,7 @@ More in [docs/design.md](docs/design.md).
 
 ## How it compares
 
-| | hosted Browser Use | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | fastbrowse |
+| | Browser Use agent | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | fastbrowse |
 |:--|:--|:--|:--|
 | Choosing an action | LLM generates from a screenshot | Jev picks from indexed controls | Jev picks from indexed controls |
 | Returns | an answer | `DONE` or `BLOCKED` | an answer with quotes, or why it stopped |
@@ -334,7 +337,7 @@ seconds to minutes, so raise the client's tool timeout if it has one (`MCP_TOOL_
 ## Evals and development
 
 ```sh
-uv sync --all-extras                                         # the hosted-arm SDK too, which ty checks
+uv sync --all-extras                                         # the Browser Use SDK too, which ty checks
 uv run pre-commit install                                    # ruff and ty before each commit
 uv run python -m fastbrowse.evals.runner                     # local fixtures, about $0.005 a task
 uv run --extra browser-use python -m fastbrowse.evals.live                     # live head-to-head, 8 at a time
@@ -345,7 +348,7 @@ uv run python scripts/no_slop.py && uv run vale sync && uv run vale README.md CH
 ```
 
 Grades use recorded requests, API truth, final page state or captured quotes where the arm exposes them.
-Hosted Browser Use exposes answer text only, which is checked against task truth. See [docs/evals.md](docs/evals.md),
+The Browser Use agent exposes answer text only, which is checked against task truth. See [docs/evals.md](docs/evals.md),
 [docs/design.md](docs/design.md), and [docs/jev.md](docs/jev.md) for every Jev assumption checked against
 Typesafe's documentation.
 

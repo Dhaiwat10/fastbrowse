@@ -1,4 +1,4 @@
-"""Head-to-head on live sites: fastbrowse, jev-ultrafast and hosted Browser Use, same prompts, no dollar or time caps.
+"""Head-to-head on live sites: fastbrowse, jev-ultrafast and the Browser Use agent, same prompts.
 
     uv run --extra browser-use python -m fastbrowse.evals.live [--only TASK_ID ...] [--category CATEGORY ...]
         [--arms fastbrowse jev-ultrafast browser-use] [--bitwarden] [--repeat N] [--record DIR]
@@ -7,7 +7,8 @@
 Needs BROWSER_USE_API_KEY (every arm), and the Jev and LLM keys in fastbrowse.clients.environment (fastbrowse and
 jev-ultrafast arms). Each run prints a WATCH line with the URL where its browser can be watched live.
 
-The fastbrowse and jev-ultrafast arms each drive a fresh Browser Use Cloud browser; hosted Browser Use brings its own.
+The fastbrowse and jev-ultrafast arms each drive a fresh Browser Use Cloud browser;
+the Browser Use agent brings its own.
 jev-ultrafast runs as its published package in an environment of its own (see scripts/ultrafast_arm.py).
 
 Tasks and their grading live in fastbrowse.evals.live_tasks. With --bitwarden, the fastbrowse arm reads each login
@@ -62,7 +63,7 @@ ARMS = ("fastbrowse", "jev-ultrafast", "browser-use")
 MAX_STEPS = 30
 LIMITS = Limits(max_steps=MAX_STEPS)
 """No arm has a dollar or time cap: a cap one arm reaches measures the budget, not the arm, so every run ends
-when its agent does. fastbrowse and jev-ultrafast share a step limit; hosted Browser Use has none to set."""
+when its agent does. fastbrowse and jev-ultrafast share a step limit; the Browser Use agent has none to set."""
 
 ULTRAFAST = "jev-ultrafast @ git+https://github.com/browser-use/jev-ultrafast@1231850a0bf1a0c0341fe408ef1668dbbfdfac46"
 ULTRAFAST_RUNNER = Path(__file__).resolve().parents[3] / "scripts" / "ultrafast_arm.py"
@@ -201,7 +202,7 @@ class ArmReport(BaseModel):
     actions: int | None = None
     unmetered_requests: int | None = None
     text_model: str | None = None
-    # hosted Browser Use
+    # the Browser Use agent
     model: str | None = None
     session_id: str | None = None
 

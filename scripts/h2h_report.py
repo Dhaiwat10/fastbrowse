@@ -9,7 +9,7 @@ A run whose cost is unknown is left out of the cost column and counted beside it
 Passing is not the bar: a run that clicks a dead button three times and asks for help twice before it finishes
 passes, and is still slow and costly. Wasted actions count, from each run's own step trace, the steps that did
 not move it forward: a request for help, an action that did not execute or left the page unchanged, and an
-action repeated on the same target. Hosted Browser Use reports no step trace, so it has no count.
+action repeated on the same target. The Browser Use agent reports no step trace, so it has no count.
 """
 
 import argparse
@@ -21,7 +21,7 @@ from typing import cast
 
 from fastbrowse.evals.live_tasks import TASKS
 
-ARMS = {"fastbrowse": "fastbrowse", "jev-ultrafast": "jev-ultrafast", "browser-use": "Browser Use (hosted)"}
+ARMS = {"fastbrowse": "fastbrowse", "jev-ultrafast": "jev-ultrafast", "browser-use": "Browser Use agent"}
 CATEGORIES = ("lookup", "login", "checkout", "safety", "widget", "navigate")
 
 

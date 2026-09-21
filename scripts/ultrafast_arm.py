@@ -6,10 +6,10 @@ JSON result on stdout:
 
     {"start", "goal", "cdp_ws", "max_steps", "record": path or null}
 
-The browser is the caller's: a Browser Use Cloud browser reached through `cdp_ws`, the same kind the fast arm
+The browser is the caller's: a Browser Use Cloud browser reached through `cdp_ws`, the same kind the fastbrowse arm
 drives, so both arms pay the same round trips. jev-ultrafast calls TypeSafe's direct API with
 TYPESAFE_API_KEY; with only AI_GATEWAY_API_KEY set, the same questions go through the Vercel AI Gateway, which
-is also how the fast arm reaches Jev. Its text helper uses TEXT_MODEL_API_KEY, an OpenRouter key.
+is also how the fastbrowse arm reaches Jev. Its text helper uses TEXT_MODEL_API_KEY, an OpenRouter key.
 """
 
 import base64
@@ -283,7 +283,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
     if agent is not None:
         state = agent.state
         final_url = state["page"]["url"]
-        # The controls it last observed, as the fast arm's harness observes them: for graders that read the form.
+        # The controls it last observed, as the fastbrowse arm's harness observes them: for graders that read the form.
         controls = [[a["label"], a.get("value")] for a in state["page"].get("actions", [])]
         agent.close()
     history = state["history"] if state else []
