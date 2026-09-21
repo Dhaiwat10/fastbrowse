@@ -610,6 +610,8 @@ async def main(argv: list[str]) -> int:
     ]
     handler = logging.StreamHandler(sys.stdout)
     handler.addFilter(_NameRun())
+    # Traces are collected per run at DEBUG and propagate here; only warnings belong on the console.
+    handler.setLevel(logging.WARNING)
     handler.setFormatter(logging.Formatter("%(levelname)-7s %(run)s %(name)s: %(message)s"))
     logging.basicConfig(level=logging.WARNING, handlers=[handler])
     if "fast" in args.arms:
