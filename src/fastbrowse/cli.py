@@ -136,13 +136,16 @@ async def run(args: argparse.Namespace) -> int:
     if args.record is not None and shutil.which("ffmpeg") is None:
         raise ConfigurationError("--record needs ffmpeg on PATH")
     limits = _limits(args)
+    # The operator's own flags are checked before the browser key: with the cloud browser the default, a missing key
+    # would otherwise hide a secret that could never be typed anywhere.
+    secrets = _secrets(args.secret, args.bitwarden, args.start)
     result = await run_task(
         args.task,
         start=args.start,
         browser_api_key=options.browser_key(load_settings(), options.cloud(args.local, args.headed, args.profile)),
         chrome=options.chrome(load_settings(), args.headed, args.profile),
         cloud_profile=args.cloud_profile,
-        secrets=_secrets(args.secret, args.bitwarden, args.start),
+        secrets=secrets,
         limits=limits,
         authorization=Authorization(irreversible_actions=args.authorize),
         downloads=args.downloads,
