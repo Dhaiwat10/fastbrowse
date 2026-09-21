@@ -9,11 +9,122 @@ import pytest
 from fastbrowse.agent import Agent
 from fastbrowse.browser import BrowserSession, CdpPage
 from fastbrowse.browser import page as page_module
+from fastbrowse.effects import effect
 from fastbrowse.models import Operation, StepOutcome
 from fastbrowse.page import Action, BrowserError
 from tests.browser.test_browser import eval_value, find, observe_until, wait_until
 from tests.test_policy import ScriptedJev
 from tests.test_retrieval import ScriptedLLM
+
+
+@pytest.mark.parametrize("covered", [False, True])
+@pytest.mark.parametrize("nested", ["document", "shadow", "iframe"])
+async def test_click_uses_an_exposed_point_but_never_passes_through_a_cover(
+    page: CdpPage, browser_session: BrowserSession, main_site: str, covered: bool, nested: str
+) -> None:
+    """Flight rows had a covered centre even when another part of the same control was exposed."""
+    await page.navigate(f"{main_site}/dispatch.html")
+    if nested == "iframe":
+        await eval_value(
+            browser_session,
+            browser_session.active_session_id,
+            "document.body.innerHTML = '<iframe width=700 height=300 src=/dispatch.html></iframe>'",
+        )
+        await observe_until(page, "One way")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "window.fixtureRoot = "
+        + {
+            "document": "document",
+            "iframe": "document.querySelector('iframe').contentDocument",
+            "shadow": "document.body.appendChild(document.createElement('div')).attachShadow({mode: 'open'})",
+        }[nested]
+        + "; "
+        + (
+            "fixtureRoot.append(...document.querySelectorAll('style, #target, #decoy, #cover')); "
+            if nested == "shadow"
+            else ""
+        )
+        + "const cover = fixtureRoot.querySelector('#cover'); cover.style.display = 'block'; "
+        + ("" if covered else "cover.style.cssText += 'left:130px;top:90px;width:40px;height:20px'; ")
+        + "window.clickedAt = null; fixtureRoot.querySelector('#target').addEventListener('click', "
+        "e => window.clickedAt = [e.clientX, e.clientY]);",
+    )
+    before = await page.observe()
+    target = find(before, "One way")
+    result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), before)
+    point = await eval_value(browser_session, browser_session.active_session_id, "window.clickedAt")
+    after = await page.observe()
+    if covered:
+        assert result.outcome is StepOutcome.COVERED and not result.page_changed
+        assert point is None
+        assert find(after, "One way").selected is False
+    else:
+        assert result.outcome is StepOutcome.EXECUTED and result.page_changed
+        assert point == [105, 90]
+        assert find(after, "One way").selected is True
+        assert effect(before, after, target).set_something
+
+
+@pytest.mark.parametrize("associated", [False, True])
+async def test_transparent_input_hit_must_be_the_input_or_its_own_label(
+    page: CdpPage, browser_session: BrowserSession, main_site: str, associated: bool
+) -> None:
+    await page.navigate(f"{main_site}/todos.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "const input = document.querySelectorAll('input')[1]; input.id = 'choice'; "
+        "const label = input.nextElementSibling; "
+        "label.style.cssText = 'position:absolute;inset:0;background:white'; "
+        + ("label.htmlFor = 'choice';" if associated else ""),
+    )
+    obs = await page.observe()
+    # An associated visible label is the control itself, named by its text; an unassociated one only covers.
+    target = next(c for c in obs.controls if "walk the dog" in (c.context, c.label))
+    result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), obs)
+    assert result.outcome is (StepOutcome.EXECUTED if associated else StepOutcome.COVERED)
+    assert result.page_changed is associated
+    assert await eval_value(browser_session, browser_session.active_session_id, "input.checked") is associated
+
+
+@pytest.mark.parametrize("nested", ["document", "shadow", "iframe"])
+async def test_fingerprint_tracks_selection_without_counting_text_field_values(
+    page: CdpPage, browser_session: BrowserSession, main_site: str, nested: str
+) -> None:
+    """Checked and selected properties can change without changing any text or DOM attributes."""
+    await page.navigate(f"{main_site}/todos.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.body.innerHTML = '<div></div><iframe></iframe>'; window.fixtureRoot = "
+        + {
+            "document": "document.querySelector('div')",
+            "shadow": "document.querySelector('div').attachShadow({mode: 'open'})",
+            "iframe": "document.querySelector('iframe').contentDocument.body",
+        }[nested]
+        + "; fixtureRoot.innerHTML = '<input type=checkbox><select multiple><option>First</option>' "
+        "+ '<option>Second</option></select><button role=switch aria-checked=false>Nonstop only</button>' "
+        "+ '<button role=option aria-selected=false>One way</button><input type=text>';",
+    )
+    before = await page._fingerprint()
+    for change in (
+        "fixtureRoot.querySelector('input').checked = true",
+        "fixtureRoot.querySelectorAll('option')[1].selected = true",
+        "fixtureRoot.querySelector('[role=switch]').setAttribute('aria-checked', 'true')",
+        "fixtureRoot.querySelector('[role=option]').setAttribute('aria-selected', 'true')",
+    ):
+        await eval_value(browser_session, browser_session.active_session_id, change)
+        after = await page._fingerprint()
+        assert after != before
+        before = after
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "fixtureRoot.querySelector('[type=text]').value = 'requests'",
+    )
+    assert await page._fingerprint() == before
 
 
 @pytest.mark.parametrize("mode", ["move", "animate", "cover", "relabel"])

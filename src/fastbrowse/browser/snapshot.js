@@ -44,14 +44,22 @@
   if (mode === 'fingerprint') {
     let hash = 2166136261;
     let loading = false;
+    const hashText = text => {
+      for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+    };
     const include = root => {
       registry.track(root);
       loading ||= [...root.querySelectorAll(LOADING)].some(e => e.checkVisibility({ checkOpacity: true,
         checkVisibilityCSS: true }));
       const text = root.body?.innerText ?? root.textContent ?? '';
-      for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+      hashText(text);
       // innerText omits shadow trees and child documents even when their content is visible.
       for (const e of root.querySelectorAll('*')) {
+        // A filter can change only its checkmark, so text alone reported "Nonstop only" as a no-op.
+        // Field values stay out: the run judges fills by the value it wrote, even when a popup changes.
+        if ('checked' in e || 'selected' in e || e.hasAttribute('aria-checked') || e.hasAttribute('aria-selected'))
+          hashText(JSON.stringify([e.checked ?? null, e.selected ?? null,
+            e.getAttribute('aria-checked'), e.getAttribute('aria-selected')]));
         if (e.shadowRoot) include(e.shadowRoot);
         if (e.tagName === 'IFRAME' || e.tagName === 'FRAME') {
           let inner = null;
@@ -82,8 +90,21 @@
   // Password and agent-typed secret values never leave the page: only their length is observed.
   const secret = e => e.type === 'password' || e.dataset?.fastbrowseSecret === '1';
   const reveal = e => typeof e.value !== 'string' ? null : secret(e) ? '•'.repeat(e.value.length) : e.value;
-  const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
-    e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+  const visible = e => {
+    // Todo lists paint the checkmark beside a transparent native input without associating a label.
+    // The input still receives clicks; opacity alone must not remove the only control for that row.
+    // A transparent input with a visible label of its own keeps the label as its click target: TodoMVC's
+    // "Mark all as complete" input is 1px and off screen, and only its label can be clicked.
+    const choice = e.tagName === 'INPUT' && ['checkbox', 'radio'].includes(e.type) &&
+      e.ownerDocument.defaultView.getComputedStyle(e).pointerEvents !== 'none' &&
+      ![...(e.labels || [])].some(l => l.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+    if (e.closest('[aria-hidden="true"],[inert]') ||
+      !e.checkVisibility({ checkOpacity: !choice, checkVisibilityCSS: true })) return false;
+    if (!choice) return true;
+    const r = e.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && !e.matches(':disabled') && !e.closest('[aria-disabled="true"]');
+  };
+  registry.visible = visible;
   // Styled checkboxes and radios often hide the native input. Its visible label is the click
   // target, but the input still owns the checked/disabled state and must participate in freshness.
   const sourceOf = e => e.tagName === 'LABEL' && ['checkbox', 'radio'].includes(e.control?.type) ? e.control : e;

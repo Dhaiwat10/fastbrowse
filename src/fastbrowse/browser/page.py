@@ -55,14 +55,20 @@ _SELECT_TEXT_JS = (
 _HIT_TEST_JS = (
     "(id => { const e = window.__fastbrowse?.nodes.get(id); "
     "if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled=\"true\"],[inert]') || "
-    "!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return null; "
+    "!window.__fastbrowse.visible(e)) return null; "
     # Scrolling only when the control is not already in full view: a page scroll closes open menus and
     # popups, so centring an option that was already visible dismissed its menu before the click landed.
     "const w = e.ownerDocument.defaultView, v = e.getBoundingClientRect(); "
     "if (v.top < 0 || v.left < 0 || v.bottom > w.innerHeight || v.right > w.innerWidth) "
     "e.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'}); "
-    "const r = e.getBoundingClientRect(); let x = r.x + r.width / 2, y = r.y + r.height / 2; "
-    "if (!r.width || !r.height) return null; "
+    # A control's centre can be covered while its edges remain clickable. Bound the search on wrapped
+    # controls, and check each point through its frames so a parent overlay still prevents dispatch.
+    "const rects = [...e.getClientRects()].map(r => ({left: Math.max(0, r.left), top: Math.max(0, r.top), "
+    "right: Math.min(w.innerWidth, r.right), bottom: Math.min(w.innerHeight, r.bottom)})) "
+    ".filter(r => r.right > r.left && r.bottom > r.top).slice(0, 4); "
+    "if (!rects.length) return null; "
+    "const labels = e.tagName === 'INPUT' && ['checkbox', 'radio'].includes(e.type) ? [...e.labels] : []; "
+    "const hitAt = (x, y) => { "
     # Descend through open shadow roots: the document-level hit is only the outermost host.
     "let node = e, doc = e.ownerDocument; while (true) { "
     "const view = doc.defaultView; "
@@ -70,13 +76,16 @@ _HIT_TEST_JS = (
     "let hit = doc.elementFromPoint(x, y); "
     "while (hit?.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); "
     "if (!inner || inner === hit) break; hit = inner; } "
-    "if (!node.contains(hit)) return 'covered'; "
+    "if (!node.contains(hit) && !(node === e && labels.some(label => label.contains(hit)))) return 'covered'; "
     "if (doc === document) break; "
     "node = view.frameElement; if (!node) return null; "
     "const frame = node.getBoundingClientRect(); "
     "x = frame.x + (node.clientLeft + x) * frame.width / node.offsetWidth; "
     "y = frame.y + (node.clientTop + y) * frame.height / node.offsetHeight; doc = node.ownerDocument; } "
-    "return [x, y]; })"
+    "return [x, y]; }; "
+    "for (const r of rects) { for (const [fx, fy] of [[.5, .5], [.25, .25], [.75, .25], [.25, .75], [.75, .75]]) { "
+    "const point = hitAt(r.left + (r.right - r.left) * fx, r.top + (r.bottom - r.top) * fy); "
+    "if (Array.isArray(point)) return point; } } return 'covered'; })"
 )
 
 # A deadline, not a wait: a field with no editor to open settles on the first frame.
