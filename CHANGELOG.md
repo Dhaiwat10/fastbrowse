@@ -11,6 +11,10 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A reply the provider cut short is an outage, not a truncation.** JSON that ends mid-value short of the
+  output cap is asked for again at the same cap; a second one ends the run `unavailable`, naming how many
+  tokens came back. Only a reply that used the cap gets more room and, if cut again, is reported as truncated.
+
 ## [0.5.1] - 2026-09-21
 
 - **A decision the page redraws under is dropped at once.** While Jev decides and gates a click, the run watches

@@ -68,12 +68,25 @@ def _truncated(payload: dict[str, JsonValue]) -> bool:
     return object_value(choices[0]).get("finish_reason") == "length"
 
 
-def _cut_off(error: ValidationError) -> bool:
-    """A parse that ran out of input: some providers report a response that hit the cap as an ordinary stop."""
+def _ends_mid_json(error: ValidationError) -> bool:
     return any(
         detail["type"] == "json_invalid" and str(detail.get("ctx", {}).get("error", "")).startswith("EOF")
         for detail in error.errors(include_url=False)
     )
+
+
+def _short_of_cap(payload: dict[str, JsonValue], cap: JsonValue) -> int | None:
+    """Output tokens of JSON that ended mid-value short of the cap, or None where the cap may have cut it.
+
+    Some providers report a response that hit the cap as an ordinary stop, so JSON ending mid-value is read as
+    truncation unless usage shows the model stopped short: then the provider dropped the tail, and more room
+    would not help.
+    """
+    try:
+        written = token_count(object_value(payload.get("usage", {})).get("completion_tokens"))
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return written if isinstance(cap, int) and 0 < written < cap else None
 
 
 def strict_schema(schema: JsonValue) -> JsonValue:
@@ -265,8 +278,13 @@ class OpenAICompatibleLLM:
                     # Paths and reasons are enough to repair the schema. A path is the model's own key, which can
                     # be anything it read, so it is scrubbed too.
                     detail = self._scrubbed(error_detail(error))
-                    if _cut_off(error):
-                        _grow_cap(body, attempt, max_output_tokens)
+                    if _ends_mid_json(error):
+                        if (written := _short_of_cap(payload, body["max_tokens"])) is None:
+                            _grow_cap(body, attempt, max_output_tokens)
+                        elif attempt == 1:
+                            raise LLMRetriesExhausted(
+                                f"LLM response ended mid-JSON at {written} of {body['max_tokens']} output tokens twice"
+                            ) from None
                         continue
                     if attempt == 1:
                         raise LLMError(f"LLM schema validation failed after one retry: {detail[:1000]}") from None

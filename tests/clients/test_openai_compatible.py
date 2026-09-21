@@ -7,8 +7,8 @@ from pydantic import JsonValue, TypeAdapter
 
 from fastbrowse.clients import validation
 from fastbrowse.clients.openai_compatible import OpenAICompatibleLLM
-from fastbrowse.llm import LLMError, Message
-from fastbrowse.models import CostBasis, Frozen, Limits, LLMPurpose
+from fastbrowse.llm import LLMError, LLMRetriesExhausted, Message
+from fastbrowse.models import CostBasis, Frozen, Limits, LLMPurpose, Unavailable
 from fastbrowse.telemetry import BudgetExceeded, Ledger
 
 
@@ -333,3 +333,24 @@ async def test_json_that_ends_mid_value_is_truncation_even_when_the_provider_say
             "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
         ).generate(LLMPurpose.READ, [], Result, max_output_tokens=100)
     assert result.data.count == 2 and caps == [100, 400]
+
+
+async def test_json_that_ends_mid_value_short_of_the_cap_is_a_provider_fault_not_truncation() -> None:
+    caps: list[JsonValue] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        caps.append(TypeAdapter(dict[str, JsonValue]).validate_json(request.content)["max_tokens"])
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"count":"cut off'}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens": 7},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(LLMRetriesExhausted, match="ended mid-JSON at 7 of 100") as error:
+            await OpenAICompatibleLLM(
+                "key", http=http, base_url="https://llm.test", models={LLMPurpose.READ: "reader"}
+            ).generate(LLMPurpose.READ, [], Result, max_output_tokens=100)
+    assert caps == [100, 100] and isinstance(error.value, Unavailable)
