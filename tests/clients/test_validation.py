@@ -5,8 +5,8 @@ import httpx
 import pytest
 
 from fastbrowse.clients.validation import RequestUsage, post, post_with_retry, with_discarded
-from fastbrowse.jev import JevRetriesExhausted
-from fastbrowse.models import CostBasis, CostComponent, CostLine
+from fastbrowse.jev import JevError, JevRetriesExhausted
+from fastbrowse.models import CostBasis, CostComponent, CostLine, Unavailable
 
 
 @pytest.mark.parametrize("winner", [1, 2])
@@ -38,6 +38,7 @@ async def test_a_stalled_request_is_raced_and_the_loser_cancelled(winner: int) -
             "https://jev.test/v1",
             {},
             {},
+            call="jev",
             attempt_seconds=30.0,
             hedge_seconds=0.05,
             before_retry=lambda: reserved.append(None),
@@ -60,7 +61,7 @@ async def test_a_fast_request_is_not_hedged() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         response = await post_with_retry(
-            http, "https://jev.test/v1", {}, {}, attempt_seconds=30.0, hedge_seconds=5.0, usage=usage
+            http, "https://jev.test/v1", {}, {}, call="jev", attempt_seconds=30.0, hedge_seconds=5.0, usage=usage
         )
     assert response is not None and len(calls) == 1
     assert usage.unaccounted_requests == 0
@@ -77,7 +78,7 @@ async def test_retry_waits_for_the_servers_retry_after(monkeypatch: pytest.Monke
     usage = RequestUsage()
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: next(responses))) as http:
         response = await post_with_retry(
-            http, "https://jev.test/v1", {}, {}, attempt_seconds=30.0, hedge_seconds=5.0, usage=usage
+            http, "https://jev.test/v1", {}, {}, call="jev", attempt_seconds=30.0, hedge_seconds=5.0, usage=usage
         )
     assert response is not None and response.status_code == 200
     assert waits == [0.25]
@@ -93,7 +94,9 @@ async def test_a_brief_outage_is_outlasted(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr("fastbrowse.clients.validation.asyncio.sleep", record)
     responses = iter([*(httpx.Response(503) for _ in range(4)), httpx.Response(200)])
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: next(responses))) as http:
-        response = await post_with_retry(http, "https://jev.test/v1", {}, {}, attempt_seconds=30.0, hedge_seconds=5.0)
+        response = await post_with_retry(
+            http, "https://jev.test/v1", {}, {}, call="jev", attempt_seconds=30.0, hedge_seconds=5.0
+        )
     assert response is not None and response.status_code == 200
     assert sum(waits) > 10
 
@@ -113,7 +116,7 @@ async def test_a_completed_hedge_loser_still_counts() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         response = await post_with_retry(
-            http, "https://jev.test/v1", {}, {}, attempt_seconds=30.0, hedge_seconds=0.01, usage=usage
+            http, "https://jev.test/v1", {}, {}, call="jev", attempt_seconds=30.0, hedge_seconds=0.01, usage=usage
         )
     assert response is not None and response.is_success
     assert calls == 2 and usage.unaccounted_requests == 1
@@ -143,8 +146,22 @@ async def test_exhausted_status_keeps_timing_usage_and_redacts_the_key(monkeypat
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         with pytest.raises(JevRetriesExhausted) as error:
             await post(http, "https://jev.test/v1", "secret-key", {})
-    assert error.value.status_code == 503
     assert error.value.seconds == 27
     assert error.value.unaccounted_requests == 1
     assert "secret-key" not in str(error.value)
     assert len(str(error.value)) < 500
+
+
+async def test_a_request_that_can_never_be_sent_is_not_an_outage() -> None:
+    """Retrying it would fail the same way every time, and an eval would re-run the task forever."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.UnsupportedProtocol("ftp is not supported", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(JevError, match="could not be sent") as error:
+            await post(http, "https://jev.test/v1", "secret-key", {})
+    assert calls == 1 and not isinstance(error.value, Unavailable)

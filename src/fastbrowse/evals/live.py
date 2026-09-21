@@ -1,16 +1,17 @@
-"""Head-to-head on live sites: fastbrowse, jev-ultrafast and hosted Browser Use, same prompts, no dollar or time caps.
+"""Head-to-head on live sites: fastbrowse, jev-ultrafast and the Browser Use agent, same prompts.
 
     uv run --extra browser-use python -m fastbrowse.evals.live [--only TASK_ID ...] [--category CATEGORY ...]
-        [--arms fast ultrafast hosted] [--bitwarden] [--repeat N] [--record DIR]
+        [--arms fastbrowse jev-ultrafast browser-use] [--bitwarden] [--repeat N] [--record DIR]
         [--out artifacts/evals/live.jsonl]
 
-Needs BROWSER_USE_API_KEY (every arm), and the Jev and LLM keys in fastbrowse.clients.environment (fast and
-ultrafast arms). Each run prints a WATCH line with the URL where its browser can be watched live.
+Needs BROWSER_USE_API_KEY (every arm), and the Jev and LLM keys in fastbrowse.clients.environment (fastbrowse and
+jev-ultrafast arms). Each run prints a WATCH line with the URL where its browser can be watched live.
 
-The fast and ultrafast arms each drive a fresh Browser Use Cloud browser; hosted Browser Use brings its own.
+The fastbrowse and jev-ultrafast arms each drive a fresh Browser Use Cloud browser;
+the Browser Use agent brings its own.
 jev-ultrafast runs as its published package in an environment of its own (see scripts/ultrafast_arm.py).
 
-Tasks and their grading live in fastbrowse.evals.live_tasks. With --bitwarden, the fast arm reads each login
+Tasks and their grading live in fastbrowse.evals.live_tasks. With --bitwarden, the fastbrowse arm reads each login
 task's credentials from its vault item (created by scripts/eval_vault.py) instead of the task. With --record,
 each run is saved as DIR/<arm>/<task>-<n>.mp4, n counting up from 1 past any video already there.
 
@@ -22,6 +23,7 @@ fastbrowse must also end with the task's expected status, and jev-ultrafast with
 
 import argparse
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -48,19 +50,20 @@ from fastbrowse.agent import Agent
 from fastbrowse.browser import CdpPage
 from fastbrowse.browser.recording import Recording
 from fastbrowse.clients.environment import load_settings
+from fastbrowse.clients.validation import RETRYABLE_STATUS, TRANSIENT_TRANSPORT
 from fastbrowse.evals.live_tasks import TASKS, Category, LiveTask, Outcome
 from fastbrowse.evals.more_tasks import DEV, HELDOUT
-from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, StepEvent
+from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, Status, StepEvent, Unavailable
 from fastbrowse.page import Observation
 from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
 from fastbrowse.telemetry import TRACE
 
-ARMS = ("fast", "ultrafast", "hosted")
+ARMS = ("fastbrowse", "jev-ultrafast", "browser-use")
 MAX_STEPS = 30
 LIMITS = Limits(max_steps=MAX_STEPS)
 """No arm has a dollar or time cap: a cap one arm reaches measures the budget, not the arm, so every run ends
-when its agent does. fastbrowse and jev-ultrafast share a step limit; hosted Browser Use has none to set."""
+when its agent does. fastbrowse and jev-ultrafast share a step limit; the Browser Use agent has none to set."""
 
 ULTRAFAST = "jev-ultrafast @ git+https://github.com/browser-use/jev-ultrafast@1231850a0bf1a0c0341fe408ef1668dbbfdfac46"
 ULTRAFAST_RUNNER = Path(__file__).resolve().parents[3] / "scripts" / "ultrafast_arm.py"
@@ -71,7 +74,7 @@ ULTRAFAST_TEXT_MODEL = "inception/mercury-2.5"
 
 def _watch(arm: str, task: LiveTask, live_url: str | None) -> None:
     if live_url:
-        print(f"WATCH {arm:9} {task.id:18} {live_url}", flush=True)
+        print(f"WATCH {arm:13} {task.id:18} {live_url}", flush=True)
 
 
 def _secrets(task: LiveTask, bitwarden: bool) -> ScopedSecrets | None:
@@ -84,13 +87,19 @@ def _secrets(task: LiveTask, bitwarden: bool) -> ScopedSecrets | None:
 def video_path(folder: Path, arm: str, task: LiveTask) -> Path:
     """The first free DIR/<arm>/<task>-<n>.mp4, absolute because the ultrafast runner has its own working directory.
 
-    Counting past existing files means repeated invocations never overwrite a video.
+    Counting past existing files means repeated invocations never overwrite a video. The name is claimed by creating
+    it empty: every repeat is allocated before any run writes, so an existence check alone gave them all one name.
     """
+    (folder.resolve() / arm).mkdir(parents=True, exist_ok=True)
     n = 1
-    while (path := folder.resolve() / arm / f"{task.id}-{n}.mp4").exists():
-        n += 1
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    while True:
+        path = folder.resolve() / arm / f"{task.id}-{n}.mp4"
+        try:
+            path.touch(exist_ok=False)
+        except FileExistsError:
+            n += 1
+        else:
+            return path
 
 
 @dataclass
@@ -160,6 +169,14 @@ class _ObservedAgent(Agent):
 
 
 _trace_events: ContextVar[list[object] | None] = ContextVar("live_trace_events", default=None)
+_running: ContextVar[str] = ContextVar("live_running", default="-")
+"""`<arm> <task>` for the run a log record came from: eight runs overlap, and a bare retry warning names none."""
+
+
+class _NameRun(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.run = _running.get()
+        return True
 
 
 class ArmReport(BaseModel):
@@ -185,7 +202,7 @@ class ArmReport(BaseModel):
     actions: int | None = None
     unmetered_requests: int | None = None
     text_model: str | None = None
-    # hosted Browser Use
+    # the Browser Use agent
     model: str | None = None
     session_id: str | None = None
 
@@ -198,7 +215,9 @@ class EvalRow(ArmReport):
     category: str
     at: float
     concurrency: int | None = None
-    status: str | None = None  # a crashed arm reports nothing
+    status: str | None = None  # a crashed arm reports nothing, unless a provider was unavailable
+    retries: int = 0
+    """Runs discarded before this one because a provider stayed unavailable: they say nothing about the agent."""
     correct: bool
     passed: bool
     failure: str | None
@@ -288,7 +307,7 @@ async def fast_arm(
 
 async def _on_fast_event(task: LiveTask, event: StepEvent | BrowserEvent) -> None:
     if isinstance(event, BrowserEvent):
-        _watch("fast", task, event.live_url)
+        _watch("fastbrowse", task, event.live_url)
 
 
 async def prepare_ultrafast() -> None:
@@ -328,7 +347,7 @@ async def ultrafast_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path
     cloud = BrowserUseCloudBrowser(load_settings().browser_key(), http=http)
     async with cloud:
         booted = time.monotonic() - started
-        _watch("ultrafast", task, cloud.connection.live_url)
+        _watch("jev-ultrafast", task, cloud.connection.live_url)
         request = {
             "start": task.start,
             "goal": task.task,
@@ -369,7 +388,21 @@ async def ultrafast_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path
 
 
 async def hosted_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path | None) -> tuple[Outcome, ArmReport]:
-    from browser_use_sdk.v3 import AsyncBrowserUse  # an optional extra
+    from browser_use_sdk.v3 import BrowserUseError  # an optional extra
+
+    try:
+        return await _hosted_run(task, http, record=record)
+    # The SDK's message quotes the response body, which can echo the key: report the status or type alone.
+    except BrowserUseError as error:
+        failed = Unavailable if error.status_code in RETRYABLE_STATUS else RuntimeError
+        raise failed(f"Browser Use API returned HTTP {error.status_code}") from None
+    except httpx.HTTPError as error:
+        failed = Unavailable if isinstance(error, TRANSIENT_TRANSPORT) else RuntimeError
+        raise failed(f"Browser Use API request failed ({type(error).__name__})") from None
+
+
+async def _hosted_run(task: LiveTask, http: httpx.AsyncClient, *, record: Path | None) -> tuple[Outcome, ArmReport]:
+    from browser_use_sdk.v3 import AsyncBrowserUse, BrowserUseError  # an optional extra
 
     client = AsyncBrowserUse(api_key=load_settings().browser_key())
     run = client.run(
@@ -385,15 +418,16 @@ async def hosted_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path | 
     while run.session_id is None and not finishing.done():
         await asyncio.wait({finishing}, timeout=0.2)
     if run.session_id is not None:
-        _watch("hosted", task, (await client.sessions.get(run.session_id)).live_url)
+        _watch("browser-use", task, (await client.sessions.get(run.session_id)).live_url)
     # gather, not await: the SDK raises on output that fails the task's schema, before the session's cost is read.
     await asyncio.gather(finishing, return_exceptions=True)
     seconds = time.monotonic() - started
     if (error := finishing.exception()) is None:
         result = finishing.result()
         session, output = result.session, result.output
-    elif run.session_id is not None:
+    elif run.session_id is not None and not isinstance(error, BrowserUseError | httpx.HTTPError):
         # The SDK raises on output that fails the task's schema; the session still holds that output and its cost.
+        # An API or transport failure is raised instead: the session it interrupted says nothing of the agent.
         session = await client.sessions.get(run.session_id)
         output = session.output
     else:
@@ -423,7 +457,8 @@ async def hosted_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path | 
 
 
 def _video(record: Path | None) -> str | None:
-    return str(record) if record is not None and record.exists() else None
+    # A claimed name stays empty when the run recorded nothing.
+    return str(record) if record is not None and record.exists() and record.stat().st_size else None
 
 
 async def run_arm(
@@ -435,24 +470,27 @@ async def run_arm(
     bitwarden: bool,
     record: Path | None,
 ) -> EvalRow:
+    _running.set(f"{arm} {task.id}")
     truth = await task.truth(http)
     started = time.monotonic()
     at = time.time()
     try:
-        if arm == "fast":
+        if arm == "fastbrowse":
             outcome, report = await _fast_report(
                 task, http, downloads, bitwarden=bitwarden, record=record, started=started
             )
-        elif arm == "ultrafast":
+        elif arm == "jev-ultrafast":
             outcome, report = await ultrafast_arm(task, http, record=record)
         else:
             outcome, report = await hosted_arm(task, http, record=record)
     except Exception as exc:  # a crashed arm is a failed task, recorded rather than aborting the comparison
+        unavailable = isinstance(exc, (Unavailable, *TRANSIENT_TRANSPORT))
         return EvalRow(
             arm=arm,
             task=task.id,
             category=task.category.value,
             at=at,
+            status=Status.UNAVAILABLE.value if unavailable else None,
             correct=False,
             passed=False,
             failure=f"{type(exc).__name__}: {exc}",
@@ -464,7 +502,7 @@ async def run_arm(
     # Right and proven are graded apart: a correct answer the agent could not back with quotes is a
     # different defect from a wrong one, and one pass/fail column hid which the suite was showing.
     correct = failure is None
-    expected = {"fast": task.expect.value, "ultrafast": "done"}.get(arm)
+    expected = {"fastbrowse": task.expect.value, "jev-ultrafast": "done"}.get(arm)
     if expected is not None and failure is None and report.status != expected:
         failure = f"status {report.status}, expected {expected}"
     return EvalRow.model_validate(
@@ -493,6 +531,7 @@ async def _fast_report(
     with _traced() as events:
         outcome, result, seen = await fast_arm(task, http, downloads, bitwarden=bitwarden, record=record)
     cost = result.cost
+    settings = load_settings()
     return outcome, ArmReport(
         status=result.status.value,
         seconds=(seen.ended or time.monotonic()) - started,
@@ -512,6 +551,8 @@ async def _fast_report(
         unknown_cost=cost.has_unknown,
         observe_error=seen.observe_error,
         seconds_by_call=cost.seconds_by_call(),
+        model=f"jev {settings.jev_route()[0]}",
+        text_model=", ".join(sorted(set(settings.models().values()))),
         cost_by_component={
             c: round(sum(line.dollars or 0 for line in cost.lines if line.component == c), 5)
             for c in {line.component.value for line in cost.lines}
@@ -553,6 +594,17 @@ def summarize(rows: list[EvalRow], arms: list[str]) -> None:
                 shadow.update(set(r.would_fire))
         for tripwire, runs in shadow.most_common():
             print(f"  would-fire {tripwire:18} {runs}/{passed} passing runs")
+        for r in arm_rows:
+            if not r.passed:
+                print(f"  FAIL {r.task:22} {_cause(r)}")
+
+
+def _cause(row: EvalRow) -> str:
+    """Why a run failed, leading with how the run itself ended: a grader's "answer lacks X: None" only restates
+    that a run which died on a provider outage had no answer."""
+    if row.error and row.status is not None:
+        return f"{row.status}: {row.error}" + (f" | graded: {row.failure}" if row.failure else "")
+    return row.failure or f"status {row.status}"
 
 
 async def main(argv: list[str]) -> int:
@@ -579,7 +631,15 @@ async def main(argv: list[str]) -> int:
         for t in SUITES[suite]
         if (not args.only or t.id in args.only) and (not args.category or t.category.value in args.category)
     ]
-    if "ultrafast" in args.arms:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.addFilter(_NameRun())
+    # Traces are collected per run at DEBUG and propagate here; only warnings belong on the console.
+    handler.setLevel(logging.WARNING)
+    handler.setFormatter(logging.Formatter("%(levelname)-7s %(run)s %(name)s: %(message)s"))
+    logging.basicConfig(level=logging.WARNING, handlers=[handler])
+    if "fastbrowse" in args.arms:
+        print(f"PROVIDERS {load_settings().providers()}", flush=True)
+    if "jev-ultrafast" in args.arms:
         await prepare_ultrafast()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows: list[EvalRow] = []
@@ -601,16 +661,24 @@ async def main(argv: list[str]) -> int:
         async with httpx.AsyncClient(timeout=60) as http:
 
             async def one(arm: str, task: LiveTask, record: Path | None) -> EvalRow:
-                async with gate:
-                    row = await run_arm(arm, task, http, Path(downloads), bitwarden=args.bitwarden, record=record)
-                row = row.model_copy(update={"concurrency": args.concurrency})
+                # A provider outage says nothing about the agent, so a run it ended is run again until one ends
+                # on its own, however long that takes; the slot is released while waiting.
+                for retries in itertools.count():
+                    async with gate:
+                        row = await run_arm(arm, task, http, Path(downloads), bitwarden=args.bitwarden, record=record)
+                    if row.status != Status.UNAVAILABLE:
+                        break
+                    wait = min(30 * (retries + 1), 300)
+                    print(f"RETRY {arm:13} {task.id:20} in {wait}s: {_cause(row)}", flush=True)
+                    await asyncio.sleep(wait)
+                row = row.model_copy(update={"concurrency": args.concurrency, "retries": retries})
                 # Trace records hold whatever a component logged, so anything JSON cannot hold is written as text.
                 out.write(row.model_dump_json(fallback=str) + "\n")
                 out.flush()
                 mark = "PASS" if row.passed else "FAIL"
                 print(
-                    f"{mark} {arm:9} {task.id:20} {row.seconds!s:>6}s ${row.dollars!s:<8}",
-                    row.failure or "",
+                    f"{mark} {arm:13} {task.id:20} {row.seconds!s:>6}s ${row.dollars!s:<8}",
+                    "" if row.passed else _cause(row),
                     flush=True,
                 )
                 return row

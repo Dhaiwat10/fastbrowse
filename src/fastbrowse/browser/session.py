@@ -28,13 +28,25 @@ from cdp_use.cdp.target.events import (
 )
 from cdp_use.client import CDPClient
 
-from fastbrowse.models import Artifact, ArtifactKind, ArtifactSink, FrameHandler
+from fastbrowse.models import Artifact, ArtifactKind, ArtifactSink, FrameHandler, Unavailable
 from fastbrowse.models import BrowserConnection as BrowserConnectionModel
 from fastbrowse.page import BrowserError, Dialog, Tab
 
 logger = logging.getLogger(__name__)
 
 _SCREENCAST_COMMAND_SECONDS = 0.5
+CDP_REPLY_SECONDS = 60.0
+"""How long a CDP command waits before the browser is asked whether it is still there. A cloud browser's proxy can
+keep the socket open, answering pings, after losing the browser behind it, and a run with no wall-clock limit would
+otherwise wait on that reply forever. A slow reply is not a lost one: `Page.navigate` waits for a slow server's
+headers, so the command keeps waiting for as long as the browser answers."""
+CDP_ALIVE_SECONDS = 10.0
+"""`Browser.getVersion` is answered at once by any browser that is there."""
+
+
+class BrowserUnresponsive(BrowserError, Unavailable):
+    """The browser stopped answering: an outage the same run may not meet again, not a failed task."""
+
 
 # Response-stage interception is enough: fastbrowse only needs the bytes of a save-as download, never to
 # rewrite a request. Chrome also classifies download-attribute anchors as Document; intercepting Other
@@ -92,11 +104,30 @@ class _BrowserClient(CDPClient):
             raise _browser_error("CDP.stop", exc) from exc
 
     async def send_raw(self, method: str, params: Any = None, session_id: str | None = None) -> dict[str, Any]:
+        reply = asyncio.ensure_future(super().send_raw(method, params, session_id))
         try:
-            return await super().send_raw(method, params, session_id)
+            while not (await asyncio.wait({reply}, timeout=CDP_REPLY_SECONDS))[0]:
+                # A reply that landed while the probe waited still counts, however the probe ended.
+                if not await self._alive() and not reply.done():
+                    raise BrowserUnresponsive(f"{method} got no reply, and the browser stopped answering")
+            return reply.result()
+        except BrowserUnresponsive:
+            raise
         except Exception as exc:
             # CDP error messages can contain evaluated source or page text, including secrets.
             raise _browser_error(method, exc) from exc
+        finally:
+            # Join the abandoned reply, as a cancelled caller's cleanup must not run ahead of it.
+            reply.cancel()
+            await asyncio.gather(reply, return_exceptions=True)
+
+    async def _alive(self) -> bool:
+        try:
+            async with asyncio.timeout(CDP_ALIVE_SECONDS):
+                await super().send_raw("Browser.getVersion")
+        except Exception:  # no answer, or a closed socket: either way nothing is there to reply
+            return False
+        return True
 
 
 @dataclass

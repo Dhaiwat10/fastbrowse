@@ -303,7 +303,14 @@ def _settings(**overrides: Any) -> Settings:
 
 async def test_configure_reads_secrets_and_ceilings_from_flags() -> None:
     args = parse(
-        ["--secret", "password=SHOP_PASSWORD@https://Shop.example.com", "--max-dollars", "0.25", "--allow-authorize"]
+        [
+            "--local",
+            "--secret",
+            "password=SHOP_PASSWORD@https://Shop.example.com",
+            "--max-dollars",
+            "0.25",
+            "--allow-authorize",
+        ]
     )
     config = await configure(args, _settings(), {"SHOP_PASSWORD": "hunter2"})
     assert config.secrets == (DeclaredSecret("password", "hunter2", "https://shop.example.com"),)
@@ -316,11 +323,13 @@ async def test_configure_reads_secrets_and_ceilings_from_flags() -> None:
     [
         (["--secret", "password=UNSET@https://a.example"], {}, {}, "unset variables: UNSET"),
         (["--profile", "p", "--max-concurrent", "2"], {}, {}, "one Chrome at a time"),
-        (["--cloud", "--headed"], {}, {}, "not --cloud"),
-        (["--cloud"], {}, {}, "BROWSER_USE_API_KEY"),
-        ([], {}, {"chrome": "no-such-chrome"}, "Chrome was not found"),
-        ([], {}, {"openrouter_api_key": None}, "OPENROUTER_API_KEY"),
-        ([], {}, {"ai_gateway_api_key": None}, "AI_GATEWAY_API_KEY"),
+        ([], {}, {}, "BROWSER_USE_API_KEY"),
+        (["--local", "--cloud-profile", "p"], {}, {}, "--cloud-profile needs the cloud browser"),
+        (["--headed"], {}, {"chrome": "no-such-chrome"}, "Chrome was not found"),
+        # FASTBROWSE_HEADED alone still means local Chrome, as it did before cloud became the default.
+        ([], {}, {"chrome": "no-such-chrome", "headed": True}, "Chrome was not found"),
+        (["--local"], {}, {"openrouter_api_key": None}, "OPENROUTER_API_KEY"),
+        (["--local"], {}, {"ai_gateway_api_key": None}, "AI_GATEWAY_API_KEY"),
         (["--max-steps", "0"], {}, {}, "--max-steps"),
         (["--max-dollars", "-1"], {}, {}, "--max-dollars"),
     ],

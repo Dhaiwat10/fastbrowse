@@ -13,6 +13,7 @@ import pytest
 
 from fastbrowse.evals import live, live_tasks
 from fastbrowse.evals.live_tasks import TASKS, LiveTask, Outcome
+from fastbrowse.models import Unavailable
 from fastbrowse.telemetry import TRACE, trace
 
 RUNNER: dict[str, Any] = runpy.run_path(str(live.ULTRAFAST_RUNNER))
@@ -72,12 +73,12 @@ async def test_concurrent_traces_keep_only_their_runs_events(
         await asyncio.gather(first, second, return_exceptions=True)
 
 
-def test_videos_count_up_past_existing_files(tmp_path: Path) -> None:
-    first = live.video_path(tmp_path, "fast", task("hn-top"))
-    first.write_bytes(b"")
-    assert first == tmp_path.resolve() / "fast" / "hn-top-1.mp4"
-    assert live.video_path(tmp_path, "fast", task("hn-top")).name == "hn-top-2.mp4"
-    assert live.video_path(tmp_path, "ultrafast", task("hn-top")).name == "hn-top-1.mp4"
+def test_videos_count_up_past_names_already_claimed(tmp_path: Path) -> None:
+    # Repeats are allocated before any of them records, so a name must be taken the moment it is handed out.
+    first = live.video_path(tmp_path, "fastbrowse", task("hn-top"))
+    assert first == tmp_path.resolve() / "fastbrowse" / "hn-top-1.mp4"
+    assert live.video_path(tmp_path, "fastbrowse", task("hn-top")).name == "hn-top-2.mp4"
+    assert live.video_path(tmp_path, "jev-ultrafast", task("hn-top")).name == "hn-top-1.mp4"
 
 
 @pytest.mark.parametrize(("status", "passed"), [("done", True), ("blocked", False)])
@@ -95,7 +96,7 @@ async def test_ultrafast_passes_only_on_a_correct_outcome_it_called_done(
 
     monkeypatch.setattr(live, "ultrafast_arm", ultrafast_arm)
     async with httpx.AsyncClient() as http:
-        row = await live.run_arm("ultrafast", arxiv, http, Path(), bitwarden=False, record=None)
+        row = await live.run_arm("jev-ultrafast", arxiv, http, Path(), bitwarden=False, record=None)
     assert row.correct is True
     assert row.passed is passed
     assert row.seconds == 3.0
@@ -124,11 +125,11 @@ def test_a_real_gap_in_probabilities_is_left_alone() -> None:
 
 def test_each_task_runs_only_where_it_grades_on_equal_terms() -> None:
     for live_task in TASKS:
-        if "ultrafast" in live_task.arms:
+        if "jev-ultrafast" in live_task.arms:
             # jev-ultrafast has no answer, so its tasks must be graded on the page alone.
             assert live_task.output_schema is None
-            assert "hosted" not in live_task.arms
-    assert {t.id for t in TASKS if "ultrafast" in t.arms} >= {"wiki-open", "flights-search"}
+            assert "browser-use" not in live_task.arms
+    assert {t.id for t in TASKS if "jev-ultrafast" in t.arms} >= {"wiki-open", "flights-search"}
 
 
 @pytest.mark.parametrize(
@@ -192,7 +193,7 @@ def test_the_flights_answer_task_needs_the_search_and_a_price() -> None:
     page = _flights_page(date.today() + timedelta(days=28), trip="Round trip", nonstop=False)
     assert check(Outcome("JetBlue, $846", None, "https://www.google.com/travel/flights", controls=page), None) is None
     assert check(Outcome("JetBlue", None, "https://www.google.com/travel/flights", controls=page), None) is not None
-    # Hosted Browser Use reports no page, so only its answer is graded.
+    # The Browser Use agent reports no page, so only its answer is graded.
     assert check(Outcome("JetBlue, $846", None, None), None) is None
 
 
@@ -351,3 +352,29 @@ async def test_a_hosted_session_whose_output_fails_the_schema_keeps_its_cost(mon
     outcome, report = await live.hosted_arm(task("pypi-newer"), httpx.AsyncClient(), record=None)
     assert outcome.answer == "[Session cost limit reached]"
     assert report.dollars == 0.37 and report.status == "stopped"
+
+
+async def test_a_hosted_outage_retries_without_quoting_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    import browser_use_sdk.v3  # an optional extra
+
+    class Run:
+        session_id = "s1"
+
+        def __await__(self) -> Any:
+            async def fail() -> None:
+                raise browser_use_sdk.v3.BrowserUseError(503, "upstream echoed bu_secret_key")
+
+            return fail().__await__()
+
+    class Client:
+        def __init__(self, **_: object) -> None:
+            self.sessions = SimpleNamespace(get=AsyncMock())
+
+        def run(self, *_: object, **__: object) -> Run:
+            return Run()
+
+    monkeypatch.setattr(browser_use_sdk.v3, "AsyncBrowserUse", Client)
+    monkeypatch.setattr(live, "load_settings", lambda: SimpleNamespace(browser_key=lambda: "bu_secret_key"))
+    with pytest.raises(Unavailable) as error:
+        await live.hosted_arm(task("pypi-newer"), httpx.AsyncClient(), record=None)
+    assert "bu_secret_key" not in str(error.value) and "HTTP 503" in str(error.value)

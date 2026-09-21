@@ -1,6 +1,10 @@
 """Links derived from captured quotes, without asking a model for a URL."""
 
+import re
 from urllib.parse import quote
+
+# A cited claim's link as the composer writes it: `[3](<https://page#:~:text=...>)`.
+ANSWER_LINK = re.compile(r"\]\(<([^>]*)>\)")
 
 
 def text_fragment(url: str, text: str) -> str:

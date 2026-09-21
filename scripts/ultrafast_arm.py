@@ -6,10 +6,10 @@ JSON result on stdout:
 
     {"start", "goal", "cdp_ws", "max_steps", "record": path or null}
 
-The browser is the caller's: a Browser Use Cloud browser reached through `cdp_ws`, the same kind the fast arm
+The browser is the caller's: a Browser Use Cloud browser reached through `cdp_ws`, the same kind the fastbrowse arm
 drives, so both arms pay the same round trips. jev-ultrafast calls TypeSafe's direct API with
 TYPESAFE_API_KEY; with only AI_GATEWAY_API_KEY set, the same questions go through the Vercel AI Gateway, which
-is also how the fast arm reaches Jev. Its text helper uses TEXT_MODEL_API_KEY, an OpenRouter key.
+is also how the fastbrowse arm reaches Jev. Its text helper uses TEXT_MODEL_API_KEY, an OpenRouter key.
 """
 
 import base64
@@ -63,6 +63,10 @@ def systemone_answer(payload: dict[str, Any]) -> tuple[dict[str, Any], float | N
     )
 
 
+class Unavailable(RuntimeError):
+    """The model provider answered only with overload statuses: the harness runs the task again."""
+
+
 class Meter:
     """Every model request's metered dollars; a request whose cost the provider did not report is counted."""
 
@@ -77,7 +81,6 @@ class Meter:
 
 
 def patch_transport(model: Any, meter: Meter) -> None:
-    original = model.post_json
     via_gateway = not os.environ.get("TYPESAFE_API_KEY")
     if via_gateway:
         if not os.environ.get("AI_GATEWAY_API_KEY"):
@@ -87,11 +90,16 @@ def patch_transport(model: Any, meter: Meter) -> None:
 
     def post_json(url: str, key: str, body: dict[str, Any]) -> dict[str, Any]:
         if "api.typesafe.ai" in url and via_gateway:
-            payload = _gateway(model, key, {"state": body["state"], "questions": body["questions"]})
+            payload = _post(
+                model,
+                GATEWAY_URL,
+                {"Authorization": f"Bearer {key}", **GATEWAY_HEADERS},
+                {"state": body["state"], "questions": body["questions"]},
+            )
             result, cost = systemone_answer(payload)
             _meter(meter, "jev", cost)
             return result
-        result = original(url, key, body)
+        result = _post(model, url, {"Authorization": f"Bearer {key}"}, body)
         usage = result.get("usage") or {}
         _meter(meter, "jev" if "api.typesafe.ai" in url else "text", usage.get("cost"))
         return result
@@ -109,19 +117,30 @@ def _meter(meter: Meter, kind: str, cost: object) -> None:
         meter.text += float(cost)
 
 
-def _gateway(model: Any, key: str, body: dict[str, Any]) -> dict[str, Any]:
-    # jev-ultrafast's own client and retry policy: three attempts on an overloaded provider.
+RETRYABLE = frozenset({408, 429, 500, 502, 503, 504, 529})
+"""fastbrowse's own set (`clients.validation.RETRYABLE_STATUS`): a status that says nothing about the request."""
+
+
+def _post(model: Any, url: str, headers: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
+    """jev-ultrafast's `post_json`, retry policy unchanged, with an outage raised as `Unavailable` so the harness
+    runs the task again rather than counting it: upstream raises one RuntimeError for every failure."""
+    import httpx  # jev-ultrafast's dependency, installed beside it
+
     for attempt in range(3):
-        response = model.CLIENT.post(
-            GATEWAY_URL, json=body, headers={"Authorization": f"Bearer {key}", **GATEWAY_HEADERS}
-        )
+        try:
+            response = model.CLIENT.post(url, json=body, headers=headers)
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, httpx.DecodingError) as error:
+            raise Unavailable(f"Model connection failed ({type(error).__name__}); no action executed.") from None
+        except httpx.HTTPError:
+            raise RuntimeError("Model connection failed; no action executed.") from None
         if response.status_code in {429, 529, 503} and attempt < 2:
             time.sleep(0.5 * 2**attempt)
             continue
         if response.is_error:
-            raise RuntimeError(f"Model provider returned HTTP {response.status_code}; no action executed.")
+            failed = Unavailable if response.status_code in RETRYABLE else RuntimeError
+            raise failed(f"Model provider returned HTTP {response.status_code}; no action executed.")
         return response.json()
-    raise RuntimeError("Model unavailable")
+    raise Unavailable("Model unavailable")
 
 
 class Screencast:
@@ -243,6 +262,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
                     status = state["status"]
             except Exception as exc:  # the run's failure is its result, recorded rather than raised
                 error = f"{type(exc).__name__}: {exc}"
+                status = "unavailable" if isinstance(exc, Unavailable) else status
             seconds = time.monotonic() - started
             if cast is not None:
                 steps = len(agent.state["decisions"])
@@ -263,7 +283,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
     if agent is not None:
         state = agent.state
         final_url = state["page"]["url"]
-        # The controls it last observed, as the fast arm's harness observes them: for graders that read the form.
+        # The controls it last observed, as the fastbrowse arm's harness observes them: for graders that read the form.
         controls = [[a["label"], a.get("value")] for a in state["page"].get("actions", [])]
         agent.close()
     history = state["history"] if state else []

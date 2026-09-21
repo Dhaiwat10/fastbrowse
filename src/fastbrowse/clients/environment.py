@@ -9,7 +9,8 @@ Cloud browser: BROWSER_USE_API_KEY. FASTBROWSE_LLM_MODEL overrides every purpose
 FASTBROWSE_LLM_MODEL_<PURPOSE> (PLAN, READ, FIELD_TEXT, RECOVER, COMPOSE, VERIFY, SHORTCUT) overrides one.
 FASTBROWSE_LLM_REASONING sets the reasoning effort: low (default), medium or high. FASTBROWSE_CHROME
 names the Chrome binary; FASTBROWSE_HEADED=1 shows its window and FASTBROWSE_PROFILE keeps its profile
-between runs. `.env.example` lists them all. A real environment variable beats `.env`.
+between runs, and either one selects local Chrome. `.env.example` lists them all. A real environment variable
+beats `.env`.
 """
 
 from enum import StrEnum
@@ -117,8 +118,22 @@ class Settings(BaseSettings):
     def local_chrome(self) -> LocalChrome:
         return LocalChrome(binary=self.chrome, headed=self.headed, profile=self.profile)
 
-    def jev(self, http: httpx.AsyncClient) -> JevClient:
+    def jev_route(self) -> tuple[JevSource, JevSource | None]:
+        """The Jev provider a run starts on, and the one it fails over to when that one's retries run out."""
         source = self.jev_source or (JevSource.TYPESAFE if self.typesafe_api_key else JevSource.GATEWAY)
+        # A proxy may be a routing boundary, and the gateway cannot honour a direct-API model pin.
+        if self.jev_base_url or self.jev_model != JEV_MODEL or not (self.typesafe_api_key and self.ai_gateway_api_key):
+            return source, None
+        return source, JevSource.GATEWAY if source is JevSource.TYPESAFE else JevSource.TYPESAFE
+
+    def providers(self) -> str:
+        """Which providers a run will call, for the first line of a log: an outage reads differently with no backup."""
+        source, backup = self.jev_route()
+        failover = f"backup {backup}" if backup is not None else "no backup: an outage past its retries ends the run"
+        return f"Jev {source} ({failover}); LLM {', '.join(sorted(set(self.models().values())))} via OpenRouter"
+
+    def jev(self, http: httpx.AsyncClient) -> JevClient:
+        source, backup_source = self.jev_route()
         primary: JevClient
         match source:
             case JevSource.TYPESAFE:
@@ -138,12 +153,11 @@ class Settings(BaseSettings):
                 )
             case _:
                 assert_never(source)
-        # A proxy may be a routing boundary, and the gateway cannot honour a direct-API model pin.
-        if self.jev_base_url or self.jev_model != JEV_MODEL or not (self.typesafe_api_key and self.ai_gateway_api_key):
+        if backup_source is None or not (self.typesafe_api_key and self.ai_gateway_api_key):
             return primary
         backup = (
             VercelGatewayJevClient(self.ai_gateway_api_key.get_secret_value(), http=http)
-            if source is JevSource.TYPESAFE
+            if backup_source is JevSource.GATEWAY
             else TypeSafeJevClient(self.typesafe_api_key.get_secret_value(), http=http)
         )
         return FailoverJevClient(primary, backup)

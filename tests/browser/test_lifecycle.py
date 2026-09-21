@@ -23,8 +23,9 @@ from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser, Browse
 from fastbrowse.adapters.local_chrome import async_local_chrome, find_chrome, local_chrome
 from fastbrowse.agent import Agent
 from fastbrowse.browser import BrowserSession, CdpPage
+from fastbrowse.browser import session as browser_session
 from fastbrowse.config import Config
-from fastbrowse.models import BrowserConnection, CostBreakdown, CostLine, LocalChrome, RunResult, Status
+from fastbrowse.models import BrowserConnection, CostBreakdown, CostLine, LocalChrome, RunResult, Status, Unavailable
 from fastbrowse.page import BrowserError
 from fastbrowse.run import _browser, run_task
 from tests.browser.conftest import RecordingArtifactSink
@@ -42,6 +43,7 @@ class CdpTransport:
         self.requests: list[tuple[str, Any, str | None]] = []
         self.failures: dict[str, BaseException] = {}
         self.blocked: dict[str, asyncio.Event] = {}
+        self.delays: dict[str, float] = {}
         self.finished: set[str] = set()
         self.results: dict[str, list[dict[str, Any]]] = {}
         monkeypatch.setattr(CDPClient, "start", AsyncMock())
@@ -55,6 +57,7 @@ class CdpTransport:
             raise self.failures[method]
         if queued := self.results.get(method):
             return queued.pop(0)
+        await asyncio.sleep(self.delays.get(method, 0))
         if started := self.blocked.get(method):
             started.set()
             try:
@@ -109,6 +112,11 @@ async def test_cdp_errors_are_typed_with_safe_messages(monkeypatch: pytest.Monke
         assert "secret" not in str(raised.value)
 
 
+LOADED = {"result": {"value": "complete"}}
+SETTLED = {"result": {"value": [True, "fingerprint"]}}
+"""Navigation waits for a loaded document, then for its DOM to go quiet."""
+
+
 @pytest.mark.parametrize(
     ("errors", "raised"),
     [
@@ -122,7 +130,7 @@ async def test_a_failed_navigation_is_tried_again_once(
 ) -> None:
     transport = CdpTransport(monkeypatch)
     transport.results["Page.navigate"] = [{"errorText": error} for error in errors]
-    transport.results["Runtime.evaluate"] = [{"result": {"value": "complete"}}]
+    transport.results["Runtime.evaluate"] = [LOADED, SETTLED]
     monkeypatch.setattr(page_module, "_NAVIGATE_RETRY_SECONDS", 0)
     async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
         navigating = CdpPage(session, Config()).navigate("https://example.test")
@@ -140,7 +148,7 @@ async def test_a_page_that_never_loads_is_tried_again_once(monkeypatch: pytest.M
     async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
         with pytest.raises(BrowserError, match=re.escape("Page.navigate failed (TimeoutError)")):
             await CdpPage(session, Config()).navigate("https://example.test", load_timeout_seconds=0.1)
-        transport.results["Runtime.evaluate"] = [{"result": {"value": "complete"}}]
+        transport.results["Runtime.evaluate"] = [LOADED, SETTLED]
         await CdpPage(session, Config()).navigate("https://example.test", load_timeout_seconds=0.1)
     assert transport.calls.count("Page.navigate") == 3
 
@@ -497,3 +505,34 @@ async def test_a_browser_handed_over_with_no_page_named_still_works_one_out_from
     )
     assert captured["start"] is None
     assert captured["choose_start"], "with no page named the first address comes from the task"
+
+
+async def test_a_command_the_browser_never_answers_is_an_outage(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = CdpTransport(monkeypatch)
+    monkeypatch.setattr(browser_session, "CDP_REPLY_SECONDS", 0.05)
+    monkeypatch.setattr(browser_session, "CDP_ALIVE_SECONDS", 0.05)
+    async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
+        transport.blocked["Page.navigate"] = asyncio.Event()
+        transport.blocked["Browser.getVersion"] = asyncio.Event()
+        with pytest.raises(browser_session.BrowserUnresponsive) as raised:
+            await CdpPage(session, Config()).navigate("https://example.test/")
+    assert isinstance(raised.value, Unavailable) and "Page.navigate got no reply" in str(raised.value)
+
+
+async def test_a_slow_command_from_a_live_browser_is_waited_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = CdpTransport(monkeypatch)
+    monkeypatch.setattr(browser_session, "CDP_REPLY_SECONDS", 0.05)
+    async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
+        transport.delays["Target.getTargets"] = 0.2
+        await session.client.send_raw("Target.getTargets")
+    assert transport.calls.count("Browser.getVersion") >= 2, "the browser was asked whether it was there"
+
+
+async def test_a_reply_that_lands_during_the_liveness_probe_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = CdpTransport(monkeypatch)
+    monkeypatch.setattr(browser_session, "CDP_REPLY_SECONDS", 0.05)
+    monkeypatch.setattr(browser_session, "CDP_ALIVE_SECONDS", 0.1)
+    async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
+        transport.delays["Target.getTargets"] = 0.08
+        transport.blocked["Browser.getVersion"] = asyncio.Event()
+        await session.client.send_raw("Target.getTargets")

@@ -4,7 +4,7 @@
     fastbrowse-mcp --transport http --port 8765            # streamable HTTP on 127.0.0.1, at /mcp
 
 The operator sets on the command line what a calling model may do, and the model sets the rest per call:
-- The browser (`--cloud`, `--headed`, `--profile`) and where downloads are kept are fixed for the server.
+- The browser (`--local`, `--headed`, `--profile`) and where downloads are kept are fixed for the server.
 - `--max-steps`, `--max-dollars` and `--max-seconds` are ceilings: a call may ask for less, never more.
 - An irreversible action stops the run at `needs_confirmation`. Only a server started with `--allow-authorize`
   lets a call pass `authorize` to go through it, so a model cannot grant itself the right to pay or send.
@@ -184,8 +184,10 @@ def next_step(status: Status, *, allow_authorize: bool) -> str | None:
             )
         case Status.STUCK | Status.OBSERVATION_LIMIT:
             return "Try a start URL closer to the goal, or a narrower task."
+        case Status.UNAVAILABLE:
+            return "A model or browser provider was unavailable; see error. Call again later."
         case Status.ERROR:
-            return "A model or browser failure; see error. A retry may pass if it was transient."
+            return "A model or browser failure; see error."
 
 
 def output_model(fields: dict[str, OutputField] | None) -> type[BaseModel] | None:
@@ -278,7 +280,7 @@ def _description(config: ServerConfig) -> str:
         "as well as the answer.",
         "",
         "Statuses: complete (task verified, answer claims supported by quotes), unverified, needs_confirmation, "
-        "needs_login, blocked, needs_input, stuck, budget_exceeded, observation_limit, error. "
+        "needs_login, blocked, needs_input, stuck, budget_exceeded, observation_limit, unavailable, error. "
         "A result other than complete carries next_step.",
     ]
     if config.allow_authorize:
@@ -490,9 +492,11 @@ def parse(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--transport", choices=("stdio", "http"), default="stdio")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP only: address to bind")
     parser.add_argument("--port", type=int, default=8000, help="HTTP only: port to bind")
-    parser.add_argument("--cloud", action="store_true", help="run on Browser Use Cloud browsers")
-    parser.add_argument("--headed", action="store_true", help="show the local Chrome window")
-    parser.add_argument("--profile", type=Path, default=None, help="Chrome profile directory kept between runs")
+    parser.add_argument("--local", action="store_true", help="run on local Chrome instead of Browser Use Cloud")
+    parser.add_argument("--headed", action="store_true", help="show the local Chrome window (implies --local)")
+    parser.add_argument(
+        "--profile", type=Path, default=None, help="Chrome profile directory kept between runs (implies --local)"
+    )
     parser.add_argument(
         "--cloud-profile", metavar="ID", default=None, help="a Browser Use Cloud profile to run signed in as"
     )
@@ -517,12 +521,11 @@ async def configure(args: argparse.Namespace, settings: Settings, environ: Mappi
     for flag, value in (("--max-dollars", args.max_dollars), ("--max-seconds", args.max_seconds)):
         if value <= 0:
             raise ConfigurationError(f"{flag} must be above 0")
-    if args.cloud and (args.headed or args.profile is not None):
-        raise ConfigurationError("--headed and --profile are for local Chrome, not --cloud")
     chrome = options.chrome(settings, args.headed, args.profile)
-    if not args.cloud and find_chrome(chrome.binary) is None:
-        raise ConfigurationError("Chrome was not found: install it, name it in FASTBROWSE_CHROME, or use --cloud")
-    if not args.cloud and chrome.profile is not None and args.max_concurrent > 1:
+    cloud = options.cloud(args.local, chrome, args.cloud_profile)
+    if not cloud and find_chrome(chrome.binary) is None:
+        raise ConfigurationError("Chrome was not found: install it, name it in FASTBROWSE_CHROME, or drop --local")
+    if not cloud and chrome.profile is not None and args.max_concurrent > 1:
         raise ConfigurationError("a --profile can be open in one Chrome at a time: drop --max-concurrent or --profile")
     if missing := options.unset_variables(args.secret, environ):
         raise ConfigurationError(f"--secret names unset variables: {', '.join(missing)}")
@@ -541,7 +544,7 @@ async def configure(args: argparse.Namespace, settings: Settings, environ: Mappi
     if args.transport == "http" and token is None and not is_loopback(args.host):
         raise ConfigurationError(f"set {TOKEN_VARIABLE} to serve on {args.host}; without it only loopback is allowed")
     return ServerConfig(
-        browser_api_key=options.browser_key(settings, args.cloud),
+        browser_api_key=options.browser_key(settings, cloud),
         chrome=chrome,
         cloud_profile=args.cloud_profile,
         ceilings=Limits(max_steps=args.max_steps, max_dollars=args.max_dollars, max_seconds=args.max_seconds),

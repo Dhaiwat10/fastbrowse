@@ -38,6 +38,8 @@ from fastbrowse.models import (
     RunResult,
     SecretResolver,
     Status,
+    StepEvent,
+    Unavailable,
     UntilCheck,
 )
 from fastbrowse.page import BrowserError
@@ -139,6 +141,7 @@ async def run_task(
             llm = llm or settings.llm(client)
             session: BrowserSession | None = None
             result: RunResult | None = None
+            recording: Recording | None = None
             try:
                 async with _browser(
                     browser_api_key,
@@ -157,8 +160,10 @@ async def run_task(
                     )
                     async with session:
                         page = CdpPage(session, config)
-                        agent = Agent(page, jev, llm, config=config, secrets=secrets, on_event=on_event)
                         async with nullcontext() if record is None else Recording(session, record) as recording:
+                            agent = Agent(
+                                page, jev, llm, config=config, secrets=secrets, on_event=_captioned(on_event, recording)
+                            )
                             result = await agent.run(
                                 task,
                                 start=start,
@@ -175,9 +180,11 @@ async def run_task(
                             )
                             if recording is not None:
                                 await recording.show_result(task, result)
-            except BrowserError as exc:
+            except (BrowserError, Unavailable) as exc:
+                # A cloud browser that cannot be started is an outage, not a failed run.
+                status = Status.UNAVAILABLE if isinstance(exc, Unavailable) else Status.ERROR
                 result = result or RunResult(
-                    status=Status.ERROR,
+                    status=status,
                     answer=None,
                     data=None,
                     evidence=(),
@@ -185,9 +192,26 @@ async def run_task(
                     cost=CostBreakdown(),
                     artifacts=session.artifacts if session is not None else (),
                 )
-                result = result.model_copy(update={"status": Status.ERROR, "error": str(exc)})
+                result = result.model_copy(update={"status": status, "error": str(exc)})
+            # Read after the browser closes either way: a failed result card still leaves the finished videos.
+            if recording is not None:
+                result = result.model_copy(update={"recordings": recording.outputs})
     assert result is not None
     return result.model_copy(update={"cost": CostBreakdown(lines=(*result.cost.lines, *browser_cost))})
+
+
+def _captioned(on_event: EventHandler | None, recording: Recording | None) -> EventHandler | None:
+    """Pass each step to the recording as well, which captions it."""
+    if recording is None:
+        return on_event
+
+    async def handle(event: StepEvent | BrowserEvent) -> None:
+        if isinstance(event, StepEvent):
+            recording.caption(event.step)
+        if on_event is not None:
+            await on_event(event)
+
+    return handle
 
 
 @asynccontextmanager

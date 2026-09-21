@@ -24,7 +24,7 @@ from fastbrowse.agent import (
 )
 from fastbrowse.citations import text_fragment
 from fastbrowse.config import Config, ObservationLimits, StallRules, Thresholds
-from fastbrowse.jev import Answer, Evaluation, NoulAnswer, NoulQuestion, Question
+from fastbrowse.jev import Answer, Evaluation, JevError, JevRetriesExhausted, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation
 from fastbrowse.memory import Fact, Notes, evidence_id
 from fastbrowse.models import (
@@ -974,20 +974,28 @@ async def test_the_pages_code_opens_are_capped() -> None:
     assert agent_module._paging(state, here) is None
 
 
-async def test_a_click_that_changed_nothing_is_not_taken_again_from_the_same_page() -> None:
+@pytest.mark.parametrize("outcome", [StepOutcome.EXECUTED, StepOutcome.COVERED])
+async def test_a_click_that_changed_nothing_is_not_taken_again_from_the_same_page(outcome: StepOutcome) -> None:
     search = _button("Search")
     form = observation((search,))
     page = Mock(spec=Page)
-    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=False))
+    page.act = AsyncMock(return_value=ActResult(outcome=outcome, page_changed=False))
+    page.observe = AsyncMock(return_value=form)
     state = await run_state()
     state.authorization = Authorization(irreversible_actions=True)
-    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
-    decision = await decide(ScriptedJev({"operation": "click", "click_target": "search"}), form, context(), Config())
+    jev = ScriptedJev({"operation": "click", "click_target": "search"}, noul=0.0)
+    agent = Agent(page, jev, ScriptedLLM([]))
+    decision = await decide(jev, form, context(), Config())
     await agent._step(state, form, decision)
     assert state.attempts[agent_module._signature(decision, form)].idle
     # From a page that has since changed, the same click is a new try.
     filled = observation((search, field("Return").model_copy(update={"value": "Fri, Oct 23"})))
     assert agent_module._signature(decision, filled) not in state.attempts
+    agent._recover = AsyncMock(side_effect=_Stop(Status.STUCK, "recovering"))
+    with pytest.raises(_Stop, match="recovering"):
+        await agent._loop(state, None, None)
+    agent._recover.assert_awaited_once_with(state, form, "click Search already did nothing here")
+    page.act.assert_awaited_once()
 
 
 def test_a_pager_the_page_marks_rel_next_is_followed_whatever_its_label() -> None:
@@ -1123,6 +1131,29 @@ async def test_a_bot_check_stops_the_run_even_where_a_secret_is_held_for_the_sit
     assert "login_required" not in asked
 
 
+async def test_a_decision_dropped_for_a_redraw_still_asks_the_bot_check_again() -> None:
+    captcha = _at("https://shop.test/login", _button("Verify you are human"))
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=captcha)
+    page.redrawn = AsyncMock(side_effect=[True, False])
+    page.artifacts = ()
+
+    class SlowFirstJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            if not self.requests:
+                await asyncio.sleep(0.1)  # still deciding when the redraw is seen
+            return await super().evaluate(state, questions)
+
+    jev = SlowFirstJev({}, noul=0.9)
+    agent = Agent(page, jev, ScriptedLLM([{"requirements": [], "answer_expected": False}]))
+    agent._outwait = AsyncMock(return_value=False)
+
+    result = await agent.run("Open my orders", limits=Limits(max_steps=3))
+
+    assert result.status is Status.BLOCKED
+    assert all("bot_check" in asked for asked in jev.requests)
+
+
 @pytest.mark.parametrize(
     ("proposed", "opened"),
     [
@@ -1146,6 +1177,21 @@ async def test_a_run_with_no_page_named_works_the_first_address_out_of_the_task(
         assert stopped.value.status is Status.NEEDS_INPUT
     else:
         assert await agent._first_page("What is the top story?", ledger) == opened
+
+
+@pytest.mark.parametrize(("status", "stays"), [(404, False), (200, True), (None, True)])
+async def test_a_shortcut_the_site_does_not_serve_returns_to_the_start_page(status: int | None, stays: bool) -> None:
+    start, guessed = "https://books.test/", "https://books.test/catalogue/mysteryfile_3/index.html"
+    page = Mock(spec=Page)
+    page.navigate = AsyncMock()
+    page.origin = AsyncMock(return_value="https://books.test")
+    page.response_status = AsyncMock(return_value=status)
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([{"url": guessed}]))
+
+    history = await agent._open("Which is the cheapest mystery book?", start, Ledger(Limits()))
+
+    assert bool(history) is stays
+    assert page.navigate.await_args_list[-1].args == ((guessed,) if stays else (start,))
 
 
 @pytest.mark.parametrize(
@@ -1250,24 +1296,24 @@ def test_writing_a_value_a_field_already_holds_is_not_progress() -> None:
     A checkout writes one name into billing and the same name into shipping, and the second write is the whole
     point. A remembered (operation, label, value) key called it a repeat; the field's own value does not.
     """
-    # None, not True: writing into an empty field is not evidence on its own, so `changed` decides. Returning
-    # True here credited three fills that changed nothing and let a PyPI run grind on.
-    assert Agent._edit_progress(*edit("Ada", holds=None)) is None
-    assert Agent._edit_progress(*edit("Ada", holds="")) is None
-    assert Agent._edit_progress(*edit("Ada", holds="Ada")) is False
+    assert Agent._edit_progress(*edit("Ada", holds="Ada"), set()) is False
+    # A field's first value is progress: a checkout's three fields changed no page fingerprint and tripped the
+    # stall recovery. Only the first: every new value credited let a PyPI run grind on one search box.
+    assert Agent._edit_progress(*edit("Ada", holds=None), set()) is True
+    assert Agent._edit_progress(*edit("Ada", holds=""), {"f"}) is None
     # A corrected value is not vetoed, even though the field is not empty.
-    assert Agent._edit_progress(*edit("Ada", holds="Adz")) is None
+    assert Agent._edit_progress(*edit("Ada", holds="Adz"), {"f"}) is None
 
 
 def test_a_secret_is_compared_by_the_length_the_page_reveals() -> None:
     """A password's value never leaves the page: only bullets of its length are observed."""
-    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 7, secret=True)) is False
-    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 4, secret=True)) is None
+    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 7, secret=True), set()) is False
+    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 4, secret=True), {"f"}) is None
 
 
 def test_an_upload_is_judged_by_the_page_not_by_a_value() -> None:
     """A file input's value is not the file, so every upload after the first read as the same nothing."""
-    assert Agent._edit_progress(*edit("a.pdf", holds=None, operation=Operation.UPLOAD)) is None
+    assert Agent._edit_progress(*edit("a.pdf", holds=None, operation=Operation.UPLOAD), set()) is None
 
 
 async def test_same_text_can_be_read_for_a_new_document_or_new_requirement() -> None:
@@ -1356,3 +1402,27 @@ async def test_a_link_sharing_another_links_start_is_still_redacted() -> None:
     answer, public = agent._public_answer(ComposedAnswer(answer="", linked_answer=body, claims=(), citations=cited))
     assert "alpha" not in answer
     assert all(p.deep_link in answer for p in public)
+
+
+@pytest.mark.parametrize(
+    ("failure", "status"),
+    [
+        (JevRetriesExhausted("Jev request failed; last: HTTP 503", seconds=1.0, unaccounted_requests=0), "unavailable"),
+        (JevError("invalid answer"), "error"),
+    ],
+)
+async def test_a_provider_outage_ends_the_run_apart_from_a_failure(failure: JevError, status: str) -> None:
+    """The eval harness runs an unavailable run again; an error is the agent's own failure and counts."""
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=_at("https://shop.test/", _button("Buy")))
+    page.artifacts = ()
+
+    class DownJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            raise failure
+
+    agent = Agent(page, DownJev({}), ScriptedLLM([{"requirements": [], "answer_expected": False}]))
+
+    result = await agent.run("Buy it", limits=Limits(max_steps=2))
+
+    assert result.status == status

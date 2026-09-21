@@ -29,7 +29,7 @@ jobs:
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           python-version: "${{ matrix.python }}"
-      # The hosted-arm eval imports browser_use_sdk and the MCP server imports mcp; without the extras, ty
+      # The browser-use arm eval imports browser_use_sdk and the MCP server imports mcp; without the extras, ty
       # sees a different tree than we do.
       - run: uv sync --locked --all-extras
       - run: uv run ruff check .

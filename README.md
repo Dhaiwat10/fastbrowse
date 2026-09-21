@@ -28,42 +28,45 @@ something that was never on the page. Every claim in an answer cites a verbatim 
 
 ![fastbrowse signing in to a shop, adding two products, filling the shipping form and placing the order](docs/assets/demo.gif)
 
+13 steps in 20.9s on local Chrome, shown 1.4x faster with pauses cut.
+
 ### Against Browser Use
 
-Measured on 2026-09-21 with the build released as 0.5.0: the same 14 answer tasks (lookups, sign-ins,
-checkout, Google Flights), three passes each, on the same kind of cloud browser, with no dollar limit.
+Measured on 2026-09-21 with the build released as 0.5.1: the same 14 answer tasks (lookups, sign-ins,
+checkout, Google Flights), three passes each, on the same kind of cloud browser.
 
 | | passed | cost per task | median time |
 |:--|:--|:--|:--|
-| **fastbrowse** | **42/42** | **$0.0042** (median), $0.0091 mean | **20.4s** |
-| Browser Use (hosted) | 40/42 | $0.4163 (median), $0.4433 mean | 24.6s |
+| **fastbrowse** | **42/42** | **$0.0044** (median), $0.0067 mean | **20.4s** |
+| Browser Use agent | 41/42 | $0.5569 (median), $0.6266 mean | 31.4s |
 
-The whole suite cost $0.38 here and $18.62 there. Both hosted failures are Google Flights, where it read
-the page's HTML, found no results table and answered with no price. 0.4.1 scored 41/42 at a $0.0057 median.
+The whole suite cost $0.28 here and $26.32 there. The Browser Use agent's one failure is Google Flights,
+where it read the page's HTML, found no results table and answered with no price.
 
-Median cost ratios by category: 56x for lookups, 58x for checkout and 196x for sign-ins.
+Median cost ratios by category: 65x for lookups, 147x for checkout and 198x for sign-ins.
 Jev selects actions through classification; planning, field text and reading can still require LLM generation.
 
 Task medians show where time went:
 
-| task | fastbrowse | Browser Use (hosted) |
+| task | fastbrowse | Browser Use agent |
 |:--|:--|:--|
-| `saucedemo-checkout` two items, a shipping form and Finish | **53.6s** | 149.5s |
-| `saucedemo-cart` sign in, find a product, add it | **24.7s** | 110.1s |
-| `saucedemo-locked-out` report the site's error rather than claim success | **19.1s** | 117.4s |
-| `expandtesting-login` sign in and confirm the signed-in page | **20.3s** | 130.1s |
-| `internet-login` the same on another practice site | **20.2s** | 40.4s |
+| `saucedemo-checkout` two items, a shipping form and Finish | **38.4s** | 121.5s |
+| `saucedemo-cart` sign in, find a product, add it | **22.3s** | 117.2s |
+| `saucedemo-locked-out` report the site's error rather than claim success | **18.5s** | 127.8s |
+| `expandtesting-login` sign in and confirm the signed-in page | **19.4s** | 89.2s |
+| `internet-login` the same on another practice site | **20.5s** | 119.0s |
+| `google-flights` search a route and date, answer with a price | **69.8s** | 160.2s |
 
-Lookup medians included `pypi-version` at 11.2s, `arxiv-title` at 15.0s and `github-license` at 16.5s,
-where hosted Browser Use is faster on some. Google Flights took 109.3s here, slower than 0.4.1's 71.7s.
+Lookup medians included `arxiv-title` at 11.3s, `pypi-version` at 17.5s and `github-license` at 16.5s,
+where the Browser Use agent is faster on some.
 
-[Every run, what it cost, and how a failure is counted](docs/evals.md#head-to-head-2026-09-21).
+[Every run, what it cost, and how a failure is counted](docs/evals.md#051-2026-09-21).
 
 ### Why fastbrowse, against each kind of agent
 
 - **LLM agents that generate actions** (Browser Use and similar): Jev picks each action from the controls
   that are on the page, so there is no invented selector to retry. A task costs a fraction as much (a lookup,
-  $0.0060 against $0.3313 median across the lookup category), and every claim in the answer links to the
+  $0.0051 against $0.3322 median across the lookup category), and every claim in the answer links to the
   page text it came from.
 - **Choice-model navigators** ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast)): the same
   core technique, with page reading, cited answers, scoped secrets and an authorization gate. On the six
@@ -74,11 +77,14 @@ where hosted Browser Use is faster on some. Google Flights took 109.3s here, slo
 
 ## Try it
 
-Needs [uv](https://docs.astral.sh/uv/) and Chrome (not needed with `--cloud`); uv fetches Python itself (3.13 or newer).
+Needs [uv](https://docs.astral.sh/uv/); uv fetches Python itself (3.13 or newer). Runs use a
+[Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`) by default: it passes bot checks
+a fresh local Chrome fails. Local Chrome is fully supported with `--local`.
 
 ```sh
 export AI_GATEWAY_API_KEY=...   # or TYPESAFE_API_KEY, for Jev
 export OPENROUTER_API_KEY=...   # for the LLM that plans and reads
+export BROWSER_USE_API_KEY=...  # the cloud browser; or pass --local to use Chrome
 uvx fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
 
@@ -91,7 +97,7 @@ To work on fastbrowse itself:
 ```sh
 git clone https://github.com/agent-labs-dev/fastbrowse.git && cd fastbrowse
 uv sync --all-extras   # the extras carry mcp and browser_use_sdk, which the tests and evals import
-cp .env.example .env
+cp .env.example .env   # then fill in the keys, BROWSER_USE_API_KEY included, or pass --local
 uv run fastbrowse "What is the title of the top story right now?" --start https://news.ycombinator.com/
 ```
 
@@ -101,17 +107,17 @@ the quotes behind the answer, and cost by component.
 | Flag | Effect |
 |:--|:--|
 | `--start URL` | the page to open first; worked out from the task when omitted |
-| `--cloud` | use a [Browser Use Cloud](https://cloud.browser-use.com) browser (`BROWSER_USE_API_KEY`). Prints a URL to watch it live |
-| `--headed` | show the local Chrome window |
-| `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in |
-| `--cloud-profile ID` | run on a Browser Use Cloud profile, signed in as whoever set it up (needs `--cloud`) |
+| `--local` | use local Chrome instead of a Browser Use Cloud browser. Cloud is the default: it passes bot checks a fresh Chrome fails, and prints a URL to watch the run live |
+| `--headed` | show the local Chrome window (implies `--local`) |
+| `--profile DIR` | keep the local Chrome profile in `DIR`, so a site signed into there stays signed in (implies `--local`) |
+| `--cloud-profile ID` | run on a Browser Use Cloud profile, signed in as whoever set it up |
 | `--authorize` | allow submit, pay, delete and send; without it the run stops at `needs_confirmation` first |
 | `--secret NAME=ENV_VAR[@ORIGIN]` | let the agent type `$ENV_VAR` on the declared origin, or the `--start` origin if omitted; models only see `NAME`. An explicit origin needs no `--start` |
 | `--bitwarden ITEM` | match the vault login's saved URIs against `--start`, then allow its `username` and `password` only on that start origin |
 | `--max-steps N`, `--max-dollars N` | bound steps and model spend; defaults are 60 steps and no dollar cap. Cloud browser charges are added when it stops |
 | `--downloads DIR` | keep downloaded files |
 | `--json` | full result instead of the answer |
-| `--record FILE` | save an MP4 of the tab ending on the answer, time and cost (needs `ffmpeg`), e.g. `recordings/demo.mp4`, which git ignores. It shows what the pages showed, so watch it before sharing |
+| `--record FILE` | save an MP4 of the tab, each step captioned, ending on the answer, time and cost (needs `ffmpeg`; the captions need its libass), e.g. `recordings/demo.mp4`, which git ignores; `demo.plain.mp4` beside it has no captions. It shows what the pages showed, so watch it before sharing |
 
 ```sh
 export SAUCE_PASSWORD=secret_sauce
@@ -135,7 +141,7 @@ browser of their own; the run inherits the cookies and no model is shown a crede
 
 ```sh
 uv run fastbrowse "Add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
-  --start https://www.amazon.com/ --cloud --cloud-profile prof_1234
+  --start https://www.amazon.com/ --cloud-profile prof_1234
 ```
 
 Or from your vault, with the [Bitwarden CLI](https://bitwarden.com/help/cli/) unlocked. The item's saved URIs
@@ -171,6 +177,7 @@ The exit code is 0 only for `complete`.
 | `stuck` | recovery ran out without reaching a page state the run had not seen |
 | `budget_exceeded` | a step, call, time or dollar limit was reached |
 | `observation_limit` | the page or required evidence cannot fit the configured prompt budget |
+| `unavailable` | a model or browser provider stayed unavailable through every retry; the same run later may pass |
 | `error` | a model or browser failure |
 
 ## How it works
@@ -186,14 +193,14 @@ More in [docs/design.md](docs/design.md).
 
 ## How it compares
 
-| | hosted Browser Use | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | fastbrowse |
+| | Browser Use agent | [jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | fastbrowse |
 |:--|:--|:--|:--|
 | Choosing an action | LLM generates from a screenshot | Jev picks from indexed controls | Jev picks from indexed controls |
 | Returns | an answer | `DONE` or `BLOCKED` | an answer with quotes, or why it stopped |
 | Reads pages | yes | no | yes, every claim cited |
 | Signing in | yes | password fields excluded | `--secret` or a Bitwarden vault item; models see names only |
 | Irreversible actions | not gated | not gated | stop unless `--authorize` |
-| Browser | cloud | local Chrome, your profile | local Chrome or cloud |
+| Browser | cloud | local Chrome, your profile | cloud by default, or local Chrome with `--local` |
 
 jev-ultrafast is Browser Use's navigation agent; fastbrowse
 shares its core techniques. Its column describes `main` as of 2026-09-18.
@@ -279,7 +286,7 @@ The answer contains numbered Markdown links. MCP's `citations` list contains `qu
 run's evidence; it does not expose the Python `Citation` ids, requirement ids or deep-link fields.
 
 ```sh
-claude mcp add fastbrowse -e OPENROUTER_API_KEY=... -e AI_GATEWAY_API_KEY=... \
+claude mcp add fastbrowse -e OPENROUTER_API_KEY=... -e AI_GATEWAY_API_KEY=... -e BROWSER_USE_API_KEY=... \
   -- uvx --from 'fastbrowse[mcp]' fastbrowse-mcp --max-dollars 0.25
 ```
 
@@ -291,7 +298,7 @@ For a client configured by JSON, such as Claude Desktop:
     "fastbrowse": {
       "command": "uvx",
       "args": ["--from", "fastbrowse[mcp]", "fastbrowse-mcp"],
-      "env": { "OPENROUTER_API_KEY": "...", "AI_GATEWAY_API_KEY": "..." }
+      "env": { "OPENROUTER_API_KEY": "...", "AI_GATEWAY_API_KEY": "...", "BROWSER_USE_API_KEY": "..." }
     }
   }
 }
@@ -301,7 +308,7 @@ The server's flags decide what a calling model may do; a call can ask for less, 
 
 | Flag | Effect |
 |:--|:--|
-| `--cloud`, `--headed`, `--profile DIR`, `--downloads DIR` | as for the CLI, fixed for every call |
+| `--local`, `--headed`, `--profile DIR`, `--downloads DIR` | as for the CLI, fixed for every call |
 | `--cloud-profile ID` | every call runs signed in as that cloud profile; a calling model cannot choose it |
 | `--allow-authorize` | let a call pass `authorize` to go through irreversible actions; without it they always stop at `needs_confirmation` |
 | `--secret NAME=ENV_VAR@ORIGIN` | typed when a call's start page is on `ORIGIN` (`https://*.site.com` covers its hosts); the model sees `NAME` only |
@@ -330,18 +337,18 @@ seconds to minutes, so raise the client's tool timeout if it has one (`MCP_TOOL_
 ## Evals and development
 
 ```sh
-uv sync --all-extras                                         # the hosted-arm SDK too, which ty checks
+uv sync --all-extras                                         # the Browser Use SDK too, which ty checks
 uv run pre-commit install                                    # ruff and ty before each commit
 uv run python -m fastbrowse.evals.runner                     # local fixtures, about $0.005 a task
 uv run --extra browser-use python -m fastbrowse.evals.live                     # live head-to-head, 8 at a time
-uv run --extra browser-use python -m fastbrowse.evals.live --arms fast        # ours alone
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse        # ours alone
 uv run --extra browser-use python -m fastbrowse.evals.live --suite heldout   # the never-debugged split
 uv run ruff format . && uv run ruff check . && uv run ty check && uv run pytest
 uv run python scripts/no_slop.py && uv run vale sync && uv run vale README.md CHANGELOG.md AGENTS.md docs src scripts tests
 ```
 
 Grades use recorded requests, API truth, final page state or captured quotes where the arm exposes them.
-Hosted Browser Use exposes answer text only, which is checked against task truth. See [docs/evals.md](docs/evals.md),
+The Browser Use agent exposes answer text only, which is checked against task truth. See [docs/evals.md](docs/evals.md),
 [docs/design.md](docs/design.md), and [docs/jev.md](docs/jev.md) for every Jev assumption checked against
 Typesafe's documentation.
 

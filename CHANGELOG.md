@@ -11,8 +11,45 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A decision the page redraws under is dropped at once.** While Jev decides and gates a click, the run watches
+  the controls on offer; if one changes, as Google Flights' date picker does when its prices arrive late, it
+  decides again on the settled page instead of clicking into a stale refusal.
+- **A guessed shortcut the site does not serve is skipped.** A direct address that answers 4xx/5xx sends the
+  run back to its start page instead of reading an error page and spending a BACK to leave it.
+- **Runs use a Browser Use Cloud browser by default** (`BROWSER_USE_API_KEY`). `--local` runs local Chrome;
+  `--headed`, `--profile`, `FASTBROWSE_HEADED` and `FASTBROWSE_PROFILE` imply it. `--cloud` is removed.
+  `--cloud-profile` with local Chrome is refused at startup.
+- **A failure says what happened.** Each retry logs the call, the provider's status and error, and the
+  backoff; a call that gives up names how many requests failed, over how long, and the last cause. Evals
+  lead every failed run with how it ended, and print which providers (and whether a backup) they use.
+- **`unavailable` is its own status.** A run that ends because a model or browser provider stayed unavailable
+  through every retry reports `unavailable` rather than `error`: nothing about the task failed. The live evals
+  run such a run again, so a published result is the agent's own.
+- **An error never quotes a key.** Error text built from a provider's response omits the values validation
+  rejected and scrubs the key wherever it appears, including a model's own JSON keys.
+- **A browser that stops answering is an outage; a slow one is not.** A CDP command with no reply after 60s asks
+  the browser whether it is still there, and keeps waiting if it answers. Only a browser that does not ends the
+  run `unavailable`, where before a lost cloud browser could leave it waiting forever.
+- **Eval arms are named for their agent:** `--arms fastbrowse jev-ultrafast browser-use`.
+- **Recordings are captioned and kept plain beside them** (`<name>.plain.mp4`). Captions are timed from the
+  video's first frame; an ffmpeg without libass still writes both videos, uncaptioned, and a failed write
+  leaves an earlier recording at the same path intact.
+- **Clicks are safer on covered controls.** A covered control is clicked at an exposed edge only when no
+  other control (a row's own Delete button) sits under that point; a hover-only region inside a button does not
+  count as one. A select the page reverts is a failed step.
 - **A recording ends on a readable answer.** The closing card shows each citation as a number beside the
   claim and lists the cited site and quote underneath, instead of the raw text-fragment link.
+- **A run reports where its recording went.** `RunResult.recordings` lists the videos written; the CLI prints
+  `recorded: <paths>` or `not recorded`, and prints warnings to stderr.
+- **Local Chrome has no password popups.** Every launch switches off Chrome's password manager and leak
+  detection, in a kept `--profile` too; a kept profile whose preferences cannot be read is a `BrowserError`.
+- **Finishing is judged more carefully.** A lookup that has its answer ends rather than clicking on; a search
+  the task only asks to run is a requirement to act on; the verifier confirms requirements one by one, sees the
+  controls that are set and the ones the done check doubted, and a narrowing requirement needs its filter
+  applied rather than matching rows.
+- **Pages are read when they have settled.** Navigation waits for the loaded page's DOM to go quiet; a
+  transparent checkbox styled by its ancestors is offered; an `aria-disabled="false"` added during hydration is
+  not a new control.
 
 ## [0.5.0] - 2026-09-21
 

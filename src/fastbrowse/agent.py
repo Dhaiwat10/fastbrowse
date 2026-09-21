@@ -8,15 +8,14 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
 
 from pydantic import BaseModel, Field, JsonValue
 
-from fastbrowse.citations import text_fragment
+from fastbrowse.citations import ANSWER_LINK, text_fragment
 from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.effects import SETTING_ROLES, effect, state_key
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
@@ -43,6 +42,7 @@ from fastbrowse.models import (
     StepOutcome,
     StepResult,
     TripwireMode,
+    Unavailable,
     UntilCheck,
 )
 from fastbrowse.page import (
@@ -98,6 +98,8 @@ _INTERSTITIAL_SECONDS = 12.0
 # loads in one to two, so a proposal later than this is an outlier costing more than it saves.
 _SHORTCUT_GRACE_SECONDS = 1.0
 _INTERSTITIAL_POLL_SECONDS = 0.5
+_REDRAW_WATCH_SECONDS = 10.0
+"""Longer than deciding takes: a watch ends with the work it watches, and this only bounds a stuck one."""
 _NOT_ACTING = frozenset({Operation.READ, Operation.DONE})
 _REPEATS_BEFORE_CYCLE = 2
 """Times one action may be taken from one page and still count as progress. Scrolling is exempt: a long page
@@ -111,9 +113,6 @@ _IDLE_CHECKED = frozenset({Operation.CLICK, Operation.ENTER})
 alone, which leaves the DOM as it was, so it is not judged by the DOM."""
 
 logger = logging.getLogger(__name__)
-
-# A cited claim's link as the composer writes it: `[3](<https://page#:~:text=...>)`.
-_ANSWER_LINK = re.compile(r"\]\(<([^>]*)>\)")
 
 type _Prepared = ComposedAnswer | asyncio.Task[Generation[ComposedAnswer]] | None
 """An answer ready before conclusion: the reader's facts Jev accepted as written, or a composer in flight."""
@@ -191,6 +190,9 @@ class _RunState:
     directed: tuple[Operation, str | None] | None = None
     """The operation and control id recovery named, taken when Jev is still unsure of the next step."""
     unchanged: int = 0
+    written: dict[str, set[str]] = field(default_factory=dict[str, set[str]])
+    """Controls a fill or select has written, by document, so only a field's first new value counts as progress by
+    itself. A new document restarts control ids, and its fields would otherwise inherit the last page's writes."""
     recoveries: int = 0
     recovered_at: int = 0
     """`len(history)` when a tripwire last recovered the run. Evidence a recovery already acted on is
@@ -223,6 +225,8 @@ class _RunState:
     """Next pages opened by code this run."""
     first_url: str | None = None
     """The first page the run looked at, which is what a task's "this page" means once the run has moved on."""
+    redecided: bool = False
+    """A decision was dropped because the page redrew under it, so nothing is watched until an action is taken."""
     continuing: set[str] = field(default_factory=set[str])
     """Requirements the reader said range over a list that goes on past the page it read. A scalar choice cannot
     answer one of those, so it is not asked about them again on the next page."""
@@ -313,7 +317,10 @@ class Agent:
         except (ObservationTooLarge, NotesTooLarge) as error:
             return self._result(state, ledger, Status.OBSERVATION_LIMIT, error=str(error))
         except (JevError, LLMError, BrowserError) as error:
-            return self._result(state, ledger, Status.ERROR, error=self._redactor.redact(str(error))[:500])
+            message = self._redactor.redact(str(error))[:500]
+            trace("run_error", kind=type(error).__name__, step=len(state.steps) if state else 0, error=message)
+            status = Status.UNAVAILABLE if isinstance(error, Unavailable) else Status.ERROR
+            return self._result(state, ledger, status, error=message)
         finally:
             # A run can end before it ever needed the plan, and a plan still being written would bill it.
             if planning is not None:
@@ -349,8 +356,13 @@ class Agent:
             # bot check is asked on every page a secret covers too.
             fresh = page != state.last_page
             context = self._context(state, secrets, check_login=fresh and not secrets, check_bot=fresh)
+            decision = await self._unless_redrawn(
+                state, decide(self._jev, observation, context, self._config, ledger=state.ledger), observation, None
+            )
+            if decision is None:
+                continue
+            # Only an answered decision has asked the page's sign-in and bot questions; a dropped one asked nothing.
             state.last_page = page
-            decision = await decide(self._jev, observation, context, self._config, ledger=state.ledger)
             bot_check = (decision.bot_check or 0.0) > self._config.thresholds.bot_check_above
             if bot_check or (decision.login_required or 0.0) > self._config.thresholds.login_required_above:
                 # A wall offering nothing to act on cannot be signed into. It is a bot check such as PyPI's
@@ -372,14 +384,22 @@ class Agent:
                 decision, uncertain, decided_by = directed, False, Decider.LLM
             if await self._read_before_interaction(state, observation, decision):
                 continue
-            if decision.operation is Operation.CLICK and decision.target is not None and pages_forward(decision.target):
-                plan = await state.await_plan()
-                if _answered(plan, state.notes):
+            pager = (
+                decision.operation is Operation.CLICK and decision.target is not None and pages_forward(decision.target)
+            )
+            # Only a pager waits for the plan: the clicks that set a search up run while it is still being written.
+            plan = await state.await_plan() if pager else state.ready_plan
+            if decision.operation is Operation.CLICK and plan is not None:
+                # A lookup has nothing left to do once it is answered: with the cheapest flight read, Jev went on to
+                # click "Select flight", which the page covered, and the recording showed a failed click after the
+                # answer. A click recovery directed stands, so a DONE the verifier refused is not asked again.
+                lookup = all(r.kind is RequirementKind.INFORMATION for r in plan.requirements)
+                if (pager or (lookup and decided_by is Decider.JEV)) and _answered(plan, state.notes):
                     # Everything asked to be found is evidenced, so another page is wandering: Jev, offered the pager,
                     # kept turning pages through a whole catalogue after the two the task named had been read. DONE
                     # is judged again by `_finish`, which carries on if it does not hold.
                     decision, uncertain, decided_by = _code_decision(Operation.DONE, None), False, Decider.CODE
-                elif not state.read_here and _unread(plan, state.notes):
+                elif pager and not state.read_here and _unread(plan, state.notes):
                     # Turning the page of a list nobody has read loses that page: with the pager in view Jev opened
                     # the next page from the first, and a task over "this page and the next" was answered from the
                     # second and third. Read here first, which also tells code whether the list goes on.
@@ -439,6 +459,37 @@ class Agent:
                     await self._recover(state, observation, _read_exhausted(state))
             except _Unsure as unsure:
                 await self._recover(state, observation, str(unsure))
+
+    async def _unless_redrawn[T](
+        self, state: _RunState, work: Coroutine[None, None, T], observation: Observation, target: Control | None
+    ) -> T | None:
+        """`work`'s result, or None when the page redrew under it: `target`, or with none any control offered.
+
+        A page can draw after it settles, and nothing says it will: picking a day in Google Flights' date picker
+        blanks the prices, the page waits about 400ms with no request, spinner or mutation, and then fetches and
+        draws them. Those prices are the text around the picker's Done button, which authorizes the click, so a
+        Done chosen and gated on the blank picker was refused as stale in nearly every run and decided again.
+        Watching while Jev decides and gates drops the work as soon as it is doomed, and the next decision is made
+        on the settled page. Only one drop per action: a control that never stops changing is still acted on.
+        """
+        if state.redecided:
+            return await work
+        working = asyncio.create_task(work)
+        watching = asyncio.create_task(
+            self._page.redrawn(
+                self._raw_observation or observation, _REDRAW_WATCH_SECONDS, target_id=target.id if target else None
+            )
+        )
+        try:
+            await asyncio.wait({working, watching}, return_when=asyncio.FIRST_COMPLETED)
+            if not working.done() and watching.result():
+                trace("redecide", url=self._redactor.redact(observation.url))
+                state.redecided = True
+                return None
+            return await working
+        finally:
+            await _discard(watching)
+            await _discard(working)
 
     async def _first_page(self, task: str, ledger: Ledger) -> str:
         """The page to begin on when the caller named none.
@@ -501,10 +552,17 @@ class Agent:
             await self._page.navigate(shortcut)
             # `accept` saw only the proposed address; a redirect can still land on another site.
             landed = origin_of(await self._page.origin())
+            status = await self._page.response_status()
         except BrowserError:
-            landed = None
+            landed, status = None, None
         if landed != origin_of(start):
             logger.warning("shortcut %s did not stay on %s; returning to the start page", shortcut, start)
+            await self._page.navigate(start)
+            return []
+        if status is not None and status >= 400:
+            # A proposed address is a guess, and a guess can name a path the site does not serve: books-mystery
+            # opened `mysteryfile_3/`, read a 404 and spent a BACK leaving it, every run. The start page is known good.
+            logger.info("shortcut %s answered HTTP %s; staying on the start page", shortcut, status)
             await self._page.navigate(start)
             return []
         note = f"opened {shortcut} directly instead of clicking there; the start page {start} is one BACK away"
@@ -552,7 +610,12 @@ class Agent:
                 effect_now += f" {_read_exhausted(state)}"
             act = ActResult(outcome=StepOutcome.EXECUTED, page_changed=False, detail=effect_now)
         else:
-            action = await self._action(state, observation, decision, decided_by)
+            action = await self._unless_redrawn(
+                state, self._action(state, observation, decision, decided_by), observation, decision.target
+            )
+            if action is None:
+                return False
+            state.redecided = False
             if action.secret:
                 # Held from the keystrokes on: a page may mirror the value, and only the next reading shows it.
                 self._page.withhold_frames(True)
@@ -565,7 +628,10 @@ class Agent:
             # A value edit answers "was this progress" itself, and its answer beats `changed`: the popup a fill
             # draws IS a page change, so `changed` alone kept crediting the identical re-fill even once the
             # written-value check had stopped doing so. `changed` decides every other operation.
-            edit = self._edit_progress(decision, action)
+            written = state.written.setdefault(observation.document_key, set())
+            edit = self._edit_progress(decision, action, written)
+            if act.outcome is StepOutcome.EXECUTED and edit is not None and decision.target is not None:
+                written.add(decision.target.id)
             progressed = act.outcome is StepOutcome.EXECUTED and (changed if edit is None else edit)
             # Moving between two pages changes the page every time, and a run went round "open the author,
             # back to the list" to its step limit with its stall budget reset at every hop. The same action
@@ -588,7 +654,12 @@ class Agent:
                     progressed = False
                     act = act.model_copy(update={"detail": f"no effect: {done.summary}"})
                 effect_now = done.summary
-            attempt.idle = act.outcome is StepOutcome.EXECUTED and not effective and decision.operation in _IDLE_CHECKED
+            # A covered flight control never dispatched, so it escaped idle memory and was picked again.
+            attempt.idle = (
+                act.outcome in {StepOutcome.EXECUTED, StepOutcome.COVERED}
+                and not effective
+                and decision.operation in _IDLE_CHECKED
+            )
         if changed:
             state.read_here = False
         state.history.append(
@@ -789,9 +860,12 @@ class Agent:
         return tuple(ref.name for ref in self._secrets.available() if secret_allowed(ref, origin))
 
     @staticmethod
-    def _edit_progress(decision: Decision, action: Action) -> bool | None:
-        """Rewriting the observed field value vetoes progress even when the page changes.
-        Other edits, including uploads, return None so the page's effect decides.
+    def _edit_progress(decision: Decision, action: Action, written: Set[str]) -> bool | None:
+        """Rewriting the observed field value vetoes progress even when the page changes, and the first new value
+        a field receives is progress even when the page does not: a page's fingerprint ignores field values, so
+        a three-field checkout form counted three unchanged steps and tripped the stall recovery every run.
+        A later rewrite of a field already written returns None, as do other edits, including uploads, so the
+        page's effect decides; crediting every new value let a run grind on a search box it never submitted.
         """
         if decision.operation not in {Operation.FILL, Operation.SELECT} or decision.target is None:
             return None
@@ -799,7 +873,9 @@ class Agent:
             return None
         # A secret's value never leaves the page; only its length is observed, so that is what to compare.
         held = "\u2022" * len(action.text) if action.secret else action.text
-        return False if decision.target.value == held else None
+        if decision.target.value == held:
+            return False
+        return True if decision.target.id not in written else None
 
     async def _record_step(self, state: _RunState, step: StepResult) -> None:
         state.steps.append(step)
@@ -1357,6 +1433,7 @@ class Agent:
         trace(
             "done_check",
             verdict=check.verdict.value,
+            complete=round(check.complete, 3),
             unmet=list(check.unmet),
             requirements={r.id: r.text for r in state.plan.requirements},
         )
@@ -1391,6 +1468,7 @@ class Agent:
                     await self._screenshots(),
                     state.notes,
                     state.steps,
+                    doubted=check.doubted,
                     config=self._config,
                     ledger=state.ledger,
                 )
@@ -1559,7 +1637,7 @@ class Agent:
             citations.append(public)
         # Every link destination in one pass. Replacing one link at a time rewrote the start of any longer link
         # sharing its prefix, which then no longer matched and kept its percent-encoded secret.
-        answer = _ANSWER_LINK.sub(lambda link: f"](<{links[link.group(1)]}>)", composed.linked_answer)
+        answer = ANSWER_LINK.sub(lambda link: f"](<{links[link.group(1)]}>)", composed.linked_answer)
         return redact(answer), tuple(citations)
 
     def _plan_mark(self, state: _RunState) -> str:

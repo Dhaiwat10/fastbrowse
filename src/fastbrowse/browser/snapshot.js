@@ -19,7 +19,18 @@
   const MAX_HOVER_CHECKS = 400;
   const excerpt = (text, cap) => text.length <= cap ? text :
     `${text.slice(0, cap)} [${text.length - cap} characters omitted]`;
+  // A transparent native checkbox is the one control TodoMVC shows, so only its own opacity is excused: a
+  // transparent ancestor still hides it. Walked by style, not layout box, as a `display: contents` parent
+  // generates no box yet hides nothing.
+  const nativeChoice = e => e.tagName === 'INPUT' && ['checkbox', 'radio'].includes(e.type);
+  const shownThrough = e => {
+    for (let a = e.parentElement ?? e.getRootNode().host; a; a = a.parentElement ?? a.getRootNode().host)
+      if (a.ownerDocument.defaultView.getComputedStyle(a).opacity === '0') return false;
+    return true;
+  };
   const registry = window.__fastbrowse ||= { ids: new WeakMap(), nodes: new Map(), next: 1 };
+  // What was offered to be acted on; `ids` also names hover targets and fingerprinted nodes.
+  registry.controls ||= new WeakSet();
   // A visible loading indicator means the page is still fetching what it will draw, which network idle and a
   // quiet DOM both report as settled: a spinner mutates nothing while it spins. Named classes are a heuristic
   // and deliberately so -- the wait on them is bounded and expires into proceeding, so a false match costs
@@ -44,14 +55,26 @@
   if (mode === 'fingerprint') {
     let hash = 2166136261;
     let loading = false;
+    const hashText = text => {
+      for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+    };
     const include = root => {
       registry.track(root);
       loading ||= [...root.querySelectorAll(LOADING)].some(e => e.checkVisibility({ checkOpacity: true,
         checkVisibilityCSS: true }));
       const text = root.body?.innerText ?? root.textContent ?? '';
-      for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+      hashText(text);
       // innerText omits shadow trees and child documents even when their content is visible.
       for (const e of root.querySelectorAll('*')) {
+        // A filter can change only its checkmark, so text alone reported "Nonstop only" as a no-op.
+        // Field values stay out: the run judges fills by the value it wrote, even when a popup changes.
+        // Only rendered controls: a hidden carousel's aria-selected dots churn on their own and would read as
+        // progress.
+        if (('checked' in e || 'selected' in e || e.hasAttribute('aria-checked') || e.hasAttribute('aria-selected')) &&
+          e.checkVisibility({ checkOpacity: !nativeChoice(e), checkVisibilityCSS: true }) &&
+          (!nativeChoice(e) || shownThrough(e)))
+          hashText(JSON.stringify([e.checked ?? null, e.selected ?? null,
+            e.getAttribute('aria-checked'), e.getAttribute('aria-selected')]));
         if (e.shadowRoot) include(e.shadowRoot);
         if (e.tagName === 'IFRAME' || e.tagName === 'FRAME') {
           let inner = null;
@@ -82,8 +105,21 @@
   // Password and agent-typed secret values never leave the page: only their length is observed.
   const secret = e => e.type === 'password' || e.dataset?.fastbrowseSecret === '1';
   const reveal = e => typeof e.value !== 'string' ? null : secret(e) ? '•'.repeat(e.value.length) : e.value;
-  const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
-    e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+  const visible = e => {
+    // Todo lists paint the checkmark beside a transparent native input without associating a label.
+    // The input still receives clicks; opacity alone must not remove the only control for that row.
+    // A transparent input with a visible label of its own keeps the label as its click target: TodoMVC's
+    // "Mark all as complete" input is 1px and off screen, and only its label can be clicked.
+    const choice = nativeChoice(e) &&
+      e.ownerDocument.defaultView.getComputedStyle(e).pointerEvents !== 'none' &&
+      ![...(e.labels || [])].some(l => l.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+    if (e.closest('[aria-hidden="true"],[inert]') ||
+      !e.checkVisibility({ checkOpacity: !choice, checkVisibilityCSS: true }) || (choice && !shownThrough(e))) return false;
+    if (!choice) return true;
+    const r = e.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && !e.matches(':disabled') && !e.closest('[aria-disabled="true"]');
+  };
+  registry.visible = visible;
   // Styled checkboxes and radios often hide the native input. Its visible label is the click
   // target, but the input still owns the checked/disabled state and must participate in freshness.
   const sourceOf = e => e.tagName === 'LABEL' && ['checkbox', 'radio'].includes(e.control?.type) ? e.control : e;
@@ -173,8 +209,10 @@
     const source = sourceOf(e);
     if (source !== e && (source.matches(':disabled') || source.closest('[aria-disabled="true"],[inert]'))) return null;
     const scope = e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
+    // An absent aria-disabled and "false" both mean enabled. Google Flights adds the "false" as it hydrates, and
+    // the raw attribute turned the run's first click stale.
     return [identity(e), roleOf(e), labelOf(e), reveal(source), source.checked ?? null, e.selectedIndex ?? null,
-      e.readOnly ?? null, e.matches(':disabled'), e.getAttribute('aria-disabled'),
+      e.readOnly ?? null, e.matches(':disabled'), e.getAttribute('aria-disabled') === 'true',
       e.getAttribute('aria-expanded'), e.getAttribute('aria-checked'), e.getAttribute('aria-selected'),
       e.getAttribute('href'), scope?.innerText?.slice(0, GUARD_TEXT_CHARS) || '',
       e.ownerDocument.location.origin, e.ownerDocument.defaultView.performance.timeOrigin, submitSemantics(e),
@@ -191,6 +229,7 @@
     if (!rname || r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth) continue;
     if (rname === 'gridcell' && e.querySelector('button,[role="button"]')) continue;
     const id = identity(e);
+    registry.controls.add(e);
     const base = {
       id, role: rname, label: labelOf(e) || rname, offscreen: y < 0 || y >= innerHeight,
       distance: (y < 0 || y >= innerHeight) ? 1 + Math.abs(y - innerHeight / 2) : 0,
@@ -397,6 +436,8 @@
 
   const guards = {};
   for (const c of controls) guards[c.id] = registry.guard(registry.nodes.get(c.id));
+  // Kept so a later check can ask whether any of these controls changed without sending the guards back.
+  registry.observed = new Map(controls.map(c => [c.id, JSON.stringify(guards[c.id])]));
   const field_state = [...document.querySelectorAll('input,textarea,select')].filter(safe)
     .map(e => [identity(e), reveal(e), e.checked, e.selectedIndex, e.disabled, e.readOnly]);
   // Compare meaning and identity for the page_key fingerprint; geometry is re-resolved just before input.

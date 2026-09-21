@@ -55,14 +55,24 @@ _SELECT_TEXT_JS = (
 _HIT_TEST_JS = (
     "(id => { const e = window.__fastbrowse?.nodes.get(id); "
     "if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled=\"true\"],[inert]') || "
-    "!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return null; "
+    "!window.__fastbrowse.visible(e)) return null; "
     # Scrolling only when the control is not already in full view: a page scroll closes open menus and
     # popups, so centring an option that was already visible dismissed its menu before the click landed.
     "const w = e.ownerDocument.defaultView, v = e.getBoundingClientRect(); "
     "if (v.top < 0 || v.left < 0 || v.bottom > w.innerHeight || v.right > w.innerWidth) "
     "e.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'}); "
-    "const r = e.getBoundingClientRect(); let x = r.x + r.width / 2, y = r.y + r.height / 2; "
-    "if (!r.width || !r.height) return null; "
+    # A control's centre can be covered while its edges remain clickable. Bound the search on wrapped
+    # controls, and check each point through its frames so a parent overlay still prevents dispatch.
+    "const rects = [...e.getClientRects()].map(r => ({left: Math.max(0, r.left), top: Math.max(0, r.top), "
+    "right: Math.min(w.innerWidth, r.right), bottom: Math.min(w.innerHeight, r.bottom)})) "
+    ".filter(r => r.right > r.left && r.bottom > r.top).slice(0, 4); "
+    "if (!rects.length) return null; "
+    "const labels = e.tagName === 'INPUT' && ['checkbox', 'radio'].includes(e.type) ? [...e.labels] : []; "
+    "const ACTIVE = 'a[href],button,input,select,textarea,summary,[contenteditable]:not([contenteditable=false]),"
+    "[role=button],[role=link],[role=checkbox],[role=radio],[role=switch],[role=tab],[role=option],"
+    "[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=combobox],[role=textbox],"
+    "[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem],[role=gridcell]'; "
+    "const hitAt = (x, y) => { "
     # Descend through open shadow roots: the document-level hit is only the outermost host.
     "let node = e, doc = e.ownerDocument; while (true) { "
     "const view = doc.defaultView; "
@@ -70,13 +80,24 @@ _HIT_TEST_JS = (
     "let hit = doc.elementFromPoint(x, y); "
     "while (hit?.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); "
     "if (!inner || inner === hit) break; hit = inner; } "
-    "if (!node.contains(hit)) return 'covered'; "
+    # A control nested inside the target (a row's Delete button, a link or checkbox inside a label) takes the
+    # click itself, so a point is the target's only when no other control sits between it and the hit: one the
+    # snapshot offered, a widget, or a label with its own input. A label and its input are one target. A hover
+    # target is not one: it reveals content but takes no click from its container.
+    "const same = x => x === e || x.control === e || e.control === x; "
+    "const owns = root => { if (!root.contains(hit)) return false; "
+    "for (let x = hit; x !== root; x = x.parentElement) { if (same(x)) return true; "
+    "if (x.matches(ACTIVE) || window.__fastbrowse.controls.has(x) || x.control) return false; } return true; }; "
+    "if (node === e ? !owns(e) && !labels.some(owns) : !node.contains(hit)) return 'covered'; "
     "if (doc === document) break; "
     "node = view.frameElement; if (!node) return null; "
     "const frame = node.getBoundingClientRect(); "
     "x = frame.x + (node.clientLeft + x) * frame.width / node.offsetWidth; "
     "y = frame.y + (node.clientTop + y) * frame.height / node.offsetHeight; doc = node.ownerDocument; } "
-    "return [x, y]; })"
+    "return [x, y]; }; "
+    "for (const r of rects) { for (const [fx, fy] of [[.5, .5], [.25, .25], [.75, .25], [.25, .75], [.75, .75]]) { "
+    "const point = hitAt(r.left + (r.right - r.left) * fx, r.top + (r.bottom - r.top) * fy); "
+    "if (Array.isArray(point)) return point; } } return 'covered'; })"
 )
 
 # A deadline, not a wait: a field with no editor to open settles on the first frame.
@@ -684,7 +705,9 @@ class CdpPage(Page):
             "const opt = [...e.options].find(o => o.label === label && !o.disabled); "
             "if (!opt) return false; e.value = opt.value; "
             "e.dispatchEvent(new Event('input', {bubbles: true})); "
-            "e.dispatchEvent(new Event('change', {bubbles: true})); return true; })"
+            "e.dispatchEvent(new Event('change', {bubbles: true})); "
+            # A change handler can refuse the choice by restoring the previous one.
+            "return e.value === opt.value || (e.selectedOptions[0]?.label ?? ''); })"
             f"({local_id}, {json.dumps(option)})"
         )
         result = await self._evaluate(session_id, script)
@@ -692,6 +715,8 @@ class CdpPage(Page):
             return StepOutcome.STALE, "select target disconnected"
         if result is False:
             return StepOutcome.FAILED, f"no option labelled {option!r}"
+        if result is not True:
+            return StepOutcome.FAILED, f"the page kept {result!r} instead of {option!r}"
         return StepOutcome.EXECUTED, None
 
     async def _key(
@@ -837,6 +862,40 @@ class CdpPage(Page):
             dialog.cancel()
             await asyncio.gather(task, dialog, return_exceptions=True)
 
+    async def redrawn(self, observation: Observation, timeout_seconds: float, *, target_id: str | None = None) -> bool:
+        last = self._last
+        if last is None or last.page_key != observation.page_key or self._session.pending_dialog() is not None:
+            return False
+        if target_id is not None:
+            if (target := last.controls.get(target_id)) is None:
+                return False
+            session_id, ids = target[0], [target[2]]
+        else:
+            session_id = self._session.active_session_id
+            ids = [local_id for sid, _frame, local_id, _guard in last.controls.values() if sid == session_id]
+        if not ids:
+            return False
+        # The comparison `act` makes, `registry.guard` against the guard observed, in the frame that observed it.
+        # A changed or vanished control, or a new document, is a redraw.
+        check = (
+            "(ids => { const r = window.__fastbrowse; if (!r?.observed) return true; "
+            "return ids.some(id => r.observed.has(id) && JSON.stringify(r.guard(r.nodes.get(id))) !== "
+            f"r.observed.get(id)); }})({json.dumps(ids)})"
+        )
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                changed = await self._evaluate(session_id, check)
+            except BrowserError:
+                # A navigation destroys the context mid-check; `act` refuses the old controls on its own.
+                return False
+            if changed:
+                with suppress(BrowserError):
+                    await self._settled_fingerprint(_SETTLE_SECONDS)
+                return True
+            await asyncio.sleep(_SETTLE_POLL_SECONDS)
+        return False
+
     async def screenshot(self) -> bytes:
         """Capture the active tab, activating it only if a background tab produces no frame to capture.
 
@@ -860,11 +919,22 @@ class CdpPage(Page):
         raw = await self._evaluate(self._session.active_session_id, "location.origin")
         return str(raw) if raw is not None else ""
 
+    async def response_status(self) -> int | None:
+        raw = await self._evaluate(
+            self._session.active_session_id,
+            "performance.getEntriesByType('navigation')[0]?.responseStatus ?? null",
+        )
+        # Chrome reports 0 for a document it did not fetch over HTTP, which says nothing about success.
+        return raw if isinstance(raw, int) and raw > 0 else None
+
     async def navigate(self, url: str, load_timeout_seconds: float = 15.0) -> None:
         """Setup helper (tests, initial task URL): navigate the active tab and wait until its document is usable.
 
         Waiting for `complete` also waits on every image and tracker, which behind a proxy can outlast the page
-        becoming interactive; observation settles the rest.
+        becoming interactive, so the wait is for an interactive document whose DOM has gone quiet instead. An
+        interactive document can still be hydrating: Google Flights rewrote the text around its first control
+        after the first observation, so the run's first click was refused as stale, and a read of a results page
+        still "Loading results" had to be taken twice.
         """
         session_id = self._session.active_session_id
         # A cloud browser's proxy drops a first connection now and then, or leaves a document loading, and a run
@@ -879,6 +949,9 @@ class CdpPage(Page):
                 failure = error if _NET_ERROR.fullmatch(error) else "NavigationError"
                 continue
             if await self._ready(session_id, load_timeout_seconds):
+                # Unsettled by the deadline is still a usable page, and a redirect destroys the promise mid-wait.
+                with suppress(BrowserError):
+                    await self._settled_fingerprint(_SETTLE_SECONDS)
                 return
             failure = "TimeoutError"
         raise BrowserError(f"Page.navigate failed ({failure})")

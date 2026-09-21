@@ -219,6 +219,14 @@ class Page(Protocol):
         """Dispatch at most once. Returns STALE or COVERED without dispatching when guards fail."""
         ...
 
+    async def redrawn(self, observation: Observation, timeout_seconds: float, *, target_id: str | None = None) -> bool:
+        """Whether `target_id`, or with none any control `observation` offered, changed within `timeout_seconds`.
+
+        `act` refuses a control that changed since it was observed, so work deciding on it is already spent. A change
+        is reported once the page has settled after it, ready to be observed again.
+        """
+        ...
+
     async def screenshot(self) -> bytes: ...
 
     def withhold_frames(self, withheld: bool) -> None:
@@ -226,3 +234,7 @@ class Page(Protocol):
         ...
 
     async def origin(self) -> str: ...
+
+    async def response_status(self) -> int | None:
+        """The HTTP status the current document was served with, or None when the browser does not say."""
+        ...

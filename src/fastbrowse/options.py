@@ -11,8 +11,24 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastbrowse.clients.environment import Settings
+from fastbrowse.clients.environment import ConfigurationError, Settings
 from fastbrowse.models import LocalChrome, StepResult
+
+
+def cloud(local: bool, chrome: LocalChrome, cloud_profile: str | None) -> bool:
+    """Browser Use Cloud unless the operator asked for local Chrome: `--local`, or a headed window or kept profile,
+    which only local Chrome has, whether from its flag or from FASTBROWSE_HEADED / FASTBROWSE_PROFILE.
+
+    Cloud is the default: its browsers pass bot checks a fresh local Chrome fails, and they carry none of a desktop
+    Chrome's own interface (see `_quiet_password_manager`).
+    """
+    on_cloud = not (local or chrome.headed or chrome.profile is not None)
+    if cloud_profile is not None and not on_cloud:
+        raise ConfigurationError(
+            "--cloud-profile needs the cloud browser: drop it, or drop --local, --headed and --profile "
+            "(and FASTBROWSE_HEADED / FASTBROWSE_PROFILE)"
+        )
+    return on_cloud
 
 
 def browser_key(settings: Settings, cloud: bool) -> str | None:

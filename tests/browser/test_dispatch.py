@@ -9,11 +9,215 @@ import pytest
 from fastbrowse.agent import Agent
 from fastbrowse.browser import BrowserSession, CdpPage
 from fastbrowse.browser import page as page_module
+from fastbrowse.effects import effect
 from fastbrowse.models import Operation, StepOutcome
 from fastbrowse.page import Action, BrowserError
 from tests.browser.test_browser import eval_value, find, observe_until, wait_until
 from tests.test_policy import ScriptedJev
 from tests.test_retrieval import ScriptedLLM
+
+
+@pytest.mark.parametrize("covered", [False, True])
+@pytest.mark.parametrize("nested", ["document", "shadow", "iframe"])
+async def test_click_uses_an_exposed_point_but_never_passes_through_a_cover(
+    page: CdpPage, browser_session: BrowserSession, main_site: str, covered: bool, nested: str
+) -> None:
+    """Flight rows had a covered centre even when another part of the same control was exposed."""
+    await page.navigate(f"{main_site}/dispatch.html")
+    if nested == "iframe":
+        await eval_value(
+            browser_session,
+            browser_session.active_session_id,
+            "document.body.innerHTML = '<iframe width=700 height=300 src=/dispatch.html></iframe>'",
+        )
+        await observe_until(page, "One way")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "window.fixtureRoot = "
+        + {
+            "document": "document",
+            "iframe": "document.querySelector('iframe').contentDocument",
+            "shadow": "document.body.appendChild(document.createElement('div')).attachShadow({mode: 'open'})",
+        }[nested]
+        + "; "
+        + (
+            "fixtureRoot.append(...document.querySelectorAll('style, #target, #decoy, #cover')); "
+            if nested == "shadow"
+            else ""
+        )
+        + "const cover = fixtureRoot.querySelector('#cover'); cover.style.display = 'block'; "
+        + ("" if covered else "cover.style.cssText += 'left:130px;top:90px;width:40px;height:20px'; ")
+        + "window.clickedAt = null; fixtureRoot.querySelector('#target').addEventListener('click', "
+        "e => window.clickedAt = [e.clientX, e.clientY]);",
+    )
+    before = await page.observe()
+    target = find(before, "One way")
+    result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), before)
+    point = await eval_value(browser_session, browser_session.active_session_id, "window.clickedAt")
+    after = await page.observe()
+    if covered:
+        assert result.outcome is StepOutcome.COVERED and not result.page_changed
+        assert point is None
+        assert find(after, "One way").selected is False
+    else:
+        assert result.outcome is StepOutcome.EXECUTED and result.page_changed
+        assert point == [105, 90]
+        assert find(after, "One way").selected is True
+        assert effect(before, after, target).set_something
+
+
+@pytest.mark.parametrize(
+    "nested",
+    [
+        "<button>Delete</button>",
+        "<label><input type=checkbox>Archive</label>",
+        "<div role=gridcell>Cell</div>",
+    ],
+)
+async def test_exposed_edge_belonging_to_a_nested_control_is_not_the_target(
+    page: CdpPage, browser_session: BrowserSession, main_site: str, nested: str
+) -> None:
+    """A covered row whose exposed edges are its own Delete button must not have Delete pressed for it."""
+    await page.navigate(f"{main_site}/dispatch.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "const row = document.createElement('div'); row.id = 'target'; row.setAttribute('role', 'option'); "
+        "row.style.cssText = getComputedStyle(document.getElementById('target')).cssText; "
+        "row.textContent = 'One way'; document.getElementById('target').replaceWith(row); "
+        f"row.insertAdjacentHTML('beforeend', {nested!r}); "
+        "row.lastElementChild.style.cssText = 'position:absolute;inset:0;margin:0'; "
+        "const cover = document.getElementById('cover'); cover.style.display = 'block'; "
+        "cover.style.cssText += 'left:130px;top:90px;width:40px;height:20px';",
+    )
+    before = await page.observe()
+    result = await page.act(Action(operation=Operation.CLICK, target_id=find(before, "One way").id), before)
+    assert result.outcome is StepOutcome.COVERED
+    assert await eval_value(browser_session, browser_session.active_session_id, "window.clicks") == []
+
+
+async def test_transparent_checkbox_filling_its_label_is_the_labels_target(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    await page.navigate(main_site)
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        'document.body.innerHTML = \'<label style="position:relative;display:inline-block;padding:12px">'
+        'Direct service<input type=checkbox style="opacity:0;position:absolute;inset:0;margin:0"></label>\'; true',
+    )
+    obs = await page.observe()
+    result = await page.act(Action(operation=Operation.CLICK, target_id=find(obs, "Direct service").id), obs)
+    assert result.outcome is StepOutcome.EXECUTED
+    assert await eval_value(
+        browser_session, browser_session.active_session_id, "document.querySelector('input').checked"
+    )
+
+
+async def test_hover_target_filling_a_button_does_not_cover_it(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    await page.navigate(main_site)
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.head.insertAdjacentHTML('beforeend', '<style>.tip{display:none}.face:hover .tip{display:block}"
+        "</style>'); document.body.innerHTML = '<button onclick=\"window.pressed = (window.pressed || 0) + 1\" "
+        'style="padding:0"><span class=face style="display:block;padding:12px">Save<span class=tip>'
+        '<img alt="" width=8 height=8 src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></span></span></button>\'; true',
+    )
+    obs = await page.observe()
+    button = next(c for c in obs.controls if c.role == "button")
+    result = await page.act(Action(operation=Operation.CLICK, target_id=button.id), obs)
+    assert result.outcome is StepOutcome.EXECUTED, result.detail
+    assert await eval_value(browser_session, browser_session.active_session_id, "window.pressed") == 1
+
+
+@pytest.mark.parametrize("associated", [False, True])
+async def test_transparent_input_hit_must_be_the_input_or_its_own_label(
+    page: CdpPage, browser_session: BrowserSession, main_site: str, associated: bool
+) -> None:
+    await page.navigate(f"{main_site}/todos.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "const input = document.querySelectorAll('input')[1]; input.id = 'choice'; "
+        "const label = input.nextElementSibling; "
+        "label.style.cssText = 'position:absolute;inset:0;background:white'; "
+        + ("label.htmlFor = 'choice';" if associated else ""),
+    )
+    obs = await page.observe()
+    # An associated visible label is the control itself, named by its text; an unassociated one only covers.
+    target = next(c for c in obs.controls if "walk the dog" in (c.context, c.label))
+    result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), obs)
+    assert result.outcome is (StepOutcome.EXECUTED if associated else StepOutcome.COVERED)
+    assert result.page_changed is associated
+    assert await eval_value(browser_session, browser_session.active_session_id, "input.checked") is associated
+
+
+async def test_link_inside_a_label_does_not_count_as_its_input(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    """A link filling the label takes the click itself; the input never toggles."""
+    await page.navigate(f"{main_site}/todos.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "const input = document.querySelectorAll('input')[1]; input.id = 'choice'; "
+        "input.style.opacity = '1'; const label = input.nextElementSibling; label.htmlFor = 'choice'; "
+        "label.style.cssText = 'position:absolute;inset:0;background:white'; "
+        "label.innerHTML = '<a href=\\'#linked\\' style=\\'display:block;height:100%\\'>walk the dog</a>';",
+    )
+    obs = await page.observe()
+    target = next(c for c in obs.controls if c.input_type == "checkbox" and "walk the dog" in (c.context, c.label))
+    result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), obs)
+    assert result.outcome is StepOutcome.COVERED
+    assert await eval_value(browser_session, browser_session.active_session_id, "[input.checked, location.hash]") == [
+        False,
+        "",
+    ]
+
+
+@pytest.mark.parametrize("nested", ["document", "shadow", "iframe"])
+async def test_fingerprint_tracks_selection_without_counting_text_field_values(
+    page: CdpPage, browser_session: BrowserSession, main_site: str, nested: str
+) -> None:
+    """Checked and selected properties can change without changing any text or DOM attributes."""
+    await page.navigate(f"{main_site}/todos.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.body.innerHTML = '<div></div><iframe></iframe>'; window.fixtureRoot = "
+        + {
+            "document": "document.querySelector('div')",
+            "shadow": "document.querySelector('div').attachShadow({mode: 'open'})",
+            "iframe": "document.querySelector('iframe').contentDocument.body",
+        }[nested]
+        + "; fixtureRoot.innerHTML = '<input type=checkbox><select multiple><option>First</option>' "
+        "+ '<option>Second</option></select><button role=switch aria-checked=false>Nonstop only</button>' "
+        "+ '<button role=option aria-selected=false>One way</button><input type=text>' "
+        "+ '<button hidden role=tab aria-selected=false>Slide 2</button>';",
+    )
+    before = await page._fingerprint()
+    for change in (
+        "fixtureRoot.querySelector('input').checked = true",
+        "fixtureRoot.querySelectorAll('option')[1].selected = true",
+        "fixtureRoot.querySelector('[role=switch]').setAttribute('aria-checked', 'true')",
+        "fixtureRoot.querySelector('[role=option]').setAttribute('aria-selected', 'true')",
+    ):
+        await eval_value(browser_session, browser_session.active_session_id, change)
+        after = await page._fingerprint()
+        assert after != before
+        before = after
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "fixtureRoot.querySelector('[type=text]').value = 'requests'; "
+        "fixtureRoot.querySelector('[role=tab]').setAttribute('aria-selected', 'true')",
+    )
+    # Neither a typed value nor a hidden carousel's selection is progress.
+    assert await page._fingerprint() == before
 
 
 @pytest.mark.parametrize("mode", ["move", "animate", "cover", "relabel"])
@@ -179,3 +383,42 @@ async def test_an_unstable_target_expires_without_a_press(page: CdpPage, monkeyp
     outcome, _ = await page._click_point(("session", "main", 1, ["guard"]), (10.0, 10.0))
     assert outcome is StepOutcome.STALE
     pressed.assert_not_called()
+
+
+async def test_hydration_marking_a_control_enabled_does_not_make_it_stale(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    """Google Flights adds aria-disabled="false" as it hydrates, after the run first observed its controls."""
+    await page.navigate(main_site)
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.body.innerHTML = '<button onclick=\"this.dataset.clicked = 1\">Round trip</button>'; true",
+    )
+    obs = await page.observe()
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.querySelector('button').setAttribute('aria-disabled', 'false'); true",
+    )
+    target = next(c for c in obs.controls if c.label == "Round trip")
+    result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), obs)
+    assert result.outcome is StepOutcome.EXECUTED
+
+
+async def test_select_the_page_refuses_is_not_executed(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    """A change handler that restores the previous option must not read as a first write, which is progress."""
+    await page.navigate(main_site)
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.body.innerHTML = '<label>Plan <select id=plan><option>Free</option><option>Pro</option>"
+        "</select></label>'; document.getElementById('plan').onchange = e => { e.target.value = 'Free'; }; true",
+    )
+    obs = await page.observe()
+    action = Action(operation=Operation.SELECT, target_id=find(obs, "Plan").id, text="Pro")
+    result = await page.act(action, obs)
+    assert result.outcome is StepOutcome.FAILED
+    assert result.detail and "'Free'" in result.detail

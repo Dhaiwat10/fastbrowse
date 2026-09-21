@@ -14,6 +14,7 @@ import pytest
 from fastbrowse.browser.page import CdpPage
 from fastbrowse.browser.session import BrowserSession
 from fastbrowse.config import Config, ObservationLimits
+from fastbrowse.effects import effect
 from fastbrowse.models import Attachment, BrowserConnection, Operation, StepOutcome
 from fastbrowse.page import Action, BrowserError, Control, Observation
 from tests.browser.conftest import RecordingArtifactSink
@@ -362,14 +363,92 @@ async def test_page_exception_is_typed_and_does_not_echo_page_text(
 
 
 @pytest.mark.parametrize("kind", ["radio", "checkbox"])
-async def test_styled_choice_uses_visible_label_and_native_state(
+async def test_transparent_native_choices_keep_todo_context_and_change_only_state(
     page: CdpPage, browser_session: BrowserSession, main_site: str, kind: str
+) -> None:
+    """Unassociated sibling labels left todo toggles absent from the choices offered to the policy."""
+    await page.navigate(f"{main_site}/todos.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        f"document.querySelectorAll('input').forEach(e => e.type = '{kind}')",
+    )
+    before = await page.observe()
+    choices = [c for c in before.controls if c.role == kind]
+    assert [c.context for c in choices] == ["buy oat milk", "walk the dog", "ship fastbrowse 0.5"]
+    assert all(c.label == "Toggle Todo" and c.checked is False for c in choices)
+    target = choices[1]
+    result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), before)
+    assert result.outcome is StepOutcome.EXECUTED and result.page_changed
+    after = await page.observe()
+    assert [c.checked for c in after.controls if c.role == kind] == [False, True, False]
+    assert after.viewport_text == before.viewport_text
+    assert effect(before, after, target).set_something
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "e.style.display = 'none'",
+        "e.style.visibility = 'hidden'",
+        "e.style.width = '0'",
+        "e.parentElement.setAttribute('aria-hidden', 'true')",
+        "e.parentElement.inert = true",
+        "e.parentElement.style.opacity = '0'",
+        "e.disabled = true",
+        "e.parentElement.setAttribute('aria-disabled', 'true')",
+        "e.type = 'text'",
+    ],
+)
+async def test_transparent_choice_exception_does_not_admit_hidden_or_disabled_controls(
+    page: CdpPage, browser_session: BrowserSession, main_site: str, change: str
+) -> None:
+    await page.navigate(f"{main_site}/todos.html")
+    before = await page.observe()
+    target = next(c for c in before.controls if c.context == "walk the dog")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        f"const e = document.querySelectorAll('input')[1]; {change}",
+    )
+    result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), before)
+    assert result.outcome is StepOutcome.STALE
+    assert target.id not in {c.id for c in (await page.observe()).controls}
+    assert not await eval_value(browser_session, browser_session.active_session_id, "e.checked")
+
+
+async def test_transparent_choice_under_a_boxless_parent_is_offered(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    """A `display: contents` parent has no layout box, yet hides nothing."""
+    await page.navigate(f"{main_site}/todos.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.querySelectorAll('input')[1].parentElement.style.display = 'contents'",
+    )
+    assert any(c.context == "walk the dog" for c in (await page.observe()).controls)
+
+
+@pytest.mark.parametrize("kind", ["radio", "checkbox"])
+@pytest.mark.parametrize(
+    "style",
+    [
+        "opacity:0",
+        "display:none",
+        "opacity:0;pointer-events:none",
+        # TodoMVC's "Mark all as complete": only its label can be clicked.
+        "opacity:0;width:1px;height:1px;position:absolute;right:100%",
+    ],
+)
+async def test_styled_choice_uses_visible_label_and_native_state(
+    page: CdpPage, browser_session: BrowserSession, main_site: str, kind: str, style: str
 ) -> None:
     await page.navigate(main_site)
     await eval_value(
         browser_session,
         browser_session.active_session_id,
-        f'document.body.innerHTML = \'<input id=choice type={kind} style="opacity:0">'
+        f'document.body.innerHTML = \'<input id=choice type={kind} style="{style}">'
         "<label for=choice>Direct service</label>'; true",
     )
     obs = await page.observe()
