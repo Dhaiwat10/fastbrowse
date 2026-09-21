@@ -37,7 +37,14 @@ class Status(StrEnum):
     BUDGET_EXCEEDED = "budget_exceeded"
     OBSERVATION_LIMIT = "observation_limit"
     """The page or requirement evidence could not fit the configured input budgets."""
+    UNAVAILABLE = "unavailable"
+    """A model or browser provider stayed unavailable through every retry. Nothing about the task failed; the same
+    run later may pass."""
     ERROR = "error"
+
+
+class Unavailable(RuntimeError):
+    """A provider answered only with retryable statuses, or not at all, until its retries ran out."""
 
 
 class TripwireMode(StrEnum):

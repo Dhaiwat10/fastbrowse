@@ -9,7 +9,7 @@ from time import monotonic
 from typing import assert_never
 
 import httpx
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from fastbrowse.jev import (
     Answer,
@@ -18,6 +18,7 @@ from fastbrowse.jev import (
     JevError,
     JevInputTooLarge,
     JevRetriesExhausted,
+    JevTransportFailed,
     NoulAnswer,
     NoulQuestion,
     Question,
@@ -130,6 +131,12 @@ def describe(response: httpx.Response) -> str:
     text = f"HTTP {response.status_code}{f' {kind}' if isinstance(kind, str) else ''}: "
     text += _scrubbed(response, message)[:300] + (f" (via {upstream})" if isinstance(upstream, str) else "")
     return _scrubbed(response, text)
+
+
+def error_detail(error: Exception) -> str:
+    """An error's text without the values it rejected. Pydantic abbreviates a long value to its two ends, and an
+    abbreviated key no longer matches the exact replacement that scrubs it."""
+    return error.json(include_input=False, include_url=False) if isinstance(error, ValidationError) else str(error)
 
 
 def response_error(response: httpx.Response, detail: str) -> JevError:
@@ -340,11 +347,10 @@ async def post(
     )
     seconds = monotonic() - started
     if response is None:
-        raise JevError(f"Jev transport failed after {usage.history(seconds)}; last: {usage.failures[-1]}")
+        raise JevTransportFailed(f"Jev transport failed after {usage.history(seconds)}; last: {usage.failures[-1]}")
     if response.status_code in RETRYABLE_STATUS:
         raise JevRetriesExhausted(
             f"Jev request failed after {usage.history(seconds)}; last: {describe(response)}",
-            status_code=response.status_code,
             seconds=seconds,
             unaccounted_requests=usage.unaccounted_requests,
         )

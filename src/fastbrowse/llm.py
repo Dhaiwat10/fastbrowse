@@ -5,7 +5,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel
 
-from fastbrowse.models import CostLine, Frozen, LLMPurpose
+from fastbrowse.models import CostLine, Frozen, LLMPurpose, Unavailable
 from fastbrowse.telemetry import Ledger
 
 # Planning and field responses are short; readers and composers pass their larger configured caps.
@@ -26,6 +26,10 @@ class Generation[T: BaseModel](Frozen):
 
 class LLMError(RuntimeError):
     """The model failed to return data matching the schema, or the transport failed."""
+
+
+class LLMRetriesExhausted(LLMError, Unavailable):
+    """A retryable HTTP status or a transport failure outlasted the provider's retry budget."""
 
 
 class LLMClient(Protocol):

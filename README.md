@@ -175,6 +175,7 @@ The exit code is 0 only for `complete`.
 | `stuck` | recovery ran out without reaching a page state the run had not seen |
 | `budget_exceeded` | a step, call, time or dollar limit was reached |
 | `observation_limit` | the page or required evidence cannot fit the configured prompt budget |
+| `unavailable` | a model or browser provider stayed unavailable through every retry; the same run later may pass |
 | `error` | a model or browser failure |
 
 ## How it works

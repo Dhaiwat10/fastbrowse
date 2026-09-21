@@ -22,6 +22,7 @@ fastbrowse must also end with the task's expected status, and jev-ultrafast with
 
 import argparse
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -48,9 +49,10 @@ from fastbrowse.agent import Agent
 from fastbrowse.browser import CdpPage
 from fastbrowse.browser.recording import Recording
 from fastbrowse.clients.environment import load_settings
+from fastbrowse.clients.validation import RETRYABLE_STATUS
 from fastbrowse.evals.live_tasks import TASKS, Category, LiveTask, Outcome
 from fastbrowse.evals.more_tasks import DEV, HELDOUT
-from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, StepEvent
+from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, Status, StepEvent, Unavailable
 from fastbrowse.page import Observation
 from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
@@ -212,7 +214,9 @@ class EvalRow(ArmReport):
     category: str
     at: float
     concurrency: int | None = None
-    status: str | None = None  # a crashed arm reports nothing
+    status: str | None = None  # a crashed arm reports nothing, unless a provider was unavailable
+    retries: int = 0
+    """Runs discarded before this one because a provider stayed unavailable: they say nothing about the agent."""
     correct: bool
     passed: bool
     failure: str | None
@@ -383,6 +387,17 @@ async def ultrafast_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path
 
 
 async def hosted_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path | None) -> tuple[Outcome, ArmReport]:
+    from browser_use_sdk.v3 import BrowserUseError  # an optional extra
+
+    try:
+        return await _hosted_run(task, http, record=record)
+    except BrowserUseError as error:
+        if error.status_code in RETRYABLE_STATUS:
+            raise Unavailable(f"Browser Use {error}") from error
+        raise
+
+
+async def _hosted_run(task: LiveTask, http: httpx.AsyncClient, *, record: Path | None) -> tuple[Outcome, ArmReport]:
     from browser_use_sdk.v3 import AsyncBrowserUse  # an optional extra
 
     client = AsyncBrowserUse(api_key=load_settings().browser_key())
@@ -464,11 +479,13 @@ async def run_arm(
         else:
             outcome, report = await hosted_arm(task, http, record=record)
     except Exception as exc:  # a crashed arm is a failed task, recorded rather than aborting the comparison
+        unavailable = isinstance(exc, Unavailable | httpx.TransportError)
         return EvalRow(
             arm=arm,
             task=task.id,
             category=task.category.value,
             at=at,
+            status=Status.UNAVAILABLE.value if unavailable else None,
             correct=False,
             passed=False,
             failure=f"{type(exc).__name__}: {exc}",
@@ -639,9 +656,17 @@ async def main(argv: list[str]) -> int:
         async with httpx.AsyncClient(timeout=60) as http:
 
             async def one(arm: str, task: LiveTask, record: Path | None) -> EvalRow:
-                async with gate:
-                    row = await run_arm(arm, task, http, Path(downloads), bitwarden=args.bitwarden, record=record)
-                row = row.model_copy(update={"concurrency": args.concurrency})
+                # A provider outage says nothing about the agent, so a run it ended is run again until one ends
+                # on its own, however long that takes; the slot is released while waiting.
+                for retries in itertools.count():
+                    async with gate:
+                        row = await run_arm(arm, task, http, Path(downloads), bitwarden=args.bitwarden, record=record)
+                    if row.status != Status.UNAVAILABLE:
+                        break
+                    wait = min(30 * (retries + 1), 300)
+                    print(f"RETRY {arm:9} {task.id:20} in {wait}s: {_cause(row)}", flush=True)
+                    await asyncio.sleep(wait)
+                row = row.model_copy(update={"concurrency": args.concurrency, "retries": retries})
                 # Trace records hold whatever a component logged, so anything JSON cannot hold is written as text.
                 out.write(row.model_dump_json(fallback=str) + "\n")
                 out.flush()

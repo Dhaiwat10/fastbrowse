@@ -24,7 +24,7 @@ from fastbrowse.agent import (
 )
 from fastbrowse.citations import text_fragment
 from fastbrowse.config import Config, ObservationLimits, StallRules, Thresholds
-from fastbrowse.jev import Answer, Evaluation, NoulAnswer, NoulQuestion, Question
+from fastbrowse.jev import Answer, Evaluation, JevError, JevRetriesExhausted, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation
 from fastbrowse.memory import Fact, Notes, evidence_id
 from fastbrowse.models import (
@@ -1364,3 +1364,27 @@ async def test_a_link_sharing_another_links_start_is_still_redacted() -> None:
     answer, public = agent._public_answer(ComposedAnswer(answer="", linked_answer=body, claims=(), citations=cited))
     assert "alpha" not in answer
     assert all(p.deep_link in answer for p in public)
+
+
+@pytest.mark.parametrize(
+    ("failure", "status"),
+    [
+        (JevRetriesExhausted("Jev request failed; last: HTTP 503", seconds=1.0, unaccounted_requests=0), "unavailable"),
+        (JevError("invalid answer"), "error"),
+    ],
+)
+async def test_a_provider_outage_ends_the_run_apart_from_a_failure(failure: JevError, status: str) -> None:
+    """The eval harness runs an unavailable run again; an error is the agent's own failure and counts."""
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=_at("https://shop.test/", _button("Buy")))
+    page.artifacts = ()
+
+    class DownJev(ScriptedJev):
+        async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+            raise failure
+
+    agent = Agent(page, DownJev({}), ScriptedLLM([{"requirements": [], "answer_expected": False}]))
+
+    result = await agent.run("Buy it", limits=Limits(max_steps=2))
+
+    assert result.status == status

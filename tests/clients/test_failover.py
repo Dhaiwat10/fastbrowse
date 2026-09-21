@@ -162,7 +162,7 @@ async def test_backup_exhaustion_does_not_switch_back(primary: JevSource, monkey
             await client.evaluate("page", QUESTIONS)
         with pytest.raises(JevRetriesExhausted) as second:
             await client.evaluate("page", QUESTIONS)
-    assert first.value.status_code == second.value.status_code == 429
+    assert "HTTP 429" in str(first.value) and "HTTP 429" in str(second.value)
     assert first.value.seconds == 5
     assert first.value.unaccounted_requests == 2
     assert second.value.seconds == 4

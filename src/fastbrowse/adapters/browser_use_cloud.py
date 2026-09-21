@@ -14,7 +14,8 @@ from typing import Self
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from fastbrowse.models import BrowserConnection, CostBasis, CostComponent, CostLine
+from fastbrowse.clients.validation import RETRYABLE_STATUS
+from fastbrowse.models import BrowserConnection, CostBasis, CostComponent, CostLine, Unavailable
 
 API = "https://api.browser-use.com/api/v3"
 
@@ -31,6 +32,10 @@ class _BrowserView(BaseModel):
 
 class BrowserUseCloudError(RuntimeError):
     pass
+
+
+class BrowserUseCloudUnavailable(BrowserUseCloudError, Unavailable):
+    """Browser Use Cloud could not be reached, or answered with a retryable status."""
 
 
 class BrowserUseCloudBrowser:
@@ -137,7 +142,9 @@ class BrowserUseCloudBrowser:
             response = await self._http.request(method, f"{API}{path}", headers=self._headers, json=json)
         except httpx.HTTPError:
             # The request carries the API key header; never let the transport error's request escape.
-            raise BrowserUseCloudError(f"Browser Use Cloud {method} {path} failed") from None
+            raise BrowserUseCloudUnavailable(f"Browser Use Cloud {method} {path} failed") from None
+        if response.status_code in RETRYABLE_STATUS:
+            raise BrowserUseCloudUnavailable(f"Browser Use Cloud {method} {path}: HTTP {response.status_code}")
         if not response.is_success:
             raise BrowserUseCloudError(f"Browser Use Cloud {method} {path}: HTTP {response.status_code}")
         return response

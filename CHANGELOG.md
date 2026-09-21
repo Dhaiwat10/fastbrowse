@@ -17,10 +17,17 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 - **A failure says what happened.** Each retry logs the call, the provider's status and error, and the
   backoff; a call that gives up names how many requests failed, over how long, and the last cause. Evals
   lead every failed run with how it ended, and print which providers (and whether a backup) they use.
+- **`unavailable` is its own status.** A run that ends because a model or browser provider stayed unavailable
+  through every retry reports `unavailable` rather than `error`: nothing about the task failed. The live evals
+  run such a run again, so a published result is the agent's own.
+- **An error never quotes a key.** Error text built from a provider's response omits the values validation
+  rejected and scrubs the key wherever it appears, including a model's own JSON keys.
 - **Recordings are captioned and kept plain beside them** (`<name>.plain.mp4`). Captions are timed from the
-  video's first frame; an ffmpeg without libass still writes both videos, uncaptioned.
+  video's first frame; an ffmpeg without libass still writes both videos, uncaptioned, and a failed write
+  leaves an earlier recording at the same path intact.
 - **Clicks are safer on covered controls.** A covered control is clicked at an exposed edge only when no
-  other control (a row's own Delete button) sits under that point. A select the page reverts is a failed step.
+  other control (a row's own Delete button) sits under that point; a hover-only region inside a button does not
+  count as one. A select the page reverts is a failed step.
 - **A recording ends on a readable answer.** The closing card shows each citation as a number beside the
   claim and lists the cited site and quote underneath, instead of the raw text-fragment link.
 

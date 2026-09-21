@@ -184,8 +184,10 @@ def next_step(status: Status, *, allow_authorize: bool) -> str | None:
             )
         case Status.STUCK | Status.OBSERVATION_LIMIT:
             return "Try a start URL closer to the goal, or a narrower task."
+        case Status.UNAVAILABLE:
+            return "A model or browser provider was unavailable; see error. Call again later."
         case Status.ERROR:
-            return "A model or browser failure; see error. A retry may pass if it was transient."
+            return "A model or browser failure; see error."
 
 
 def output_model(fields: dict[str, OutputField] | None) -> type[BaseModel] | None:

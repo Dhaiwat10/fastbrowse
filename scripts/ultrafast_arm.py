@@ -63,6 +63,10 @@ def systemone_answer(payload: dict[str, Any]) -> tuple[dict[str, Any], float | N
     )
 
 
+class Unavailable(RuntimeError):
+    """The model provider answered only with overload statuses: the harness runs the task again."""
+
+
 class Meter:
     """Every model request's metered dollars; a request whose cost the provider did not report is counted."""
 
@@ -118,10 +122,12 @@ def _gateway(model: Any, key: str, body: dict[str, Any]) -> dict[str, Any]:
         if response.status_code in {429, 529, 503} and attempt < 2:
             time.sleep(0.5 * 2**attempt)
             continue
+        if response.status_code in {429, 529, 503}:
+            raise Unavailable(f"Model provider returned HTTP {response.status_code}; no action executed.")
         if response.is_error:
             raise RuntimeError(f"Model provider returned HTTP {response.status_code}; no action executed.")
         return response.json()
-    raise RuntimeError("Model unavailable")
+    raise Unavailable("Model unavailable")
 
 
 class Screencast:
@@ -243,6 +249,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
                     status = state["status"]
             except Exception as exc:  # the run's failure is its result, recorded rather than raised
                 error = f"{type(exc).__name__}: {exc}"
+                status = "unavailable" if isinstance(exc, Unavailable) else status
             seconds = time.monotonic() - started
             if cast is not None:
                 steps = len(agent.state["decisions"])

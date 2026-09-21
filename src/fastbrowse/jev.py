@@ -5,7 +5,7 @@ from typing import Annotated, Literal, Protocol
 
 from pydantic import Field, JsonValue
 
-from fastbrowse.models import CostLine, Frozen
+from fastbrowse.models import CostLine, Frozen, Unavailable
 
 JEV_MODEL = "jev-1.13.0"
 MAX_CHOICE_OPTIONS = 255
@@ -72,12 +72,15 @@ class JevInputTooLarge(JevError):
     """The provider rejected the request for exceeding its input token limits."""
 
 
-class JevRetriesExhausted(JevError):
+class JevTransportFailed(JevError, Unavailable):
+    """Every attempt failed in transport. Not a provider verdict, so it does not move a run to the backup."""
+
+
+class JevRetriesExhausted(JevError, Unavailable):
     """A retryable HTTP status outlasted the provider's retry budget."""
 
-    def __init__(self, message: str, *, status_code: int, seconds: float, unaccounted_requests: int) -> None:
+    def __init__(self, message: str, *, seconds: float, unaccounted_requests: int) -> None:
         super().__init__(message)
-        self.status_code = status_code
         self.seconds = seconds
         self.unaccounted_requests = unaccounted_requests
 

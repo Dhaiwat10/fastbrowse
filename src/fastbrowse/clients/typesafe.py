@@ -8,6 +8,7 @@ from pydantic import JsonValue
 
 from fastbrowse.clients.validation import (
     RequestUsage,
+    error_detail,
     estimated_cost,
     json_object,
     object_value,
@@ -63,4 +64,4 @@ class TypeSafeJevClient:
                 ).model_copy(update={"seconds": monotonic() - started}),
             )
         except (ValueError, TypeError, OverflowError) as error:
-            raise response_error(response, f"Invalid Jev response ({error})") from None
+            raise response_error(response, f"Invalid Jev response ({error_detail(error)})") from None

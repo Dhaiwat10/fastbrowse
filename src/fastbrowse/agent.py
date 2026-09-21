@@ -42,6 +42,7 @@ from fastbrowse.models import (
     StepOutcome,
     StepResult,
     TripwireMode,
+    Unavailable,
     UntilCheck,
 )
 from fastbrowse.page import (
@@ -314,7 +315,8 @@ class Agent:
         except (JevError, LLMError, BrowserError) as error:
             message = self._redactor.redact(str(error))[:500]
             trace("run_error", kind=type(error).__name__, step=len(state.steps) if state else 0, error=message)
-            return self._result(state, ledger, Status.ERROR, error=message)
+            status = Status.UNAVAILABLE if isinstance(error, Unavailable) else Status.ERROR
+            return self._result(state, ledger, status, error=message)
         finally:
             # A run can end before it ever needed the plan, and a plan still being written would bill it.
             if planning is not None:

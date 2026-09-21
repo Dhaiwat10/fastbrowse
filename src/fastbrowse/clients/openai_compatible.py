@@ -16,13 +16,14 @@ from fastbrowse.clients.validation import (
     body_excerpt,
     describe,
     dollars,
+    error_detail,
     json_object,
     object_value,
     post_with_retry,
     token_count,
     with_discarded,
 )
-from fastbrowse.llm import DEFAULT_MAX_OUTPUT_TOKENS, Generation, LLMError, Message
+from fastbrowse.llm import DEFAULT_MAX_OUTPUT_TOKENS, Generation, LLMError, LLMRetriesExhausted, Message
 from fastbrowse.models import CostBasis, CostComponent, CostLine, LLMPurpose
 from fastbrowse.telemetry import BudgetExceeded, Ledger
 
@@ -164,6 +165,9 @@ class OpenAICompatibleLLM:
         self._models = dict(models)
         self._reasoning_effort = reasoning_effort
 
+    def _scrubbed(self, text: str) -> str:
+        return text.replace(self._api_key, "[api key]") if self._api_key else text
+
     async def _request(
         self, body: dict[str, JsonValue], ledger: Ledger | None, usage: RequestUsage
     ) -> dict[str, JsonValue]:
@@ -180,11 +184,11 @@ class OpenAICompatibleLLM:
             usage=usage,
         )
         if response is None:
-            raise LLMError(
+            raise LLMRetriesExhausted(
                 f"LLM transport failed after {usage.history(monotonic() - started)}; last: {usage.failures[-1]}"
             )
         if response.status_code in RETRYABLE_STATUS:
-            raise LLMError(
+            raise LLMRetriesExhausted(
                 f"LLM request failed after {usage.history(monotonic() - started)}; last: {describe(response)}"
             )
         if not response.is_success:
@@ -251,12 +255,13 @@ class OpenAICompatibleLLM:
                     # An empty completion comes back intermittently (a dropped or refused generation); ask once more.
                     if attempt == 0:
                         continue
-                    raise LLMError(f"Invalid completion envelope: {str(error)[:400]}") from None
+                    raise LLMError(f"Invalid completion envelope: {self._scrubbed(str(error))[:400]}") from None
                 try:
                     data = schema.model_validate_json(content)
                 except ValidationError as error:
-                    # Avoid echoing rejected values: validation paths and reasons are enough to repair the schema.
-                    detail = error.json(include_input=False, include_url=False)
+                    # Paths and reasons are enough to repair the schema. A path is the model's own key, which can
+                    # be anything it read, so it is scrubbed too.
+                    detail = self._scrubbed(error_detail(error))
                     if _cut_off(error):
                         _grow_cap(body, attempt, max_output_tokens)
                         continue

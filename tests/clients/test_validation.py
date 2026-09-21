@@ -146,7 +146,6 @@ async def test_exhausted_status_keeps_timing_usage_and_redacts_the_key(monkeypat
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         with pytest.raises(JevRetriesExhausted) as error:
             await post(http, "https://jev.test/v1", "secret-key", {})
-    assert error.value.status_code == 503
     assert error.value.seconds == 27
     assert error.value.unaccounted_requests == 1
     assert "secret-key" not in str(error.value)

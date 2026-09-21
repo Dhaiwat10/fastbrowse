@@ -34,7 +34,6 @@ class FailoverJevClient:
             except JevRetriesExhausted as backup_error:
                 raise JevRetriesExhausted(
                     str(backup_error),
-                    status_code=backup_error.status_code,
                     seconds=error.seconds + backup_error.seconds,
                     unaccounted_requests=error.unaccounted_requests + backup_error.unaccounted_requests,
                 ) from backup_error

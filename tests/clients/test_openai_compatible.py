@@ -102,19 +102,21 @@ async def test_unknown_price_retains_all_token_counts(first_cost: float | None, 
 
 
 async def test_exactly_one_retry_then_llm_error() -> None:
+    key = "sk-secret-key"
     calls = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(200, json={"choices": [{"message": {"content": '{"wrong":1}'}}]})
+        # A rejected property is named in the error's path, and the model can name one after anything it read.
+        return httpx.Response(200, json={"choices": [{"message": {"content": f'{{"{key}":1}}'}}]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        with pytest.raises(LLMError, match="after one retry"):
+        with pytest.raises(LLMError, match="after one retry") as error:
             await OpenAICompatibleLLM(
-                "key", http=http, base_url="https://llm.test", models={LLMPurpose.PLAN: "planner"}
+                key, http=http, base_url="https://llm.test", models={LLMPurpose.PLAN: "planner"}
             ).generate(LLMPurpose.PLAN, [], Result)
-    assert calls == 2
+    assert calls == 2 and key not in str(error.value)
 
 
 async def test_invalid_image_is_not_silently_dropped() -> None:
