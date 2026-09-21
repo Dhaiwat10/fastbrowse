@@ -101,10 +101,11 @@ _NOT_ACTING = frozenset({Operation.READ, Operation.DONE})
 _REPEATS_BEFORE_CYCLE = 2
 """Times one action may be taken from one page and still count as progress. Scrolling is exempt: a long page
 takes many scrolls, each of which shows something new."""
-_PAGE_OPERATIONS = frozenset({Operation.READ, Operation.SCROLL, Operation.BACK, Operation.ESCAPE})
+_PAGE_OPERATIONS = frozenset({Operation.READ, Operation.SCROLL, Operation.BACK, Operation.ESCAPE, Operation.DONE})
 """Operations on the page rather than a control, which recovery can direct without naming one. A long table's
 answer was off screen, recovery said to read the page twice, and with no control to name the advice was dropped
-and Jev scrolled on until the run stopped stuck."""
+and Jev scrolled on until the run stopped stuck. DONE is the same: a Flights run holding every answer was told
+twice to finish, and each time Jev decided again and stalled; `_finish` still judges a directed DONE."""
 _CYCLE_SHOWN = 4
 """Actions named when a run arrives back at a page state, the most recent last."""
 _IDLE_CHECKED = frozenset({Operation.CLICK, Operation.ENTER})

@@ -638,19 +638,21 @@ async def test_an_exhausted_read_recovers_instead_of_repeating_even_when_jev_is_
     assert state.notes.facts[0].evidence.quote == "Total: $12"
 
 
-async def test_recovery_can_direct_a_read_with_no_control_to_name() -> None:
+@pytest.mark.parametrize("operation", [Operation.READ, Operation.DONE])
+async def test_recovery_can_direct_a_page_operation_with_no_control_to_name(operation: Operation) -> None:
+    # A Flights run holding every answer was told twice to finish; a dropped DONE left Jev to stall until stuck.
     button = Control(id="next", frame_id=None, role="button", label="Next", operations=frozenset({Operation.CLICK}))
     obs = observation((button,))
     page = Mock(spec=Page)
     page.screenshot = AsyncMock(return_value=b"png")
     recovery = {"diagnosis": "the answer is further down", "next_subgoal": "Read the page", "give_up": False}
-    llm = ScriptedLLM([{**recovery, "control": None, "operation": "read"}])
+    llm = ScriptedLLM([{**recovery, "control": None, "operation": operation.value}])
     jev = ScriptedJev({"operation": "scroll"})
     state = await run_state()
     await Agent(page, jev, llm)._recover(state, obs, "uncertain next step (0.47)")
     unsure = await decide(jev, obs, context(), Config())
     followed = _follow_recovery(state, obs, unsure, uncertain=True)
-    assert followed is not None and followed.operation is Operation.READ and followed.target is None
+    assert followed is not None and followed.operation is operation and followed.target is None
 
 
 def _button(label: str) -> Control:
