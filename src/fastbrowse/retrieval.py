@@ -174,7 +174,10 @@ def locate_quote(capture: Capture, source_id: str, quote: str) -> Evidence | Non
 class _ReadClaim(Frozen):
     requirement_id: str | None = None
     text: str
-    source_id: str
+    source_id: str = Field(
+        description="The bracketed label of the Source blocks line the quote comes from, exactly as shown; never an "
+        "evidence id."
+    )
     quote: str
     draws_on: tuple[str, ...] = Field(
         default=(),
@@ -257,7 +260,7 @@ def _read_message(
     )
     content = (
         f"# Question\n{question}\n\n# Requirement ids\n{', '.join(requirement_ids)}\n\n"
-        f"# Capture\nURL: {capture.url}\nSHA256: {capture.sha256}\n"
+        f"# Capture\nURL: {capture.url}\n"
         f"Inaccessible frames: {capture.inaccessible_frames}\n\n"
         f"# Chunk {part.index + 1} of {part.total}\n{part.text}\n\n# Source blocks\n{sources}\n\n"
         "# Collected evidence\n"
@@ -338,7 +341,9 @@ async def read(
                     "does: when the capture holds the complete set being compared (no further pages or "
                     "unloaded results), quote each compared record's value and the winner or total may be "
                     "assigned the requirement id. A count, total or winner must list in draws_on every record "
-                    "it counts or compares, including the contextual facts it relies on. Use evidence ids from "
+                    "it counts or compares, including the contextual facts it relies on. A table row means what "
+                    "its header says: quote the header row too and list it in draws_on of a claim read from a "
+                    "row. Use evidence ids from "
                     "the collected notes' [sha:start:end] labels without brackets. For records quoted earlier "
                     "in this response, use claim:0 for the first claim, claim:1 for the second, and so on. "
                     "Quote the records before the conclusion; never refer to a later claim.\n\n"

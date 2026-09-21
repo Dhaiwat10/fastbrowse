@@ -1248,6 +1248,7 @@ class Agent:
             chars=len(capture.text),
             wanted=[r.id for r in wanted],
             facts_added=len(state.notes.facts) - before,
+            rejected_quotes=outcome.rejected_quotes,
             evidenced=[r.id for r in wanted if state.notes.evidenced(r.id)],
             continues=continues,
         )
