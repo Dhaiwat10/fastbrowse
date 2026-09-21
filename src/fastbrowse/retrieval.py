@@ -154,6 +154,7 @@ def _evidence(capture: Capture, block: Block, start: int, end: int) -> Evidence:
         start=start,
         end=end,
         quote=capture.text[start:end],
+        heading_path=block.heading_path,
     )
 
 

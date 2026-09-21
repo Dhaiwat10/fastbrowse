@@ -90,6 +90,8 @@ class Evidence(Frozen):
     start: int = Field(ge=0)
     end: int = Field(ge=0)
     quote: str
+    heading_path: tuple[str, ...] = ()
+    """The headings the quote sits under on the page: which record a bare "£10.69" is the price of."""
 
 
 class Citation(Frozen):
