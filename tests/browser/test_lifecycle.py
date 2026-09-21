@@ -526,3 +526,13 @@ async def test_a_slow_command_from_a_live_browser_is_waited_for(monkeypatch: pyt
         transport.delays["Target.getTargets"] = 0.2
         await session.client.send_raw("Target.getTargets")
     assert transport.calls.count("Browser.getVersion") >= 2, "the browser was asked whether it was there"
+
+
+async def test_a_reply_that_lands_during_the_liveness_probe_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = CdpTransport(monkeypatch)
+    monkeypatch.setattr(browser_session, "CDP_REPLY_SECONDS", 0.05)
+    monkeypatch.setattr(browser_session, "CDP_ALIVE_SECONDS", 0.1)
+    async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
+        transport.delays["Target.getTargets"] = 0.08
+        transport.blocked["Browser.getVersion"] = asyncio.Event()
+        await session.client.send_raw("Target.getTargets")

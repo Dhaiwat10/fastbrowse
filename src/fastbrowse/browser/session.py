@@ -107,7 +107,8 @@ class _BrowserClient(CDPClient):
         reply = asyncio.ensure_future(super().send_raw(method, params, session_id))
         try:
             while not (await asyncio.wait({reply}, timeout=CDP_REPLY_SECONDS))[0]:
-                if not await self._alive():
+                # A reply that landed while the probe waited still counts, however the probe ended.
+                if not await self._alive() and not reply.done():
                     raise BrowserUnresponsive(f"{method} got no reply, and the browser stopped answering")
             return reply.result()
         except BrowserUnresponsive:
