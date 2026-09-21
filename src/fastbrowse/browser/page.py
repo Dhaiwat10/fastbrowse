@@ -68,6 +68,10 @@ _HIT_TEST_JS = (
     ".filter(r => r.right > r.left && r.bottom > r.top).slice(0, 4); "
     "if (!rects.length) return null; "
     "const labels = e.tagName === 'INPUT' && ['checkbox', 'radio'].includes(e.type) ? [...e.labels] : []; "
+    "const ACTIVE = 'a[href],button,input,select,textarea,summary,[contenteditable]:not([contenteditable=false]),"
+    "[role=button],[role=link],[role=checkbox],[role=radio],[role=switch],[role=tab],[role=option],"
+    "[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=combobox],[role=textbox],"
+    "[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem]'; "
     "const hitAt = (x, y) => { "
     # Descend through open shadow roots: the document-level hit is only the outermost host.
     "let node = e, doc = e.ownerDocument; while (true) { "
@@ -76,11 +80,11 @@ _HIT_TEST_JS = (
     "let hit = doc.elementFromPoint(x, y); "
     "while (hit?.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); "
     "if (!inner || inner === hit) break; hit = inner; } "
-    # A link or button inside the label takes the click itself instead of forwarding it to the input.
-    "const viaLabel = label => { if (!label.contains(hit)) return false; "
-    "const own = hit.closest('a[href],button,input,select,textarea,summary,[contenteditable],[role],[tabindex]'); "
-    "return !own || own === label || !label.contains(own); }; "
-    "if (!node.contains(hit) && !(node === e && labels.some(viaLabel))) return 'covered'; "
+    # A control nested inside the target (a row's Delete button, a link inside a label) takes the click
+    # itself, so a point is the target's only when no other control sits between it and the hit.
+    "const owns = root => { if (!root.contains(hit)) return false; const own = hit.closest(ACTIVE); "
+    "return !own || own === root || !root.contains(own); }; "
+    "if (node === e ? !owns(e) && !labels.some(owns) : !node.contains(hit)) return 'covered'; "
     "if (doc === document) break; "
     "node = view.frameElement; if (!node) return null; "
     "const frame = node.getBoundingClientRect(); "

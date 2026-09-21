@@ -67,6 +67,28 @@ async def test_click_uses_an_exposed_point_but_never_passes_through_a_cover(
         assert effect(before, after, target).set_something
 
 
+async def test_exposed_edge_belonging_to_a_nested_control_is_not_the_target(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    """A covered row whose exposed edges are its own Delete button must not have Delete pressed for it."""
+    await page.navigate(f"{main_site}/dispatch.html")
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "const row = document.createElement('div'); row.id = 'target'; row.setAttribute('role', 'option'); "
+        "row.style.cssText = getComputedStyle(document.getElementById('target')).cssText; "
+        "row.textContent = 'One way'; document.getElementById('target').replaceWith(row); "
+        "const del = row.appendChild(document.createElement('button')); del.id = 'delete'; "
+        "del.textContent = 'Delete'; del.style.cssText = 'position:absolute;inset:0'; "
+        "const cover = document.getElementById('cover'); cover.style.display = 'block'; "
+        "cover.style.cssText += 'left:130px;top:90px;width:40px;height:20px';",
+    )
+    before = await page.observe()
+    result = await page.act(Action(operation=Operation.CLICK, target_id=find(before, "One way").id), before)
+    assert result.outcome is StepOutcome.COVERED
+    assert await eval_value(browser_session, browser_session.active_session_id, "window.clicks") == []
+
+
 @pytest.mark.parametrize("associated", [False, True])
 async def test_transparent_input_hit_must_be_the_input_or_its_own_label(
     page: CdpPage, browser_session: BrowserSession, main_site: str, associated: bool
