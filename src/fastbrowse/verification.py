@@ -229,10 +229,17 @@ async def llm_verify(
     notes: Notes,
     steps: Sequence[StepResult],
     *,
+    doubted: Sequence[str] = (),
     config: Config = _DEFAULT_CONFIG,
     ledger: Ledger | None = None,
 ) -> Generation[LLMVerdict]:
-    requirements = "\n".join(f"- {r.id}: {r.text}" for r in plan.requirements)
+    """`doubted` names the requirements the done check doubted, which the verifier must see shown, not assume."""
+    # A flights search passed here with Jev doubting its one requirement at 0.14: the rows matched, and nothing
+    # asked whether the nonstop filter the task named had ever been applied.
+    requirements = "\n".join(
+        f"- {r.id}: {r.text}{' (doubted: show it is satisfied, or name it missing)' if r.id in doubted else ''}"
+        for r in plan.requirements
+    )
     count = config.observation.history_entries + config.observation.earlier_history_entries
     history = "\n".join(
         f"- {s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in steps[max(0, len(steps) - count) :]
