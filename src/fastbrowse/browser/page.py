@@ -82,11 +82,12 @@ _HIT_TEST_JS = (
     "if (!inner || inner === hit) break; hit = inner; } "
     # A control nested inside the target (a row's Delete button, a link or checkbox inside a label) takes the
     # click itself, so a point is the target's only when no other control sits between it and the hit: one the
-    # snapshot indexed, a widget, or a label with its own input. A label and its input are one target.
+    # snapshot offered, a widget, or a label with its own input. A label and its input are one target. A hover
+    # target is not one: it reveals content but takes no click from its container.
     "const same = x => x === e || x.control === e || e.control === x; "
     "const owns = root => { if (!root.contains(hit)) return false; "
     "for (let x = hit; x !== root; x = x.parentElement) { if (same(x)) return true; "
-    "if (x.matches(ACTIVE) || window.__fastbrowse.ids.has(x) || x.control) return false; } return true; }; "
+    "if (x.matches(ACTIVE) || window.__fastbrowse.controls.has(x) || x.control) return false; } return true; }; "
     "if (node === e ? !owns(e) && !labels.some(owns) : !node.contains(hit)) return 'covered'; "
     "if (doc === document) break; "
     "node = view.frameElement; if (!node) return null; "

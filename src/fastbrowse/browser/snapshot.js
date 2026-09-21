@@ -29,6 +29,8 @@
     return true;
   };
   const registry = window.__fastbrowse ||= { ids: new WeakMap(), nodes: new Map(), next: 1 };
+  // What was offered to be acted on; `ids` also names hover targets and fingerprinted nodes.
+  registry.controls ||= new WeakSet();
   // A visible loading indicator means the page is still fetching what it will draw, which network idle and a
   // quiet DOM both report as settled: a spinner mutates nothing while it spins. Named classes are a heuristic
   // and deliberately so -- the wait on them is bounded and expires into proceeding, so a false match costs
@@ -227,6 +229,7 @@
     if (!rname || r.width <= 0 || r.height <= 0 || x < 0 || x >= innerWidth) continue;
     if (rname === 'gridcell' && e.querySelector('button,[role="button"]')) continue;
     const id = identity(e);
+    registry.controls.add(e);
     const base = {
       id, role: rname, label: labelOf(e) || rname, offscreen: y < 0 || y >= innerHeight,
       distance: (y < 0 || y >= innerHeight) ? 1 + Math.abs(y - innerHeight / 2) : 0,

@@ -115,6 +115,25 @@ async def test_transparent_checkbox_filling_its_label_is_the_labels_target(
     )
 
 
+async def test_hover_target_filling_a_button_does_not_cover_it(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    await page.navigate(main_site)
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.head.insertAdjacentHTML('beforeend', '<style>.tip{display:none}.face:hover .tip{display:block}"
+        "</style>'); document.body.innerHTML = '<button onclick=\"window.pressed = (window.pressed || 0) + 1\" "
+        'style="padding:0"><span class=face style="display:block;padding:12px">Save<span class=tip>'
+        '<img alt="" width=8 height=8 src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></span></span></button>\'; true',
+    )
+    obs = await page.observe()
+    button = next(c for c in obs.controls if c.role == "button")
+    result = await page.act(Action(operation=Operation.CLICK, target_id=button.id), obs)
+    assert result.outcome is StepOutcome.EXECUTED, result.detail
+    assert await eval_value(browser_session, browser_session.active_session_id, "window.pressed") == 1
+
+
 @pytest.mark.parametrize("associated", [False, True])
 async def test_transparent_input_hit_must_be_the_input_or_its_own_label(
     page: CdpPage, browser_session: BrowserSession, main_site: str, associated: bool
