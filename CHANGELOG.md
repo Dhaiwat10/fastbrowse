@@ -18,6 +18,11 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   `StepFact.quote`, `url` and `deep_link` are `None` for such a fact.
 - **A card or table row is one block.** A repeated card (a quote with its author and tags, a product) and each
   table row with its header are captured as single blocks, so a record is read and cited whole.
+- **Model responses use strict structured output, and every prompt was audited.** Schemas are sent strict,
+  with field docs included. Each Jev question asks one positive thing, and page text is marked untrusted in
+  the same words everywhere. Context comes before the question. Rules added for one incident became general
+  rules or were removed. Text fields no longer ask the model to retype a quote: the value must appear in the
+  block it names.
 - **`python -m fastbrowse.evals.probe` measures the reader and claim check on live pages.** It loads the
   given pages once and runs the agent's own read, draft and claim check over them N times at once.
 
