@@ -58,12 +58,12 @@ them, which are the ones a person actually waits on:
 |:--|:--|:--|:--|
 | `saucedemo-checkout` two items, a shipping form and Finish | **36.3s** | 173.9s | **4.8x faster** |
 | `saucedemo-cart` sign in, find a product, add it | **25.8s** | 119.8s | **4.6x faster** |
-| `saucedemo-locked-out` report the site's error rather than claim success | **25.4s** | 115.8s | **4.6x faster** |
+| `saucedemo-locked-out` report the site's error rather than claim success | **35.5s** | 115.8s | **3.3x faster** |
 | `internet-login` sign in and confirm the signed-in page | **18.3s** | 71.7s | **3.9x faster** |
 | `practice-login` the same on another practice site | **21.2s** | 36.3s | 1.7x faster |
 
 A plain lookup finishes in eleven to fourteen seconds (`pypi-version` 11.1s, `hn-top` 12.0s, `github-license`
-12.7s), where the two arms are within a second or two of each other and theirs is sometimes ahead. And on
+12.7s), where the two arms are within about four seconds of each other and theirs is often ahead. And on
 Google Flights - a date picker and a results widget, the hardest thing in the suite - theirs is nearly twice
 as fast (38.5s against 71.7s), and it is the one task whose grade here wobbles run to run.
 
@@ -170,7 +170,8 @@ uv run fastbrowse "Add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
 ### Models
 
 The LLM defaults to `google/gemini-3.8-flash` at low reasoning effort, with
-`google/gemini-3.5-flash-lite` for planning, proposing a direct address and typing field text.
+`google/gemini-3.5-flash-lite` for planning, proposing a direct address, typing field text and the
+done check's verdict.
 Override with `FASTBROWSE_LLM_MODEL` (every purpose), `FASTBROWSE_LLM_MODEL_<PURPOSE>` (`PLAN`,
 `READ`, `FIELD_TEXT`, `SHORTCUT`, `RECOVER`, `COMPOSE`, `VERIFY`) and `FASTBROWSE_LLM_REASONING`
 (`low`, `medium`, `high`).
