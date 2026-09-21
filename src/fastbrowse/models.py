@@ -35,6 +35,13 @@ class Status(StrEnum):
     ERROR = "error"
 
 
+class TripwireMode(StrEnum):
+    SHADOW = "shadow"
+    """Evaluate and log what would have fired; change nothing about the run."""
+    ARMED = "armed"
+    """Send the run to recovery, as the unchanged-page count already does."""
+
+
 class Operation(StrEnum):
     CLICK = "click"
     HOVER = "hover"

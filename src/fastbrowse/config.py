@@ -2,7 +2,7 @@
 
 from pydantic import Field
 
-from fastbrowse.models import Frozen
+from fastbrowse.models import Frozen, TripwireMode
 
 
 class Thresholds(Frozen):
@@ -53,6 +53,16 @@ class TokenBudget(Frozen):
 class StallRules(Frozen):
     unchanged_actions: int = Field(default=3, gt=0)
     max_recoveries: int = Field(default=2, ge=0)
+    repeated_actions: int = Field(default=3, gt=1)
+    """Times one interaction on one target with one value may recur before `tripwires` has an opinion."""
+    stagnant_plan_steps: int = Field(default=4, gt=1)
+    """Steps the unresolved requirements may stay exactly the same for. Above `unchanged_actions`, because a
+    page can legitimately take several moves -- opening a menu, filling a field -- before it evidences one."""
+    tripwires: TripwireMode = TripwireMode.SHADOW
+    """Whether `repeated_actions` and `stagnant_plan_steps` recover or only log what they would have done.
+
+    Shadow by default: both are new, and a tripwire that ends a run which was about to succeed costs more
+    than one that never fires. The eval suites report every would-fire, which is the evidence for arming."""
 
 
 class Config(Frozen):
