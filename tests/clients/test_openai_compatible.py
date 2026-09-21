@@ -14,6 +14,8 @@ from fastbrowse.telemetry import BudgetExceeded, Ledger
 
 class Result(Frozen):
     count: int
+    tags: tuple[str, ...] = ()
+    """What was counted."""
 
 
 async def test_schema_repair_keeps_images_and_accounts_for_both_calls() -> None:
@@ -46,10 +48,30 @@ async def test_schema_repair_keeps_images_and_accounts_for_both_calls() -> None:
     assert result.cost.purpose is LLMPurpose.READ
     body = requests[0]
     assert body["model"] == "reader" and body["max_tokens"] == 42
+    # Strict output requires every property and no defaults; a docstring is the field's only guidance.
     assert body["response_format"] == {
         "type": "json_schema",
-        "json_schema": {"name": "Result", "schema": Result.model_json_schema(), "strict": False},
+        "json_schema": {
+            "name": "Result",
+            "schema": {
+                "additionalProperties": False,
+                "properties": {
+                    "count": {"title": "Count", "type": "integer"},
+                    "tags": {
+                        "description": "What was counted.",
+                        "items": {"type": "string"},
+                        "title": "Tags",
+                        "type": "array",
+                    },
+                },
+                "required": ["count", "tags"],
+                "title": "Result",
+                "type": "object",
+            },
+            "strict": True,
+        },
     }
+    assert body["provider"] == {"require_parameters": True}
     messages = body["messages"]
     assert isinstance(messages, list)
     assert messages[0] == {

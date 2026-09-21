@@ -73,6 +73,30 @@ def _cut_off(error: ValidationError) -> bool:
     )
 
 
+def strict_schema(schema: JsonValue) -> JsonValue:
+    """The schema with every property required and no defaults, as strict structured output demands.
+
+    A field with a default is optional to pydantic, which strict mode rejects; the model instead writes the
+    empty value, and validation accepts it as it would the default.
+    """
+    if isinstance(schema, list):
+        return [strict_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    result: dict[str, JsonValue] = {}
+    for key, value in schema.items():
+        if key == "default":
+            continue
+        # These map names to schemas, so a property called "default" is a name, not a keyword.
+        if key in ("properties", "$defs") and isinstance(value, dict):
+            result[key] = {name: strict_schema(item) for name, item in value.items()}
+        else:
+            result[key] = strict_schema(value)
+    if isinstance(properties := schema.get("properties"), dict):
+        result["required"] = list(properties)
+    return result
+
+
 def _grow_cap(body: dict[str, JsonValue], attempt: int, cap: int) -> None:
     """Make room for a response that ran into the output cap, or report it as truncated when it did so again.
 
@@ -181,10 +205,12 @@ class OpenAICompatibleLLM:
                 "type": "json_schema",
                 "json_schema": {
                     "name": schema.__name__,
-                    "schema": TypeAdapter(JsonValue).validate_python(schema.model_json_schema()),
-                    "strict": False,
+                    "schema": TypeAdapter(JsonValue).validate_python(strict_schema(schema.model_json_schema())),
+                    "strict": True,
                 },
             },
+            # An endpoint that ignores response_format would treat the schema as a hint, so none is routed to.
+            "provider": {"require_parameters": True},
         }
         if self._reasoning_effort is not None:
             body["reasoning"] = {"effort": self._reasoning_effort.value}
