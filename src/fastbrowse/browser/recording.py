@@ -13,12 +13,14 @@ import base64
 import html
 import itertools
 import logging
+import re
 import shutil
 import time
 from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
 from typing import Self
+from urllib.parse import urlsplit
 
 from cdp_use.cdp.page.events import ScreencastFrameEvent
 
@@ -35,6 +37,8 @@ navigation can go unanswered, and GitHub runs then recorded nothing; restarting 
 _COMMAND_SECONDS = 0.5
 _RESULT_SECONDS = 4.0
 """Long enough to read a one-line answer in a shared clip."""
+_CITATION_LINK = re.compile(r"\s*\[(\d+)\]\(<[^>]*>\)")
+"""A numbered answer link, `[3](<url>)`: the card shows the number and lists the quote, not the deep link."""
 
 
 class RecordingError(RuntimeError):
@@ -96,14 +100,27 @@ class Recording:
 
     async def show_result(self, task: str, result: RunResult) -> None:
         """End the video on the task and its outcome, in the tab being recorded."""
-        answer = result.answer or result.error or ""
+        parts = _CITATION_LINK.split(result.answer or result.error or "")
+        cited = {int(number) for number in parts[1::2]}
+        answer = "".join(
+            f"<sup style='margin-left:4px;font-size:18px;color:#58a6ff'>{part}</sup>" if i % 2 else html.escape(part)
+            for i, part in enumerate(parts)
+        )
+        sources = "".join(
+            "<div style='white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"
+            f"<span style='color:#58a6ff'>{citation.id}</span> {html.escape(urlsplit(citation.url).netloc)}"
+            f" <span style='color:#e6edf3'>\u201c{html.escape(citation.quote)}\u201d</span></div>"
+            for citation in result.citations
+            if citation.id in cited
+        )
         seconds = time.monotonic() - self._started
         card = (
             "<meta charset=utf-8><body style='margin:0;height:100vh;display:grid;place-content:center;gap:28px;"
             "padding:0 8vw;background:#0d1117;color:#e6edf3;font:24px system-ui,sans-serif'>"
             f"<div style='color:#8b949e'>{html.escape(task)}</div>"
-            f"<div style='font-size:40px;font-weight:600'>{html.escape(answer)}</div>"
-            f"<div style='color:#3fb950'>{html.escape(result.status.value)} in {seconds:.1f}s, "
+            f"<div style='font-size:40px;font-weight:600'>{answer}</div>"
+            + (f"<div style='display:grid;gap:6px;color:#8b949e;font-size:20px'>{sources}</div>" if sources else "")
+            + f"<div style='color:#3fb950'>{html.escape(result.status.value)} in {seconds:.1f}s, "
             f"{len(result.steps)} steps, ${result.cost.known_dollars:.4f}</div></body>"
         )
         await self._session.client.send_raw(

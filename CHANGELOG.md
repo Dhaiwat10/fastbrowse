@@ -11,7 +11,8 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
-Nothing yet.
+- **A recording ends on a readable answer.** The closing card shows each citation as a number beside the
+  claim and lists the cited site and quote underneath, instead of the raw text-fragment link.
 
 ## [0.5.0] - 2026-09-21
 
