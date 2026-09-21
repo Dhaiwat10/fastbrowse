@@ -29,6 +29,7 @@ import statistics
 import sys
 import tempfile
 import time
+from collections import Counter
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -47,6 +48,7 @@ from fastbrowse.browser.recording import Recording
 from fastbrowse.clients.environment import load_settings
 from fastbrowse.evals.live_tasks import TASKS, Category, LiveTask, Outcome
 from fastbrowse.evals.more_tasks import DEV, HELDOUT
+from fastbrowse.evals.shadow import shadow_counts
 from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, StepEvent
 from fastbrowse.page import Observation
 from fastbrowse.run import run_task
@@ -383,13 +385,16 @@ async def run_arm(
     row: dict[str, object] = {"arm": arm, "task": task.id, "category": task.category.value, "at": time.time()}
     try:
         if arm == "fast":
-            with _traced() as events:
+            with _traced() as events, shadow_counts() as would_fire:
                 outcome, result, ended = await fast_arm(
                     task, http, downloads, bitwarden=bitwarden, record=record, limits=limits
                 )
             status = result.status.value
             cost = result.cost
             row |= {
+                # A shadow tripwire only earns arming on evidence from LIVE sites: the local fixtures never
+                # grind and never spin, so a zero there says nothing about the rate that matters.
+                "would_fire": dict(would_fire),
                 "error": result.error,
                 "trace": [f"{s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in result.steps],
                 # Enough to say why a run failed without running it again: every step as the agent judged it, and
@@ -474,6 +479,14 @@ def summarize(rows: list[dict[str, object]], arms: list[str]) -> None:
                 calls[label] = calls.get(label, 0.0) + spent
         for label, spent in sorted(calls.items(), key=lambda item: -item[1]):
             print(f"  {label:18} {spent / len(arm_rows):5.1f}s a task")
+        # Reported against the PASSING runs, because that is the false-positive rate the arming decision
+        # turns on: a tripwire firing on a run that failed anyway costs nothing.
+        shadow: Counter[str] = Counter()
+        for r in arm_rows:
+            if r["passed"]:
+                shadow.update(cast(dict[str, int], r.get("would_fire", {})))
+        for tripwire, count in shadow.most_common():
+            print(f"  would-fire {tripwire:18} {count} on {passed} passing runs")
 
 
 async def main(argv: list[str]) -> int:
