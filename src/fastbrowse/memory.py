@@ -72,30 +72,35 @@ class Notes:
     def render_with_ids(
         self, max_chars: int, *, preserve_requirements: bool = False, json_encoded: bool = False
     ) -> RenderedNotes:
-        """Drop uncited context before requirement evidence, retaining read order within each group.
+        """Every fact in read order when they all fit; otherwise uncited context is dropped before requirement
+        evidence, each group kept in read order.
 
+        Read order is what the composer weighs: listing requirement facts first put a reader's one-quote
+        conclusion ("X is the most expensive") above the prices it compared, and the answer cited only that.
         Verdicts must fail when requirement evidence cannot fit, rather than decide without it.
         """
         if max_chars < 0:
             raise ValueError("max_chars must be nonnegative")
-        ordered = sorted(self._facts.items(), key=lambda item: not self._requirements[item[0]])
-        required = sum(bool(ids) for ids in self._requirements.values())
-        lines = [
-            f"[{key}] {json.dumps(fact.text, ensure_ascii=False)} "
-            f"requirements={','.join(sorted(self._requirements[key])) or '-'} "
-            f"source={json.dumps(fact.evidence.source_id)} url={json.dumps(fact.evidence.url)} "
-            f"quote={json.dumps(fact.evidence.quote, ensure_ascii=False)}"
-            for key, fact in ordered
-        ]
+
+        def line(key: str, fact: Fact) -> str:
+            return (
+                f"[{key}] {json.dumps(fact.text, ensure_ascii=False)} "
+                f"requirements={','.join(sorted(self._requirements[key])) or '-'} "
+                f"source={json.dumps(fact.evidence.source_id)} url={json.dumps(fact.evidence.url)} "
+                f"quote={json.dumps(fact.evidence.quote, ensure_ascii=False)}"
+            )
 
         def size(text: str) -> int:
             # A JSON state escapes quotes and newlines; its notes budget must count those extra characters.
             return len(json.dumps(text)) - len('""') if json_encoded else len(text)
 
-        complete = "\n".join(lines)
-        keys = tuple(key for key, _ in ordered)
+        complete = "\n".join(line(key, fact) for key, fact in self._facts.items())
         if size(complete) <= max_chars:
-            return RenderedNotes(text=complete, evidence_ids=keys)
+            return RenderedNotes(text=complete, evidence_ids=tuple(self._facts))
+        ordered = sorted(self._facts.items(), key=lambda item: not self._requirements[item[0]])
+        required = sum(bool(ids) for ids in self._requirements.values())
+        lines = [line(key, fact) for key, fact in ordered]
+        keys = tuple(key for key, _ in ordered)
         for count in range(len(lines) - 1, -1, -1):
             if preserve_requirements and count < required:
                 raise NotesTooLarge(f"Requirement evidence exceeds the {max_chars} character notes budget")
