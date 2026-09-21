@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import re
+import ssl
 import subprocess
 import sys
 import threading
@@ -18,6 +19,7 @@ import httpx
 import pytest
 from cdp_use.client import CDPClient
 from pydantic import ValidationError
+from websockets.exceptions import InvalidMessage
 
 from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser, BrowserUseCloudError
 from fastbrowse.adapters.local_chrome import async_local_chrome, find_chrome, local_chrome
@@ -98,6 +100,32 @@ async def test_session_setup_rolls_back(monkeypatch: pytest.MonkeyPatch, method:
         assert "secret" not in str(raised.value)
     assert transport.calls[-1] == "stop"
     assert ("Target.closeTarget" in transport.calls) == (method != "Target.setDiscoverTargets")
+
+
+def dropped_handshake(cause: Exception) -> InvalidMessage:
+    error = InvalidMessage("did not receive a valid HTTP response")
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    ("failure", "outage"),
+    [
+        (dropped_handshake(EOFError("connection closed while reading HTTP status line")), True),
+        (ConnectionRefusedError(), True),
+        (dropped_handshake(ValueError("unsupported protocol; expected HTTP/1.1: HTTP/1.0 401")), False),
+        (ssl.SSLCertVerificationError(), False),
+    ],
+    ids=["dropped handshake", "refused", "malformed reply", "bad certificate"],
+)
+async def test_a_browser_unreachable_at_start_is_an_outage(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception, outage: bool
+) -> None:
+    CdpTransport(monkeypatch)
+    monkeypatch.setattr(CDPClient, "start", AsyncMock(side_effect=failure))
+    with pytest.raises(BrowserError) as raised:
+        await BrowserSession(CONNECTION, RecordingArtifactSink()).__aenter__()
+    assert isinstance(raised.value, Unavailable) is outage
 
 
 @pytest.mark.parametrize("failure", [RuntimeError({"code": -32000, "message": "secret"}), ConnectionError("secret")])

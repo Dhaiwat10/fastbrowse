@@ -27,7 +27,9 @@ from cdp_use.cdp.target.events import (
     TargetInfoChangedEvent,
 )
 from cdp_use.client import CDPClient
+from websockets.exceptions import ConnectionClosed, InvalidMessage, InvalidStatus
 
+from fastbrowse.clients.validation import RETRYABLE_STATUS
 from fastbrowse.models import Artifact, ArtifactKind, ArtifactSink, FrameHandler, Unavailable
 from fastbrowse.models import BrowserConnection as BrowserConnectionModel
 from fastbrowse.page import BrowserError, Dialog, Tab
@@ -46,6 +48,16 @@ CDP_ALIVE_SECONDS = 10.0
 
 class BrowserUnresponsive(BrowserError, Unavailable):
     """The browser stopped answering: an outage the same run may not meet again, not a failed task."""
+
+
+def _unreachable(cause: Exception) -> bool:
+    """A connection the browser's endpoint dropped or refused for now, as a cloud browser still starting does."""
+    if isinstance(cause, InvalidStatus):
+        return cause.response.status_code in RETRYABLE_STATUS
+    # A malformed reply, such as a proxy's bare 401, and a TLS failure both need the configuration changed.
+    if isinstance(cause, InvalidMessage):
+        return isinstance(cause.__cause__, (EOFError, ConnectionError))
+    return isinstance(cause, (ConnectionClosed, ConnectionError, TimeoutError))
 
 
 # Response-stage interception is enough: fastbrowse only needs the bytes of a save-as download, never to
@@ -95,6 +107,8 @@ class _BrowserClient(CDPClient):
         try:
             await super().start()
         except Exception as exc:
+            if _unreachable(exc):
+                raise BrowserUnresponsive(f"CDP.start failed ({type(exc).__name__})") from exc
             raise _browser_error("CDP.start", exc) from exc
 
     async def stop(self) -> None:

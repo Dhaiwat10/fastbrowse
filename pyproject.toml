@@ -12,6 +12,8 @@ dependencies = [
     "httpx[http2]>=0.28,<1",
     "pydantic>=2.11,<3",
     "pydantic-settings>=2.10,<3",
+    # Imported to tell a browser endpoint that is still starting from one that will never answer.
+    "websockets>=14,<18",
 ]
 
 [project.urls]
