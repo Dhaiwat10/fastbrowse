@@ -114,7 +114,13 @@ async def main(argv: Sequence[str]) -> None:
                 await asyncio.sleep(args.settle)
                 pages.append((await page.capture(), await page.observe()))
             plan = (await planning).data
-            print(json.dumps({"requirements": [r.model_dump(mode="json") for r in plan.requirements]}))
+            # A page that had not rendered reads as empty, and every run would then agree on an empty answer.
+            captured = [
+                {"url": capture.url, "blocks": len(capture.blocks), "chars": len(capture.text)} for capture, _ in pages
+            ]
+            print(
+                json.dumps({"requirements": [r.model_dump(mode="json") for r in plan.requirements], "pages": captured})
+            )
             runs = await asyncio.gather(
                 *(_once(llm, jev, config, args.task, plan, pages) for _ in range(args.repeat)), return_exceptions=True
             )
