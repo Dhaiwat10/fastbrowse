@@ -1,5 +1,6 @@
 """Keep a run on its backup after the chosen Jev provider exhausts its retries."""
 
+import logging
 from collections.abc import Mapping
 
 from pydantic import JsonValue
@@ -7,6 +8,9 @@ from pydantic import JsonValue
 from fastbrowse.clients.validation import estimated_cost
 from fastbrowse.jev import Evaluation, JevClient, JevRetriesExhausted, Question
 from fastbrowse.models import CostBasis
+from fastbrowse.telemetry import trace
+
+logger = logging.getLogger(__name__)
 
 
 class FailoverJevClient:
@@ -23,6 +27,8 @@ class FailoverJevClient:
                 raise
             # Calls already in flight may fail together; assigning the same backup without awaiting cannot flap.
             self._active = self._backup
+            logger.warning("jev: %s; moving this run to the backup provider", error)
+            trace("jev_failover", reason=str(error))
             try:
                 result = await self._backup.evaluate(state, questions)
             except JevRetriesExhausted as backup_error:

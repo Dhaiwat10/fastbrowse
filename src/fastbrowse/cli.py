@@ -15,6 +15,7 @@ the scope is the `--start` origin. A secret with neither is refused. Bitwarden m
 
 import argparse
 import asyncio
+import logging
 import os
 import shutil
 import sys
@@ -182,6 +183,8 @@ def _refused(error: str) -> RunResult:
 
 def main() -> None:
     args = _parse(sys.argv[1:])
+    # Retries, failovers and a recording that could not be written are warnings; say whose they are.
+    logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="fastbrowse: %(levelname)s %(message)s")
     try:
         sys.exit(asyncio.run(run(args)))
     except ConfigurationError as exc:

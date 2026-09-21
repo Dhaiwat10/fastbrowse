@@ -11,8 +11,10 @@ from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 from fastbrowse.clients.validation import (
     LLM_ATTEMPT_SECONDS,
     LLM_HEDGE_SECONDS,
+    RETRYABLE_STATUS,
     RequestUsage,
     body_excerpt,
+    describe,
     dollars,
     json_object,
     object_value,
@@ -165,20 +167,28 @@ class OpenAICompatibleLLM:
     async def _request(
         self, body: dict[str, JsonValue], ledger: Ledger | None, usage: RequestUsage
     ) -> dict[str, JsonValue]:
+        started = monotonic()
         response = await post_with_retry(
             self._http,
             f"{self._base_url}/chat/completions",
             body,
             {"Authorization": f"Bearer {self._api_key}"},
+            call=f"llm {body.get('model')}",
             attempt_seconds=LLM_ATTEMPT_SECONDS,
             hedge_seconds=LLM_HEDGE_SECONDS,
             before_retry=None if ledger is None else lambda: ledger.reserve(CostComponent.LLM),
             usage=usage,
         )
         if response is None:
-            raise LLMError("LLM transport failed")
+            raise LLMError(
+                f"LLM transport failed after {usage.history(monotonic() - started)}; last: {usage.failures[-1]}"
+            )
+        if response.status_code in RETRYABLE_STATUS:
+            raise LLMError(
+                f"LLM request failed after {usage.history(monotonic() - started)}; last: {describe(response)}"
+            )
         if not response.is_success:
-            raise LLMError(f"LLM HTTP {response.status_code}: {body_excerpt(response)}")
+            raise LLMError(f"LLM {describe(response)}")
         try:
             return json_object(response)
         except ValueError:

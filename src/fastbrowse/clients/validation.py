@@ -1,9 +1,10 @@
 """Shared wire encoding and strict validation for both Jev transports."""
 
 import asyncio
+import logging
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import monotonic
 from typing import assert_never
 
@@ -24,6 +25,9 @@ from fastbrowse.jev import (
     ScoreQuestion,
 )
 from fastbrowse.models import CostBasis, CostComponent, CostLine
+from fastbrowse.telemetry import trace
+
+logger = logging.getLogger(__name__)
 
 
 def wire_questions(questions: Mapping[str, Question], *, gateway: bool = False) -> dict[str, JsonValue]:
@@ -91,18 +95,43 @@ def body_excerpt(response: httpx.Response) -> str:
 
     Some providers echo the rejected key back in an authentication error, and error text is logged.
     """
-    text = response.text
+    return _scrubbed(response, response.text)[:400]
+
+
+def _scrubbed(response: httpx.Response, text: str) -> str:
     try:
         credential = response.request.headers.get("authorization", "").removeprefix("Bearer ").strip()
     except RuntimeError:  # a response built without a request carries no credential to leak
         credential = ""
-    if credential:
-        text = text.replace(credential, "[api key]")
-    return text[:400]
+    return text.replace(credential, "[api key]") if credential else text
+
+
+def _field(value: JsonValue, *keys: str) -> JsonValue:
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def describe(response: httpx.Response) -> str:
+    """A failed response as one line someone can act on: the status, the provider's own error type and message,
+    and the upstream provider a gateway routed to. The start of the body when it is not the usual error JSON."""
+    try:
+        body: JsonValue = response.json()
+    except ValueError:
+        body = None
+    message = _field(body, "error", "message")
+    if not isinstance(message, str):
+        return f"HTTP {response.status_code}: {body_excerpt(response) or '(empty body)'}"
+    kind = _field(body, "error", "type")
+    upstream = _field(body, "providerMetadata", "gateway", "routing", "resolvedProvider")
+    text = f"HTTP {response.status_code}{f' {kind}' if isinstance(kind, str) else ''}: {message[:300]}"
+    return _scrubbed(response, text + (f" (via {upstream})" if isinstance(upstream, str) else ""))
 
 
 def response_error(response: httpx.Response, detail: str) -> JevError:
-    return JevError(f"{detail[:300]}; HTTP {response.status_code}: {body_excerpt(response)}")
+    return JevError(f"{detail[:300]}; {describe(response)}")
 
 
 RETRY_DELAYS_SECONDS = (0.5, 1.5, 4.0, 8.0, 8.0)
@@ -127,6 +156,12 @@ the rest took 2s; hedging here duplicates only that tail, and these calls cost a
 class RequestUsage:
     unaccounted_requests: int = 0
     """Requests that may have been billed but whose usage was not returned to the caller."""
+    failures: list[str] = field(default_factory=list[str])
+    """Why each request that came back unusable failed, in order: its status and reason, or its transport error."""
+
+    def history(self, seconds: float) -> str:
+        """How the call went before it gave up, so an error says whether it was one blip or a sustained outage."""
+        return f"{len(self.failures)} failed requests in {seconds:.1f}s"
 
 
 def with_discarded(cost: CostLine, usage: RequestUsage) -> CostLine:
@@ -150,6 +185,7 @@ async def post_with_retry(
     body: dict[str, JsonValue],
     headers: Mapping[str, str],
     *,
+    call: str,
     attempt_seconds: float,
     hedge_seconds: float,
     before_retry: Callable[[], None] | None = None,
@@ -161,8 +197,10 @@ async def post_with_retry(
     because a provider's slowest calls are stalls, not work, and a fresh request tends to land on a healthy
     replica. `before_retry` runs ahead of every repeat and every hedge, so a budget counts each request
     actually sent. `usage` counts discarded or timed-out requests that may still have been billed.
-    Returns None when the transport never completed, leaving each client to name its own failure.
+    Returns None when the transport never completed, leaving each client to name its own failure. Every retry is
+    logged as a warning naming `call`, the failure and the wait, and each failure is kept on `usage`.
     """
+    usage = usage if usage is not None else RequestUsage()
     response: httpx.Response | None = None
     for attempt, delay in enumerate((*RETRY_DELAYS_SECONDS, None)):
         if attempt and before_retry is not None:
@@ -180,7 +218,13 @@ async def post_with_retry(
         if response is not None and response.status_code not in RETRYABLE_STATUS:
             return response
         if delay is not None:
-            await asyncio.sleep(_backoff(response, delay))
+            wait = _backoff(response, delay)
+            reason = usage.failures[-1] if usage.failures else "no usable response"
+            logger.warning(
+                "%s: %s; retry %d of %d in %.1fs", call, reason, attempt + 1, len(RETRY_DELAYS_SECONDS), wait
+            )
+            trace("request_retry", call=call, attempt=attempt + 1, reason=reason, wait=round(wait, 2))
+            await asyncio.sleep(wait)
     return response
 
 
@@ -212,14 +256,14 @@ async def _hedged(
     usage: RequestUsage | None,
 ) -> httpx.Response | None:
     """The first usable response from one request, raced by a second if the first outlasts `hedge_seconds`."""
-    requests = {asyncio.create_task(_send(http, url, body, headers, attempt_seconds))}
+    requests = {asyncio.create_task(_send(http, url, body, headers, attempt_seconds, usage))}
     winner: asyncio.Task[httpx.Response | None] | None = None
     try:
         done, _ = await asyncio.wait(requests, timeout=hedge_seconds)
         if not done:
             if before_hedge is not None:
                 before_hedge()
-            requests.add(asyncio.create_task(_send(http, url, body, headers, attempt_seconds)))
+            requests.add(asyncio.create_task(_send(http, url, body, headers, attempt_seconds, usage)))
         response: httpx.Response | None = None
         pending = set(requests)
         while pending:
@@ -246,12 +290,29 @@ async def _hedged(
 
 
 async def _send(
-    http: httpx.AsyncClient, url: str, body: dict[str, JsonValue], headers: Mapping[str, str], attempt_seconds: float
+    http: httpx.AsyncClient,
+    url: str,
+    body: dict[str, JsonValue],
+    headers: Mapping[str, str],
+    attempt_seconds: float,
+    usage: RequestUsage | None,
 ) -> httpx.Response | None:
     try:
-        return await http.post(url, json=body, headers=headers, timeout=attempt_seconds)
-    except httpx.HTTPError:
-        return None
+        response = await http.post(url, json=body, headers=headers, timeout=attempt_seconds)
+    except httpx.TimeoutException as error:
+        failure = f"no response within {attempt_seconds:.0f}s ({type(error).__name__})"
+        response = None
+    except httpx.HTTPError as error:
+        # The type names the failure; its text can quote the request, credential included.
+        failure = f"no response ({type(error).__name__})"
+        response = None
+    else:
+        if response.status_code not in RETRYABLE_STATUS:
+            return response
+        failure = describe(response)
+    if usage is not None:
+        usage.failures.append(failure)
+    return response
 
 
 async def post(
@@ -267,19 +328,27 @@ async def post(
     usage = usage if usage is not None else RequestUsage()
     auth = {"Authorization": f"Bearer {api_key}", **(headers or {})}
     response = await post_with_retry(
-        http, url, body, auth, attempt_seconds=JEV_ATTEMPT_SECONDS, hedge_seconds=JEV_HEDGE_SECONDS, usage=usage
+        http,
+        url,
+        body,
+        auth,
+        call="jev",
+        attempt_seconds=JEV_ATTEMPT_SECONDS,
+        hedge_seconds=JEV_HEDGE_SECONDS,
+        usage=usage,
     )
+    seconds = monotonic() - started
     if response is None:
-        raise JevError("Jev transport failed")
+        raise JevError(f"Jev transport failed after {usage.history(seconds)}; last: {usage.failures[-1]}")
     if response.status_code in RETRYABLE_STATUS:
         raise JevRetriesExhausted(
-            str(response_error(response, "Jev request failed")),
+            f"Jev request failed after {usage.history(seconds)}; last: {describe(response)}",
             status_code=response.status_code,
-            seconds=monotonic() - started,
+            seconds=seconds,
             unaccounted_requests=usage.unaccounted_requests,
         )
     if response.status_code == 400 and "max_tokens_exceeded" in response.text:
-        raise JevInputTooLarge(f"Jev input too large; HTTP 400: {body_excerpt(response)}")
+        raise JevInputTooLarge(f"Jev input too large; {describe(response)}")
     if not response.is_success:
         raise response_error(response, "Jev request failed")
     return response
