@@ -254,7 +254,8 @@ async def llm_verify(
     )
     # A filter's checked state is absent from page text, and a screenshot shows it only when it is in view: a flights
     # search the verifier passed had matching rows and no nonstop filter applied.
-    stateful = _stateful(observation.controls)
+    # Only what is set: every empty field on a long form would crowd the request without saying anything.
+    stateful = [c for c in observation.controls if c.checked or c.selected or c.value]
     instruction = (
         "\n\n## Verdict\nDecide from the screenshot, set controls, page text and notes whether the task is finished. "
         "Be strict and name every requirement id that is not visibly satisfied. A requirement to "
