@@ -116,7 +116,8 @@ class Recording:
         seconds = time.monotonic() - self._started
         card = (
             "<meta charset=utf-8><body style='margin:0;height:100vh;display:grid;place-content:center;gap:28px;"
-            "padding:0 8vw;background:#0d1117;color:#e6edf3;font:24px system-ui,sans-serif'>"
+            "grid-template-columns:minmax(0,1fr);padding:0 8vw;background:#0d1117;color:#e6edf3;"
+            "font:24px system-ui,sans-serif'>"
             f"<div style='color:#8b949e'>{html.escape(task)}</div>"
             f"<div style='font-size:40px;font-weight:600'>{answer}</div>"
             + (f"<div style='display:grid;gap:6px;color:#8b949e;font-size:20px'>{sources}</div>" if sources else "")
