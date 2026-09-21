@@ -5,8 +5,12 @@ from fastbrowse.policy import HistoryEntry
 from fastbrowse.tripwires import Tripwire, action_signature, repeated_action, stagnant_plan, trailing_run
 
 
-def entry(operation: Operation | None, target: str | None, text: str | None = None) -> HistoryEntry:
-    return HistoryEntry(operation=operation, target=target, outcome=StepOutcome.EXECUTED, page_changed=True, text=text)
+def entry(
+    operation: Operation | None, target: str | None, text: str | None = None, effect: str | None = None
+) -> HistoryEntry:
+    return HistoryEntry(
+        operation=operation, target=target, outcome=StepOutcome.EXECUTED, page_changed=True, text=text, effect=effect
+    )
 
 
 def test_reads_are_not_repeatable_actions() -> None:
@@ -15,7 +19,14 @@ def test_reads_are_not_repeatable_actions() -> None:
     assert action_signature(entry(Operation.READ, None)) is None
     assert action_signature(entry(Operation.DONE, None)) is None
     assert action_signature(entry(None, None)) is None
-    assert action_signature(entry(Operation.CLICK, "Next")) == "click:Next:"
+    assert action_signature(entry(Operation.CLICK, "Next")) == "click:Next::"
+
+
+def test_paging_forward_is_walking_and_the_same_click_to_the_same_result_is_grinding() -> None:
+    walk = [entry(Operation.CLICK, "Next", effect=f"address: /results?page={n}") for n in range(2, 6)]
+    assert repeated_action(walk, 3) is None
+    grind = [entry(Operation.CLICK, "Stops", effect="address: /flights?tfs=ABC") for _ in range(3)]
+    assert repeated_action(grind, 3) is not None
 
 
 def test_same_target_with_a_different_value_is_not_a_repetition() -> None:

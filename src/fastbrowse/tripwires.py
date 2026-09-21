@@ -40,10 +40,12 @@ def action_signature(entry: HistoryEntry) -> str | None:
 
     READ and DONE are excluded because neither targets an element: a run that legitimately reads the same
     page twice is not repeating an action, and counting it would fire this tripwire on every careful run.
+    The visible effect is part of it for the same reason: "Next" that opens a new page each time is walking,
+    and only "Next" that does the same thing again is grinding.
     """
     if entry.operation is None or entry.operation in {Operation.READ, Operation.DONE} or entry.target is None:
         return None
-    return f"{entry.operation.value}:{entry.target}:{entry.text or ''}"
+    return f"{entry.operation.value}:{entry.target}:{entry.text or ''}:{entry.effect or ''}"
 
 
 def repeated_action(history: list[HistoryEntry], limit: int) -> Tripped | None:
