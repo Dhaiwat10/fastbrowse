@@ -20,7 +20,7 @@ from fastbrowse.clients.validation import (
     token_count,
     with_discarded,
 )
-from fastbrowse.llm import Generation, LLMError, Message
+from fastbrowse.llm import DEFAULT_MAX_OUTPUT_TOKENS, Generation, LLMError, Message
 from fastbrowse.models import CostBasis, CostComponent, CostLine, LLMPurpose
 from fastbrowse.telemetry import BudgetExceeded, Ledger
 
@@ -166,7 +166,7 @@ class OpenAICompatibleLLM:
         messages: Sequence[Message],
         schema: type[T],
         *,
-        max_output_tokens: int = 2000,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         ledger: Ledger | None = None,
     ) -> Generation[T]:
         model = self._models.get(purpose)

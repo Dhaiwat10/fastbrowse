@@ -19,7 +19,7 @@ from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.effects import SETTING_ROLES, effect, state_key
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, LLMError, Message
-from fastbrowse.memory import Notes
+from fastbrowse.memory import Notes, NotesTooLarge
 from fastbrowse.models import (
     Attachment,
     Authorization,
@@ -302,7 +302,7 @@ class Agent:
             return self._result(state, ledger, Status.BUDGET_EXCEEDED, error=limit)
         except BudgetExceeded as error:
             return self._result(state, ledger, Status.BUDGET_EXCEEDED, error=str(error))
-        except ObservationTooLarge as error:
+        except (ObservationTooLarge, NotesTooLarge) as error:
             return self._result(state, ledger, Status.OBSERVATION_LIMIT, error=str(error))
         except (JevError, LLMError, BrowserError) as error:
             return self._result(state, ledger, Status.ERROR, error=self._redactor.redact(str(error))[:500])
@@ -973,11 +973,14 @@ class Agent:
             "page": {
                 "url": observation.url,
                 "title": observation.title,
-                "text": observation.viewport_text[:6000],
+                "text": observation.viewport_text,
                 "date": observation.captured_at.date().isoformat(),
             },
-            "recent_actions": [entry.model_dump(mode="json", exclude_none=True) for entry in state.history[-6:]],
-            "notes": state.notes.render(6000),
+            "recent_actions": [
+                entry.model_dump(mode="json", exclude_none=True)
+                for entry in _history(state.history, self._config.observation)
+            ],
+            "notes": state.notes.render(self._config.observation.working_notes_chars),
         }
         messages = [
             Message(role="system", content=_FIELD_WRITER),
@@ -1016,18 +1019,17 @@ class Agent:
 
     async def _value_absent(self, state: _RunState, observation: Observation, target: Control) -> bool:
         state.ledger.reserve(CostComponent.JEV)
+        question = NoulQuestion(
+            instructions=(
+                f"# Task\n{state.task}\n\nThe agent must fill the field labelled {target.label!r}. "
+                "Do the task or the notes give what belongs in it?"
+            ),
+            true="The task or the notes state that value, or state something it is a part of.",
+            false="Neither the task nor the notes say it; filling the field would mean inventing one.",
+        )
         evaluation = await self._jev.evaluate(
-            page_state(observation, state.notes),
-            {
-                "stated": NoulQuestion(
-                    instructions=(
-                        f"# Task\n{state.task}\n\nThe agent must fill the field labelled {target.label!r}. "
-                        "Do the task or the notes give what belongs in it?"
-                    ),
-                    true="The task or the notes state that value, or state something it is a part of.",
-                    false="Neither the task nor the notes say it; filling the field would mean inventing one.",
-                )
-            },
+            page_state(observation, state.notes, self._config.tokens, questions=[question.model_dump_json()]),
+            {"stated": question},
         )
         state.ledger.record(evaluation.cost)
         answer = evaluation.answers.get("stated")
@@ -1047,9 +1049,10 @@ class Agent:
         self, state: _RunState, observation: Observation, question: str, criteria: Mapping[str, JsonValue]
     ) -> str:
         state.ledger.reserve(CostComponent.JEV)
+        choice = ChoiceQuestion(instructions=f"# Task\n{state.task}\n\n{question}", criteria=criteria)
         evaluation = await self._jev.evaluate(
-            page_state(observation, state.notes),
-            {"pick": ChoiceQuestion(instructions=f"# Task\n{state.task}\n\n{question}", criteria=criteria)},
+            page_state(observation, state.notes, self._config.tokens, questions=[choice.model_dump_json()]),
+            {"pick": choice},
         )
         state.ledger.record(evaluation.cost)
         answer = evaluation.answers["pick"]
@@ -1140,6 +1143,7 @@ class Agent:
             question,
             [r.id for r in wanted],
             state.notes,
+            tokens=self._config.tokens,
             ledger=state.ledger,
             jev=self._jev,
             requirements=wanted,
@@ -1190,7 +1194,7 @@ class Agent:
         steps = "\n".join(
             f"- {h.operation.value if h.operation else 'open'} {h.target or ''} -> {h.outcome.value}"
             + (f": {h.effect}" if h.effect else "")
-            for h in state.history[-10:]
+            for h in _history(state.history, self._config.observation)
         )
         # Without the names, a sign-in page reads as a wall the user must pass: a run with a stored login gave up
         # saying no credentials were given.
@@ -1229,9 +1233,10 @@ class Agent:
                         f"## Task\n{state.task}\n\n## Problem\n{reason}\n\n## Recent steps\n{steps}\n\n"
                         f"## Current date\n{observation.captured_at.date().isoformat()}\n\n"
                         f"## Controls\n{_controls_text(observation)}\n\n"
-                        f"## Page\n{observation.url}\n{observation.viewport_text[:4000]}{secrets}\n\n"
+                        f"## Page\n{observation.url}\n{observation.viewport_text}{secrets}\n\n"
                         f"## Still to find\n{open_requirements or 'nothing'}\n\n"
-                        f"## Notes read so far\n{state.notes.render(3000) or 'none'}"
+                        "## Notes read so far\n"
+                        f"{state.notes.render(self._config.observation.working_notes_chars) or 'none'}"
                     ),
                     images=await self._screenshots(),
                 ),
@@ -1282,7 +1287,16 @@ class Agent:
         state.ledger.reserve(CostComponent.JEV)
         await state.await_plan()
         draft = draft_answer(state.plan, state.notes) if state.plan.answer_expected else None
-        check = await check_done(self._jev, state.task, state.plan, fresh, state.notes, self._config.thresholds, draft)
+        check = await check_done(
+            self._jev,
+            state.task,
+            state.plan,
+            fresh,
+            state.notes,
+            self._config.thresholds,
+            draft,
+            tokens=self._config.tokens,
+        )
         trace(
             "done_check",
             verdict=check.verdict.value,
@@ -1303,7 +1317,14 @@ class Agent:
                 # one discarded call on the branch that was going back to work anyway.
                 if state.plan.answer_expected and check.answer is None:
                     drafting = asyncio.create_task(
-                        compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
+                        compose(
+                            self._llm,
+                            state.task,
+                            state.plan,
+                            state.notes,
+                            tokens=self._config.tokens,
+                            ledger=state.ledger,
+                        )
                     )
                 verdict = await llm_verify(
                     self._llm,
@@ -1313,6 +1334,7 @@ class Agent:
                     await self._screenshots(),
                     state.notes,
                     state.steps,
+                    config=self._config,
                     ledger=state.ledger,
                 )
                 state.ledger.record(verdict.cost)
@@ -1341,7 +1363,9 @@ class Agent:
         composed = await (
             prepared
             if prepared is not None
-            else compose(self._llm, state.task, state.plan, state.notes, ledger=state.ledger)
+            else compose(
+                self._llm, state.task, state.plan, state.notes, tokens=self._config.tokens, ledger=state.ledger
+            )
         )
         held = await self._holds(state, composed.data)
         if held is None and (facts := draft_answer(state.plan, state.notes)) is not None:
@@ -1351,7 +1375,9 @@ class Agent:
         return self._redactor.redact((held or composed.data).answer), held is not None
 
     async def _holds(self, state: _RunState, answer: ComposedAnswer) -> ComposedAnswer | None:
-        return await check_claims(self._jev, answer, state.notes, self._config.thresholds, ledger=state.ledger)
+        return await check_claims(
+            self._jev, answer, state.notes, self._config.thresholds, tokens=self._config.tokens, ledger=state.ledger
+        )
 
     async def _extraction(self, state: _RunState, output_schema: type[BaseModel]) -> Extraction:
         """The caller's schema, filled from a capture taken inside this branch so it overlaps the answer."""
@@ -1362,6 +1388,7 @@ class Agent:
             await self._capture(),
             output_schema,
             notes=state.notes,
+            tokens=self._config.tokens,
             ledger=state.ledger,
         )
 
@@ -1436,7 +1463,7 @@ class Agent:
             task=state.task,
             subgoal=state.hint,
             requirements=tuple(r.text for r in state.ready_plan.requirements) if state.ready_plan else (),
-            notes=state.notes.render(4000),
+            notes=state.notes.render(self._config.observation.working_notes_chars),
             history=_history(state.history, self._config.observation),
             check_login=check_login,
             check_bot=check_bot,

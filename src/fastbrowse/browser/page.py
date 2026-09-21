@@ -228,7 +228,13 @@ class CdpPage(Page):
 
         title = main.raw["title"] if main else ""
         url = main.raw["url"] if main else await self.origin()
-        viewport_text = (main.raw["viewport_text"] if main else "")[: limits.viewport_text_chars]
+        viewport_text = main.raw["viewport_text"] if main else ""
+        if len(viewport_text) > limits.viewport_text_chars:
+            omitted_chars = len(viewport_text) - limits.viewport_text_chars
+            viewport_text = (
+                viewport_text[: limits.viewport_text_chars]
+                + f"\n[Viewport text cut: {omitted_chars} characters omitted; read the page for the rest]"
+            )
         return Observation(
             url=url,
             title=title,

@@ -233,7 +233,7 @@ def build_request(
             instructions=json.dumps(
                 {"task": context.task, "operation": operation.value, "rules": [NEXT_ACTION, GROUP]}
             ),
-            criteria={str(i): " | ".join(c.label[:40] for c in chunk) for i, chunk in enumerate(chunks)},
+            criteria={str(i): " | ".join(c.label for c in chunk) for i, chunk in enumerate(chunks)},
         )
     if Operation.SWITCH_TAB in offered:
         questions["switch_tab_target"] = ChoiceQuestion(

@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from fastbrowse.memory import Fact, Notes, evidence_id
+from fastbrowse.memory import Fact, Notes, NotesTooLarge, evidence_id
 from fastbrowse.models import Evidence
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 
@@ -55,3 +55,16 @@ def test_render_reports_omissions_and_never_slices_a_citation() -> None:
     with pytest.raises(ValueError, match="too small"):
         notes.render(1)
     assert Notes().render(0) == ""
+
+
+def test_requirement_evidence_has_priority_including_reused_spans() -> None:
+    context = Fact(text="Context", evidence=evidence(sha="context"))
+    early = Fact(requirement_id="r1", text="First answer", evidence=evidence(sha="early"))
+    late = Fact(text="Checkout total", evidence=evidence(sha="late"))
+    notes = Notes((context, early, late))
+    notes.add(late.model_copy(update={"requirement_id": "r2"}))
+    required = Notes((early, late.model_copy(update={"requirement_id": "r2"})))
+    expected = required.render(1000) + "\n[1 facts omitted]"
+    assert notes.render(len(expected), preserve_requirements=True) == expected
+    with pytest.raises(NotesTooLarge, match=f"{len(expected) - 1} character notes budget"):
+        notes.render(len(expected) - 1, preserve_requirements=True)

@@ -303,6 +303,7 @@ def test_earlier_actions_stay_in_view_without_their_effects() -> None:
     assert [entry.target for entry in shown] == [f"field {i}" for i in range(3, 10)]
     assert [entry.effect for entry in shown] == [None] * 4 + ["e"] * 3
     assert _history(entries[:2], ObservationLimits(history_entries=3)) == tuple(entries[:2])
+    assert _history(entries, ObservationLimits(history_entries=0, earlier_history_entries=0)) == ()
 
 
 @pytest.mark.parametrize(("typed", "reads"), [(True, 1), (False, 0)])

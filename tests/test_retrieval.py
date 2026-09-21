@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 from pydantic import BaseModel, Field, JsonValue
 
-from fastbrowse.config import Thresholds
+from fastbrowse.config import Thresholds, TokenBudget
 from fastbrowse.jev import (
     MAX_CHOICE_OPTIONS,
     Answer,
@@ -18,7 +18,7 @@ from fastbrowse.jev import (
     NoulAnswer,
     Question,
 )
-from fastbrowse.llm import Generation, Message
+from fastbrowse.llm import DEFAULT_MAX_OUTPUT_TOKENS, Generation, Message
 from fastbrowse.memory import Fact, Notes, evidence_id
 from fastbrowse.models import CostBasis, CostComponent, CostLine, Frozen, Limits, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture, Observation
@@ -63,6 +63,7 @@ class ScriptedLLM:
     def __init__(self, responses: Sequence[JsonValue]) -> None:
         self.responses = list(responses)
         self.calls: list[tuple[LLMPurpose, tuple[Message, ...]]] = []
+        self.output_caps: list[int] = []
 
     async def generate[T: BaseModel](
         self,
@@ -70,13 +71,14 @@ class ScriptedLLM:
         messages: Sequence[Message],
         schema: type[T],
         *,
-        max_output_tokens: int = 2000,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         ledger: Ledger | None = None,
     ) -> Generation[T]:
         # Reserve exactly as the real client does, so a test can see a budget stop a request.
         if ledger is not None:
             ledger.reserve(CostComponent.LLM)
         self.calls.append((purpose, tuple(messages)))
+        self.output_caps.append(max_output_tokens)
         return Generation(
             data=schema.model_validate(self.responses.pop(0)),
             cost=CostLine(component=CostComponent.LLM, basis=CostBasis.METERED, dollars=0.001, purpose=purpose),
@@ -181,7 +183,10 @@ async def test_read_continues_after_forged_quote_tracks_coverage_and_cost() -> N
         ]
     )
     notes = Notes()
-    result = await read(llm, page, "What price?", ["r1"], notes, max_chars=15)
+    result = await read(
+        llm, page, "What price?", ["r1"], notes, max_chars=15, tokens=TokenBudget(read_output_tokens=4096)
+    )
+    assert llm.output_caps == [4096, 4096]
     assert result.coverage == (0, 1) and result.rejected_quotes == 1
     assert len(result.facts) == 1 and result.facts[0].evidence.quote == "Price is $12"
     assert notes.evidenced("r1")
@@ -451,7 +456,8 @@ async def test_compose_drops_uncited_and_unknown_claims_including_answer_text() 
         ),
         answer_expected=True,
     )
-    result = await compose(llm, "Find price and shipping", plan, notes)
+    result = await compose(llm, "Find price and shipping", plan, notes, tokens=TokenBudget(compose_output_tokens=4096))
+    assert llm.output_caps == [4096]
     assert result.data.answer == "It is $12."
     assert result.data.dropped_claims == 2 and len(result.data.claims) == 1
     assert result.cost.dollars == 0.001

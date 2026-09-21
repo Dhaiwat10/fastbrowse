@@ -1,5 +1,7 @@
 """Tunable policy. Defaults are starting points to be recalibrated from recorded decision packets."""
 
+from collections.abc import Sequence
+
 from pydantic import Field
 
 from fastbrowse.models import Frozen, TripwireMode
@@ -31,15 +33,22 @@ class Thresholds(Frozen):
 
 class ObservationLimits(Frozen):
     max_controls: int = Field(default=160, gt=0)
+    """Repeated controls consume both state and target questions, so bound them below Jev's token ceiling."""
     max_offscreen_controls: int = Field(default=40, ge=0)
+    """Long footers must leave most of the control budget for what is on screen."""
     viewport_text_chars: int = Field(default=6000, gt=0)
+    """Keep navigation's page excerpt small; the reader captures the whole page when it needs more."""
+    working_notes_chars: int = Field(default=6000, gt=0)
+    """Navigation, field writing and recovery share a short memory; verdicts use the token budget instead."""
     history_entries: int = Field(default=6, ge=0)
+    """Keep effects for six recent actions; older effects describe page states that have already changed."""
     earlier_history_entries: int = Field(default=14, ge=0)
     """Actions before the recent ones, shown without their effects. With only the last six, a form filled in
     eight steps lost its first field from view, and Jev typed the origin again instead of searching."""
     group_size: int = Field(default=30, gt=1)
-    """Controls per group when a choice exceeds `max_choice_options` and selection goes group -> element."""
+    """Thirty controls keep the second choice small when selection goes group -> element."""
     max_choice_options: int = Field(default=240, gt=1, le=255)
+    """Leave headroom under Jev's 255-option ceiling for policy choices."""
 
 
 class TokenBudget(Frozen):
@@ -48,6 +57,25 @@ class TokenBudget(Frozen):
     state_plus_all_questions: int = Field(default=48_000, gt=0)
     """Conservative target under Jev's 64k limit."""
     chars_per_token: float = Field(default=3.0, gt=0)
+    """Allow more tokens per character than ordinary English to cover JSON and identifiers."""
+    read_output_tokens: int = Field(default=8000, gt=0)
+    """A page of records needs room for each value and its verbatim quote in the reader's JSON."""
+    compose_output_tokens: int = Field(default=8000, gt=0)
+    """A long answer repeats citation ids for every claim, so it needs more room than a planning response."""
+
+    def remaining_chars(self, context: str, questions: Sequence[str] = ()) -> int:
+        """Room for notes after other content, using the same conservative input targets for LLM prompts."""
+        sizes = [len(question) for question in questions]
+        return max(
+            0,
+            int(
+                min(
+                    self.state_plus_largest_question * self.chars_per_token - max(sizes, default=0),
+                    self.state_plus_all_questions * self.chars_per_token - sum(sizes),
+                )
+            )
+            - len(context),
+        )
 
 
 class StallRules(Frozen):

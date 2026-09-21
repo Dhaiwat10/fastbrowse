@@ -13,6 +13,10 @@ class Fact(Frozen):
     evidence: Evidence
 
 
+class NotesTooLarge(RuntimeError):
+    """A verdict cannot fit its requirement evidence without losing facts."""
+
+
 def evidence_id(evidence: Evidence) -> str:
     return f"{evidence.capture_sha256}:{evidence.start}:{evidence.end}"
 
@@ -53,22 +57,36 @@ class Notes:
     def unresolved(self, plan: Plan) -> tuple[Requirement, ...]:
         return tuple(requirement for requirement in plan.requirements if not self.evidenced(requirement.id))
 
-    def render(self, max_chars: int) -> str:
-        """Only include whole cited facts. A budget too small to report its omissions is invalid."""
+    def render(self, max_chars: int, *, preserve_requirements: bool = False, json_encoded: bool = False) -> str:
+        """Drop uncited context before requirement evidence, retaining read order within each group.
+
+        Verdicts must fail when requirement evidence cannot fit, rather than decide without it.
+        """
         if max_chars < 0:
             raise ValueError("max_chars must be nonnegative")
+        ordered = sorted(self._facts.items(), key=lambda item: not self._requirements[item[0]])
+        required = sum(bool(ids) for ids in self._requirements.values())
         lines = [
             f"[{key}] {json.dumps(fact.text, ensure_ascii=False)} "
             f"requirements={','.join(sorted(self._requirements[key])) or '-'} "
             f"source={json.dumps(fact.evidence.source_id)} url={json.dumps(fact.evidence.url)} "
             f"quote={json.dumps(fact.evidence.quote, ensure_ascii=False)}"
-            for key, fact in self._facts.items()
+            for key, fact in ordered
         ]
+
+        def size(text: str) -> int:
+            # A JSON state escapes quotes and newlines; its notes budget must count those extra characters.
+            return len(json.dumps(text)) - len('""') if json_encoded else len(text)
+
         complete = "\n".join(lines)
-        if len(complete) <= max_chars:
+        if size(complete) <= max_chars:
             return complete
         for count in range(len(lines) - 1, -1, -1):
+            if preserve_requirements and count < required:
+                raise NotesTooLarge(f"Requirement evidence exceeds the {max_chars} character notes budget")
             result = "\n".join([*lines[:count], f"[{len(lines) - count} facts omitted]"])
-            if len(result) <= max_chars:
+            if size(result) <= max_chars:
                 return result
+        if preserve_requirements:
+            raise NotesTooLarge(f"The {max_chars} character notes budget cannot report omitted facts")
         raise ValueError("max_chars is too small to report omitted citations")
