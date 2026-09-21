@@ -28,13 +28,22 @@ from cdp_use.cdp.target.events import (
 )
 from cdp_use.client import CDPClient
 
-from fastbrowse.models import Artifact, ArtifactKind, ArtifactSink, FrameHandler
+from fastbrowse.models import Artifact, ArtifactKind, ArtifactSink, FrameHandler, Unavailable
 from fastbrowse.models import BrowserConnection as BrowserConnectionModel
 from fastbrowse.page import BrowserError, Dialog, Tab
 
 logger = logging.getLogger(__name__)
 
 _SCREENCAST_COMMAND_SECONDS = 0.5
+CDP_REPLY_SECONDS = 60.0
+"""A CDP command is answered in milliseconds, a slow one in seconds; one silent this long never will be. A cloud
+browser's proxy can keep the socket open, answering pings, after losing the browser behind it, and a run with no
+wall-clock limit would otherwise wait on that reply forever."""
+
+
+class BrowserUnresponsive(BrowserError, Unavailable):
+    """The browser stopped answering: an outage the same run may not meet again, not a failed task."""
+
 
 # Response-stage interception is enough: fastbrowse only needs the bytes of a save-as download, never to
 # rewrite a request. Chrome also classifies download-attribute anchors as Document; intercepting Other
@@ -93,7 +102,10 @@ class _BrowserClient(CDPClient):
 
     async def send_raw(self, method: str, params: Any = None, session_id: str | None = None) -> dict[str, Any]:
         try:
-            return await super().send_raw(method, params, session_id)
+            async with asyncio.timeout(CDP_REPLY_SECONDS):
+                return await super().send_raw(method, params, session_id)
+        except TimeoutError:
+            raise BrowserUnresponsive(f"{method} got no reply in {CDP_REPLY_SECONDS:.0f}s") from None
         except Exception as exc:
             # CDP error messages can contain evaluated source or page text, including secrets.
             raise _browser_error(method, exc) from exc

@@ -23,8 +23,9 @@ from fastbrowse.adapters.browser_use_cloud import BrowserUseCloudBrowser, Browse
 from fastbrowse.adapters.local_chrome import async_local_chrome, find_chrome, local_chrome
 from fastbrowse.agent import Agent
 from fastbrowse.browser import BrowserSession, CdpPage
+from fastbrowse.browser import session as browser_session
 from fastbrowse.config import Config
-from fastbrowse.models import BrowserConnection, CostBreakdown, CostLine, LocalChrome, RunResult, Status
+from fastbrowse.models import BrowserConnection, CostBreakdown, CostLine, LocalChrome, RunResult, Status, Unavailable
 from fastbrowse.page import BrowserError
 from fastbrowse.run import _browser, run_task
 from tests.browser.conftest import RecordingArtifactSink
@@ -502,3 +503,13 @@ async def test_a_browser_handed_over_with_no_page_named_still_works_one_out_from
     )
     assert captured["start"] is None
     assert captured["choose_start"], "with no page named the first address comes from the task"
+
+
+async def test_a_command_the_browser_never_answers_is_an_outage(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = CdpTransport(monkeypatch)
+    monkeypatch.setattr(browser_session, "CDP_REPLY_SECONDS", 0.05)
+    async with BrowserSession(CONNECTION, RecordingArtifactSink()) as session:
+        transport.blocked["Page.navigate"] = asyncio.Event()
+        with pytest.raises(browser_session.BrowserUnresponsive) as raised:
+            await CdpPage(session, Config()).navigate("https://example.test/")
+    assert isinstance(raised.value, Unavailable) and "Page.navigate got no reply" in str(raised.value)
