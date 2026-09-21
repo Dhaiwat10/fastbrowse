@@ -86,13 +86,16 @@ def page_state(
         state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
     except NotesTooLarge:
         # Requirement evidence outranks the page's own text: a verdict without it is a guess, while cut text says
-        # it was cut. Off-screen controls go next, as they do for Jev's policy: a "View more" list of results can
-        # fill the budget with controls alone. Only when the on-screen controls leave no room does the verdict stop.
+        # it was cut. Controls without a value or selection state go next, and the state says how many: their
+        # labels are page text, while a "View more" list of result rows can fill the budget with them alone. Only
+        # when the stateful controls leave no room does the verdict stop.
         page["text"] = ""
         try:
             state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
         except NotesTooLarge:
-            state["controls"] = _controls(control for control in observation.controls if not control.offscreen)
+            stateful = [c for c in observation.controls if (c.value, c.checked, c.selected) != (None, None, None)]
+            state["controls"] = _controls(stateful)
+            state["controls_omitted"] = len(observation.controls) - len(stateful)
             state["notes"] = notes.render(room(), preserve_requirements=True, json_encoded=True)
         page["text"] = cut_text(observation.viewport_text, room(), json_encoded=True)
     return state
@@ -225,17 +228,20 @@ async def llm_verify(
             content=(
                 f"## Task\n{task}\n\n## Requirements\n{requirements}\n\n## Steps taken\n{history}\n\n"
                 f"## Page\n{observation.url}\n"
-                f"{observation.viewport_text}\n\n## Notes\n"
             ),
             images=screenshots,
         ),
     ]
-    room = config.tokens.remaining_chars(
-        "".join(message.content for message in messages) + json.dumps(LLMVerdict.model_json_schema())
-    )
-    messages[-1] = messages[-1].model_copy(
-        update={"content": messages[-1].content + notes.render(room, preserve_requirements=True)}
-    )
+
+    def room(*parts: str) -> int:
+        prompt = "".join(message.content for message in messages) + "".join(parts)
+        return config.tokens.remaining_chars(prompt + json.dumps(LLMVerdict.model_json_schema()))
+
+    # As in the done check's page state, the notes' requirement evidence is placed first and the page text is cut
+    # to what remains: a "View more" results page once left the notes no room at all and ended the run.
+    rendered = notes.render(room("\n\n## Notes\n"), preserve_requirements=True)
+    text = cut_text(observation.viewport_text, room("\n\n## Notes\n", rendered))
+    messages[-1] = messages[-1].model_copy(update={"content": f"{messages[-1].content}{text}\n\n## Notes\n{rendered}"})
     return await llm.generate(
         LLMPurpose.VERIFY,
         messages,

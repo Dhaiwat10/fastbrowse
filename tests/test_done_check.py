@@ -113,7 +113,7 @@ async def test_verdict_prompts_keep_late_requirement_evidence_when_notes_overflo
         assert state_chars + sum(sizes) <= total * tokens.chars_per_token
 
 
-def test_a_page_too_long_for_the_evidence_is_cut_rather_than_ending_the_run() -> None:
+async def test_a_page_too_long_for_the_evidence_is_cut_rather_than_ending_the_run() -> None:
     tokens = TokenBudget(state_plus_largest_question=1500, state_plus_all_questions=1500)
     total_text = "Checkout total is $42"
     notes = Notes(
@@ -132,9 +132,17 @@ def test_a_page_too_long_for_the_evidence_is_cut_rather_than_ending_the_run() ->
     assert total_text in state["notes"]
     assert "[Viewport text cut:" in str(state["page"]["text"])
     assert len(json.dumps(state)) <= tokens.state_plus_all_questions * tokens.chars_per_token
+    plan = Plan(
+        requirements=(Requirement(id="r1", text="Report the checkout total", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    llm = ScriptedLLM([{"complete": True, "missing": []}])
+    await llm_verify(llm, "Total?", plan, page, (), notes, (), config=Config(tokens=tokens))
+    prompt = llm.calls[0][1][-1].content
+    assert total_text in prompt and "[Viewport text cut:" in prompt
 
 
-def test_off_screen_controls_give_way_to_the_evidence_before_the_run_ends() -> None:
+def test_controls_without_state_give_way_to_the_evidence_before_the_run_ends() -> None:
     # "View more flights" put hundreds of result rows on the page as controls, and those alone left the done check
     # a 0 character notes budget, ending a run that had its evidence.
     tokens = TokenBudget(state_plus_largest_question=1500, state_plus_all_questions=1500)
@@ -164,7 +172,6 @@ def test_off_screen_controls_give_way_to_the_evidence_before_the_run_ends() -> N
             role="button",
             label=f"From {100 + i} US dollars. Nonstop flight",
             operations=frozenset({Operation.CLICK}),
-            offscreen=True,
         )
         for i in range(300)
     )
@@ -172,3 +179,4 @@ def test_off_screen_controls_give_way_to_the_evidence_before_the_run_ends() -> N
     assert isinstance(state, dict) and isinstance(state["notes"], str)
     assert total_text in state["notes"]
     assert state["controls"] == [{"label": "Nonstop only", "role": "checkbox", "checked": True}]
+    assert state["controls_omitted"] == 300
