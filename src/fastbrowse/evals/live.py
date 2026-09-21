@@ -509,6 +509,7 @@ async def _fast_report(
     with _traced() as events:
         outcome, result, seen = await fast_arm(task, http, downloads, bitwarden=bitwarden, record=record)
     cost = result.cost
+    settings = load_settings()
     return outcome, ArmReport(
         status=result.status.value,
         seconds=(seen.ended or time.monotonic()) - started,
@@ -528,8 +529,8 @@ async def _fast_report(
         unknown_cost=cost.has_unknown,
         observe_error=seen.observe_error,
         seconds_by_call=cost.seconds_by_call(),
-        model=f"jev {load_settings().jev_route()[0]}",
-        text_model=", ".join(sorted(set(load_settings().models().values()))),
+        model=f"jev {settings.jev_route()[0]}",
+        text_model=", ".join(sorted(set(settings.models().values()))),
         cost_by_component={
             c: round(sum(line.dollars or 0 for line in cost.lines if line.component == c), 5)
             for c in {line.component.value for line in cost.lines}

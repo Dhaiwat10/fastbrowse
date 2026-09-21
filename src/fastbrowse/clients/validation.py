@@ -256,7 +256,7 @@ async def _hedged(
     attempt_seconds: float,
     hedge_seconds: float,
     before_hedge: Callable[[], None] | None,
-    usage: RequestUsage | None,
+    usage: RequestUsage,
 ) -> httpx.Response | None:
     """The first usable response from one request, raced by a second if the first outlasts `hedge_seconds`."""
     requests = {asyncio.create_task(_send(http, url, body, headers, attempt_seconds, usage))}
@@ -282,14 +282,13 @@ async def _hedged(
         for request in requests:
             request.cancel()
         await asyncio.gather(*requests, return_exceptions=True)
-        if usage is not None:
-            for request in requests:
-                if request is winner:
-                    continue
-                result = None if request.cancelled() or request.exception() else request.result()
-                # Providers do not bill error statuses, so retries after those add no cost.
-                if result is None or result.is_success:
-                    usage.unaccounted_requests += 1
+        for request in requests:
+            if request is winner:
+                continue
+            result = None if request.cancelled() or request.exception() else request.result()
+            # Providers do not bill error statuses, so retries after those add no cost.
+            if result is None or result.is_success:
+                usage.unaccounted_requests += 1
 
 
 async def _send(
@@ -298,7 +297,7 @@ async def _send(
     body: dict[str, JsonValue],
     headers: Mapping[str, str],
     attempt_seconds: float,
-    usage: RequestUsage | None,
+    usage: RequestUsage,
 ) -> httpx.Response | None:
     try:
         response = await http.post(url, json=body, headers=headers, timeout=attempt_seconds)
@@ -313,8 +312,7 @@ async def _send(
         if response.status_code not in RETRYABLE_STATUS:
             return response
         failure = describe(response)
-    if usage is not None:
-        usage.failures.append(failure)
+    usage.failures.append(failure)
     return response
 
 
