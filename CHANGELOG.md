@@ -11,6 +11,10 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.5.0] - 2026-09-21
+
 - **Measured on 2026-09-21: 42/42 answer-task runs passed at a $0.0042 median cost**, against 41/42 and
   $0.0057 for 0.4.1; hosted Browser Use scored 40/42 at $0.4163 the same day. Navigation tasks passed 18/18.
   Google Flights is slower (109.3s against 71.7s). See `docs/evals.md`.
@@ -24,12 +28,11 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 - **A card or table row is one block.** A repeated card (a quote with its author and tags, a product) and each
   table row with its header are captured as single blocks, so a record is read and cited whole.
 - **Model responses use strict structured output, and every prompt was audited.** Schemas are sent strict,
-  with field docs included. Page text is marked untrusted in the same words everywhere. Context comes before the question. Rules added for one incident became general
-  rules or were removed. Text fields no longer ask the model to retype a quote: the value must appear in the
+  with field docs included. Page text is marked untrusted in the same words everywhere. Context comes
+  before the question. Rules added for one incident became general rules or were removed. Text fields no longer ask the model to retype a quote: the value must appear in the
   block it names.
 - **`python -m fastbrowse.evals.probe` measures the reader and claim check on live pages.** It loads the
   given pages once and runs the agent's own read, draft and claim check over them N times at once.
-
 - **Counts, totals and superlatives cite their underlying records.** The reader preserves every compared
   record across pages and records which facts a conclusion draws on. Drafted and composed answers carry
   those records through claim checks, citation links and `RunResult.citations`. Required evidence keeps
@@ -52,8 +55,8 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   from its child tasks. Finishing one run no longer disables trace collection for the others.
 - **Answer claims link to the words that support them.** `RunResult.citations` exposes each cited
   fact, its requirement, source URL, verbatim quote and text-fragment deep link. An answer citing an
-  unknown reference fails the claim check and falls back to one drafted from verified facts. `RunResult.answer` contains numbered Markdown links;
-  integrations should render them as Markdown. MCP answers carry the links too, while its citation records
+  unknown reference fails the claim check and falls back to one drafted from verified facts.
+  `RunResult.answer` contains numbered Markdown links; integrations should render them as Markdown. MCP answers carry the links too, while its citation records
   retain their `quote` and `url` shape.
 - **See what each step learned and why it stopped.** `StepResult.facts` carries that step's added facts on
   its `StepEvent`, with quotes, source links and the reader (`jev_choice` or `llm`). `StepResult.note`
@@ -220,7 +223,8 @@ Fixed in the same release, from tasks that failed in the field:
 - First release: a browser agent that picks its next action from the controls the page actually has, with an
   LLM to plan and read, and code owning verification, safety and secrets.
 
-[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.4.2...HEAD
+[unreleased]: https://github.com/agent-labs-dev/fastbrowse/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.5.0
 [0.4.2]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.2
 [0.4.1]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.1
 [0.4.0]: https://github.com/agent-labs-dev/fastbrowse/releases/tag/v0.4.0
