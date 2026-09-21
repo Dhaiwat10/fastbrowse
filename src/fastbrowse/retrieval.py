@@ -685,7 +685,8 @@ async def propose_text_fields_from_notes(
     three and returned no data, because it ended on httpx's results, and taken from that page the field came
     back "httpx". A value is kept only when the note it cites quotes it verbatim, or when it is a name the task
     itself gives: a choice between the task's own entities ("httpx or requests"), made on a cited note whose
-    quote is a date, invents nothing.
+    quote is a date, invents nothing. Cited on the derived comparison itself, which quotes nothing, such a name is
+    evidenced by the record the comparison read for it.
     """
     if not notes.facts:
         return {}
@@ -721,6 +722,8 @@ async def propose_text_fields_from_notes(
     for proposal in result.data.fields:
         value = " ".join(proposal.value.split())
         evidence = cited.get(proposal.source_id)
+        if evidence is None and notes.derived(proposal.source_id) and _names(task, value):
+            evidence = _compared(notes, proposal.source_id, value)
         if (
             proposal.field in fields
             and proposal.field not in found
@@ -730,6 +733,15 @@ async def propose_text_fields_from_notes(
         ):
             found[proposal.field] = (value, evidence)
     return found
+
+
+def _compared(notes: Notes, key: str, name: str) -> Evidence | None:
+    """The evidence for a name a derived conclusion picks, which quotes nothing itself: the record it compared that
+    was read for that name, or else the first record it compared."""
+    facts = {fact_id(fact): fact for fact in notes.facts}
+    records = [facts[k] for k in notes.expand_evidence_ids((key,)) if k in facts and facts[k].evidence is not None]
+    chosen = next((fact for fact in records if _names(fact.text, name)), records[0] if records else None)
+    return None if chosen is None else chosen.evidence
 
 
 def _names(task: str, value: str) -> bool:

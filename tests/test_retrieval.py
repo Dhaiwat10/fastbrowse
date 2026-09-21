@@ -597,6 +597,25 @@ async def test_a_name_the_task_gives_can_be_chosen_on_a_note_that_quotes_only_a_
     assert not await propose_text_fields_from_notes(ScriptedLLM([{"fields": [partial]}]), task, notes, fields)
 
 
+async def test_a_name_chosen_on_a_derived_comparison_is_evidenced_by_the_record_read_for_it() -> None:
+    page = capture((BlockKind.PARAGRAPH, "Dec 6, 2024"), (BlockKind.PARAGRAPH, "May 14, 2026"))
+    records = [
+        Fact(reader=FactReader.LLM, text=f"{name}: {date}", evidence=locate_quote(page, source, date))
+        for name, source, date in (("httpx", "s0", "Dec 6, 2024"), ("requests", "s1", "May 14, 2026"))
+    ]
+    notes = Notes(records)
+    winner = Fact(reader=FactReader.LLM, text="requests is newer", evidence=None, basis=tuple(notes.evidence))
+    notes.add(winner)
+    proposal: dict[str, JsonValue] = {"field": "label", "value": "requests", "source_id": fact_id(winner), "quote": ""}
+    fields = {"label": Fields.model_fields["label"]}
+    task = "Which has the more recent release, httpx or requests?"
+    found = await propose_text_fields_from_notes(ScriptedLLM([{"fields": [proposal]}]), task, notes, fields)
+    assert found == {"label": ("requests", records[1].evidence)}
+    # A value the task does not name is not taken from a conclusion that quotes nothing.
+    invented: dict[str, JsonValue] = {**proposal, "value": "urllib3"}
+    assert not await propose_text_fields_from_notes(ScriptedLLM([{"fields": [invented]}]), task, notes, fields)
+
+
 @pytest.mark.parametrize("limit", ["calls", "dollars"])
 @pytest.mark.parametrize("reader", ["read", "fields"])
 async def test_each_chunk_reserves_budget_before_request(limit: str, reader: str) -> None:
