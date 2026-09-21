@@ -152,12 +152,12 @@ class Recording:
         if error:
             logger.warning("ffmpeg could not write %s: %s", self._path, error)
             return
-        # Encoded in scratch and copied only once finished: a failed or cancelled encode leaves whatever was
-        # already at these paths untouched, and scratch cleanup takes the partial files with it.
+        # Encoded in scratch, then copied beside each path and renamed over it: a failed encode or copy leaves
+        # whatever was already there untouched, and scratch cleanup takes the partial files with it.
         written = []
         for name, path in (("captioned.mp4", self._path), ("plain.mp4", self._plain_path)):
             try:
-                await asyncio.to_thread(shutil.copyfile, Path(self._scratch.name, name), path)
+                await asyncio.to_thread(_replace, Path(self._scratch.name, name), path)
             except OSError as error:
                 logger.warning("could not write %s: %s", path, error)
                 continue
@@ -301,3 +301,13 @@ def _describe(step: StepResult) -> str:
 def _srt_time(seconds: float) -> str:
     millis = round(seconds * 1000)
     return f"{millis // 3_600_000:02}:{millis // 60_000 % 60:02}:{millis // 1000 % 60:02},{millis % 1000:03}"
+
+
+def _replace(source: Path, path: Path) -> None:
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as partial:
+        staged = Path(partial.name)
+    try:
+        shutil.copy(source, staged)  # with the encoded file's mode, not the private one of a temporary file
+        staged.replace(path)
+    finally:
+        staged.unlink(missing_ok=True)
