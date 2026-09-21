@@ -178,6 +178,8 @@ async def run_task(
                             )
                             if recording is not None:
                                 await recording.show_result(task, result)
+                        if recording is not None:
+                            result = result.model_copy(update={"recordings": recording.outputs})
             except BrowserError as exc:
                 result = result or RunResult(
                     status=Status.ERROR,

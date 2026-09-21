@@ -240,6 +240,8 @@ class RunResult(Frozen):
     """Where the browser was last observed; what a caller checks when the task was to arrive somewhere."""
     would_fire: tuple[Tripwire, ...] = ()
     """Shadow tripwires retain each occurrence so eval counts do not depend on logging configuration."""
+    recordings: tuple[Path, ...] = ()
+    """The videos this run finished writing, captioned then plain; empty when it recorded nothing or encoding failed."""
 
     @property
     def succeeded(self) -> bool:

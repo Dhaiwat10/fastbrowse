@@ -155,7 +155,10 @@ async def run(args: argparse.Namespace) -> int:
         print(f"{result.status.value} (${result.cost.known_dollars:.4f}, {len(result.steps)} steps)")
         print(result.answer or result.error or "")
     if args.record is not None:
-        print(f"  recorded: {args.record}", file=sys.stderr)
+        print(
+            f"  recorded: {', '.join(map(str, result.recordings))}" if result.recordings else "  not recorded",
+            file=sys.stderr,
+        )
     return 0 if result.succeeded else 1
 
 

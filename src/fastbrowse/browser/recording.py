@@ -65,6 +65,8 @@ class Recording:
         self._card_at: float | None = None
         self._scratch = tempfile.TemporaryDirectory(prefix="fastbrowse-recording-")
         self._uncaptioned = Path(self._scratch.name, "uncaptioned.mkv")
+        self.outputs: tuple[Path, ...] = ()
+        """The finished videos, set only once both are encoded: a failed run must not report a file it did not write."""
 
     async def __aenter__(self) -> Self:
         ffmpeg = shutil.which("ffmpeg")
@@ -150,10 +152,16 @@ class Recording:
                 stderr=asyncio.subprocess.PIPE,
             )
             _, stderr = await process.communicate()
+            outputs = (self._path, self.plain_path)
             if process.returncode != 0:
                 logger.warning(
                     "ffmpeg could not caption %s: %s", self._path, stderr.decode(errors="replace").strip()[:400]
                 )
+                # A partial file looks like a video until it is played.
+                for output in outputs:
+                    output.unlink(missing_ok=True)
+                return
+            self.outputs = outputs
 
     async def show_result(self, task: str, result: RunResult) -> None:
         """End the video on the task and its outcome, in the tab being recorded."""
