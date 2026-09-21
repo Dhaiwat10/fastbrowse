@@ -22,6 +22,7 @@ from fastbrowse.agent import (
     _Unsure,
     _verified,
 )
+from fastbrowse.citations import text_fragment
 from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, NoulQuestion, Question
 from fastbrowse.llm import Generation
@@ -29,6 +30,7 @@ from fastbrowse.memory import Fact, FactReader, Notes, evidence_id
 from fastbrowse.models import (
     Authorization,
     BrowserEvent,
+    Citation,
     Decider,
     Limits,
     LLMPurpose,
@@ -40,6 +42,7 @@ from fastbrowse.models import (
 from fastbrowse.page import Action, ActResult, BlockKind, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.policy import Decision, HistoryEntry, ReadAssessment, decide
+from fastbrowse.retrieval import ComposedAnswer
 from fastbrowse.safety import ScopedSecrets
 from fastbrowse.telemetry import Ledger
 from fastbrowse.tripwires import Tripwire
@@ -967,7 +970,8 @@ async def test_a_composed_answer_that_fails_its_check_falls_back_to_the_readers_
     whole: JsonValue = {"claims": [{"text": "WHOLE LIST: Book A and Book B", "evidence_ids": [evidence_id(first)]}]}
     agent = Agent(Mock(spec=Page), DoubtingJev({}), ScriptedLLM([whole]))
 
-    answer, verified = await agent._answer(state, None)
+    composed, verified = await agent._answer(state, None)
+    answer = composed.answer
 
     assert verified
     assert "WHOLE LIST" not in answer and "Book A is listed" in answer and "Book B is listed" in answer
@@ -1162,3 +1166,18 @@ async def test_same_text_can_be_read_for_a_new_document_or_new_requirement() -> 
     state.ready_plan = Plan(requirements=(requirement.model_copy(update={"id": "r2"}),), answer_expected=True)
     assert not await agent._read(state, page, obs)
     assert len(llm.calls) == 3
+
+
+def test_a_secret_quoted_by_a_citation_is_redacted_from_its_links_too() -> None:
+    agent = Agent(Mock(spec=Page), ScriptedJev({}), ScriptedLLM([]))
+    agent._redactor.register("password", "hunter 2&x")
+    quote = "signed in as hunter 2&x today"
+    link = text_fragment("https://example.test/account", quote)
+    cited = Citation(id=1, text=quote, url="https://example.test/account", quote=quote, deep_link=link)
+    composed = ComposedAnswer(answer=f"{quote} [1](<{link}>)", claims=(), citations=(cited,))
+
+    answer, (public,) = agent._public_answer(composed)
+
+    assert "hunter" not in answer and "hunter" not in public.model_dump_json()
+    assert public.deep_link == text_fragment(public.url, "signed in as [secret:password] today")
+    assert public.deep_link in answer

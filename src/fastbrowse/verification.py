@@ -21,6 +21,7 @@ from fastbrowse.planner import Plan, RequirementKind
 from fastbrowse.retrieval import (
     ComposedAnswer,
     UnsupportedField,
+    assemble_answer,
     claim_check_questions,
     copy_field,
     field_candidates,
@@ -273,7 +274,7 @@ async def check_claims(
         supporting = {key for key, _ in notes.supporting(requirement.id)}
         if supporting & was_cited and not supporting & cited:
             return None
-    pruned = composed.model_copy(update={"claims": kept, "answer": "\n\n".join(claim.text for claim in kept)})
+    pruned = assemble_answer(kept, notes, composed.requirements)
     omission = {key: q for key, q in claim_check_questions(pruned, notes, tokens=tokens).items() if key == _OMITTED}
     if omission and _probability(await _ask(jev, pruned, omission, ledger), _OMITTED) > limit:
         return None

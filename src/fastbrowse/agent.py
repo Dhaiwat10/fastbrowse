@@ -15,6 +15,7 @@ from urllib.parse import urljoin, urlsplit
 
 from pydantic import BaseModel, Field, JsonValue
 
+from fastbrowse.citations import text_fragment
 from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.effects import SETTING_ROLES, effect, state_key
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
@@ -23,6 +24,7 @@ from fastbrowse.memory import Notes, NotesTooLarge
 from fastbrowse.models import (
     Attachment,
     Authorization,
+    Citation,
     CostComponent,
     Decider,
     EventHandler,
@@ -1409,11 +1411,11 @@ class Agent:
             if drafting is not None:
                 await _discard(drafting)
 
-    async def _answer(self, state: _RunState, prepared: _Prepared) -> tuple[str, bool]:
+    async def _answer(self, state: _RunState, prepared: _Prepared) -> tuple[ComposedAnswer, bool]:
         """The answer and whether its claims held, composing only when nothing prepared survives the check."""
         if isinstance(prepared, ComposedAnswer):
             if (held := await self._holds(state, prepared)) is not None:
-                return self._redactor.redact(held.answer), True
+                return held, True
             # Jev took the reader's facts as the answer and then doubted a claim in them, which is what
             # the composer exists for.
             prepared = None
@@ -1429,7 +1431,7 @@ class Agent:
             # A list of forty records came back as one claim citing one quote, which no claim check should pass. The
             # reader's own facts each carry the quote that shows them, so they are offered to the same check.
             held = await self._holds(state, facts)
-        return self._redactor.redact((held or composed.data).answer), held is not None
+        return held or composed.data, held is not None
 
     async def _holds(self, state: _RunState, answer: ComposedAnswer) -> ComposedAnswer | None:
         return await check_claims(
@@ -1456,6 +1458,8 @@ class Agent:
         prepared: _Prepared = None,
     ) -> RunResult:
         answer: str | None = None
+        composed: ComposedAnswer | None = None
+        citations: tuple[Citation, ...] = ()
         data: JsonValue | None = None
         evidence: list[Evidence] = [fact.evidence for fact in state.notes.facts]
         verified = True
@@ -1466,7 +1470,7 @@ class Agent:
         if answering is not None and extracting is not None:
             first, second = asyncio.create_task(answering), asyncio.create_task(extracting)
             try:
-                (answer, verified), extraction = await asyncio.gather(first, second)
+                (composed, verified), extraction = await asyncio.gather(first, second)
             finally:
                 # gather reports the first failure and leaves its sibling running, which would go on
                 # calling a model after the run had already failed or hit its budget.
@@ -1474,10 +1478,12 @@ class Agent:
                     if not task.done():
                         await _discard(task)
         elif answering is not None:
-            answer, verified = await answering
+            composed, verified = await answering
             extraction = None
         else:
             extraction = await extracting if extracting is not None else None
+        if composed is not None:
+            answer, citations = self._public_answer(composed)
         if extraction is not None:
             data = extraction.data
             evidence.extend(extraction.evidence)
@@ -1488,7 +1494,32 @@ class Agent:
         cited: dict[tuple[str, str], Evidence] = {}
         for item in evidence:
             cited.setdefault((item.url, item.quote), item)
-        return self._result(state, state.ledger, status, answer=answer, data=data, evidence=tuple(cited.values()))
+        return self._result(
+            state, state.ledger, status, answer=answer, data=data, evidence=tuple(cited.values()), citations=citations
+        )
+
+    def _public_answer(self, composed: ComposedAnswer) -> tuple[str, tuple[Citation, ...]]:
+        """The answer and its citations with secrets redacted, links included.
+
+        A link percent-encodes its quote, where redacting the text cannot see a secret, so each link is rebuilt
+        from the redacted quote and swapped into the answer before the answer itself is redacted.
+        """
+        redact = self._redactor.redact
+        answer = composed.answer
+        citations = []
+        for citation in composed.citations:
+            url, quote = redact(citation.url), redact(citation.quote)
+            public = citation.model_copy(
+                update={
+                    "text": redact(citation.text),
+                    "url": url,
+                    "quote": quote,
+                    "deep_link": text_fragment(url, quote),
+                }
+            )
+            answer = answer.replace(citation.deep_link, public.deep_link)
+            citations.append(public)
+        return redact(answer), tuple(citations)
 
     def _plan_mark(self, state: _RunState) -> str:
         """What the plan still wants. Requirement ids, not model prose: this asks whether the run resolved
@@ -1543,6 +1574,7 @@ class Agent:
         answer: str | None = None,
         data: JsonValue | None = None,
         evidence: tuple[Evidence, ...] = (),
+        citations: tuple[Citation, ...] = (),
         error: str | None = None,
     ) -> RunResult:
         return RunResult(
@@ -1550,6 +1582,7 @@ class Agent:
             answer=answer,
             data=data,
             evidence=evidence,
+            citations=citations,
             steps=tuple(state.steps) if state else (),
             cost=ledger.breakdown(),
             artifacts=self._page.artifacts[self._artifact_start :],

@@ -5,6 +5,7 @@ the agent, and returns what the run could prove. Everything under it is importab
 in the sense that the tests cover it.
 """
 
+from fastbrowse.models import Citation, RunResult
 from fastbrowse.run import run_task
 
-__all__ = ["run_task"]
+__all__ = ["Citation", "RunResult", "run_task"]

@@ -396,6 +396,7 @@ async def run_arm(
                 # grind and never spin, so a zero there says nothing about the rate that matters.
                 "would_fire": dict(would_fire),
                 "error": result.error,
+                "citations": [citation.model_dump(mode="json") for citation in result.citations],
                 "trace": [f"{s.operation.value} {s.target or ''} -> {s.outcome.value}" for s in result.steps],
                 # Enough to say why a run failed without running it again: every step as the agent judged it, and
                 # each read, done check, verification, claim check and recovery in order.

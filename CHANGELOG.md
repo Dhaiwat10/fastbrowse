@@ -11,6 +11,11 @@ Older entries are kept verbatim rather than rewritten as the product moves.
 
 ## [Unreleased]
 
+- **Answer claims link to the words that support them.** `RunResult.citations` exposes each cited Notes
+  fact, its requirement, source URL, verbatim quote and text-fragment deep link. Numbered links in the
+  answer come from verified notes, and unknown composer references are dropped with a warning.
+  `RunResult.answer` now contains those Markdown links: render it as Markdown, or rebuild plain text from
+  `citations`.
 - **Watch the active tab as the agent works.** `run_task(on_frame=...)` sends JPEG bytes of each repaint, as
   fast as the handler takes them and no faster, follows tab switches, and works with browsers reached over CDP without exposing their endpoint.
   Slow or failing handlers do not hold up the run. Capture is off unless a handler is supplied.

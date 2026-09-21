@@ -25,6 +25,11 @@ class NotesTooLarge(RuntimeError):
     """A verdict cannot fit its requirement evidence without losing facts."""
 
 
+class RenderedNotes(Frozen):
+    text: str
+    evidence_ids: tuple[str, ...]
+
+
 def evidence_id(evidence: Evidence) -> str:
     return f"{evidence.capture_sha256}:{evidence.start}:{evidence.end}"
 
@@ -66,6 +71,13 @@ class Notes:
         return tuple(requirement for requirement in plan.requirements if not self.evidenced(requirement.id))
 
     def render(self, max_chars: int, *, preserve_requirements: bool = False, json_encoded: bool = False) -> str:
+        return self.render_with_ids(
+            max_chars, preserve_requirements=preserve_requirements, json_encoded=json_encoded
+        ).text
+
+    def render_with_ids(
+        self, max_chars: int, *, preserve_requirements: bool = False, json_encoded: bool = False
+    ) -> RenderedNotes:
         """Drop uncited context before requirement evidence, retaining read order within each group.
 
         Verdicts must fail when requirement evidence cannot fit, rather than decide without it.
@@ -87,14 +99,15 @@ class Notes:
             return len(json.dumps(text)) - len('""') if json_encoded else len(text)
 
         complete = "\n".join(lines)
+        keys = tuple(key for key, _ in ordered)
         if size(complete) <= max_chars:
-            return complete
+            return RenderedNotes(text=complete, evidence_ids=keys)
         for count in range(len(lines) - 1, -1, -1):
             if preserve_requirements and count < required:
                 raise NotesTooLarge(f"Requirement evidence exceeds the {max_chars} character notes budget")
             result = "\n".join([*lines[:count], f"[{len(lines) - count} facts omitted]"])
             if size(result) <= max_chars:
-                return result
+                return RenderedNotes(text=result, evidence_ids=keys[:count])
         if preserve_requirements:
             raise NotesTooLarge(f"The {max_chars} character notes budget cannot report omitted facts")
         raise ValueError("max_chars is too small to report omitted citations")

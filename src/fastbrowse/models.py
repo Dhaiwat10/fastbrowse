@@ -92,6 +92,16 @@ class Evidence(Frozen):
     quote: str
 
 
+class Citation(Frozen):
+    id: int = Field(ge=1)
+    """The number used by this fact's links in the answer, stable within a run."""
+    text: str
+    requirement_id: str | None = None
+    url: str
+    quote: str
+    deep_link: str
+
+
 class ArtifactKind(StrEnum):
     DOWNLOAD = "download"
 
@@ -191,6 +201,7 @@ class RunResult(Frozen):
     steps: tuple[StepResult, ...]
     cost: CostBreakdown
     artifacts: tuple[Artifact, ...]
+    citations: tuple[Citation, ...] = ()
     error: str | None = None
     final_url: str | None = None
     """Where the browser was last observed; what a caller checks when the task was to arrive somewhere."""

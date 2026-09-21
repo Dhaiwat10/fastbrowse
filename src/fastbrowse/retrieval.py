@@ -18,11 +18,12 @@ from decimal import Decimal, InvalidOperation
 from pydantic import Field, JsonValue, TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 
+from fastbrowse.citations import text_fragment
 from fastbrowse.config import TokenBudget
 from fastbrowse.jev import MAX_CHOICE_OPTIONS, ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, Message
 from fastbrowse.memory import Fact, FactReader, Notes, evidence_id
-from fastbrowse.models import CostComponent, CostLine, Evidence, Frozen, LLMPurpose
+from fastbrowse.models import Citation, CostComponent, CostLine, Evidence, Frozen, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.telemetry import Ledger
@@ -823,6 +824,7 @@ class Claim(Frozen):
 class ComposedAnswer(Frozen):
     answer: str
     claims: tuple[Claim, ...]
+    citations: tuple[Citation, ...] = ()
     dropped_claims: int = Field(default=0, ge=0)
     requirements: tuple[Requirement, ...] = ()
     """Original obligations retained for the omission check, including unevidenced ones."""
@@ -830,6 +832,50 @@ class ComposedAnswer(Frozen):
 
 class _AnswerDraft(Frozen):
     claims: tuple[Claim, ...]
+
+
+def assemble_answer(
+    claims: Sequence[Claim],
+    notes: Notes,
+    requirements: tuple[Requirement, ...],
+    *,
+    dropped_claims: int = 0,
+) -> ComposedAnswer:
+    known = {
+        evidence_id(fact.evidence): Citation(
+            id=index,
+            text=fact.text,
+            requirement_id=fact.requirement_id,
+            url=fact.evidence.url,
+            quote=fact.evidence.quote,
+            deep_link=text_fragment(fact.evidence.url, fact.evidence.quote),
+        )
+        for index, fact in enumerate(notes.facts, 1)
+    }
+    cited = {key for claim in claims for key in claim.evidence_ids}
+    paragraphs = []
+    for claim in claims:
+        links = " ".join(f"[{known[key].id}](<{known[key].deep_link}>)" for key in dict.fromkeys(claim.evidence_ids))
+        paragraphs.append(f"{claim.text} {links}")
+    return ComposedAnswer(
+        answer="\n\n".join(paragraphs),
+        claims=tuple(claims),
+        citations=tuple(citation for key, citation in known.items() if key in cited),
+        dropped_claims=dropped_claims,
+        requirements=requirements,
+    )
+
+
+def _without_citation_markup(text: str) -> str:
+    # The composer can echo bracketed references in prose; only its checked evidence_ids create links.
+    def replace(match: re.Match[str]) -> str:
+        label = match[1]
+        if label.isdecimal() or re.fullmatch(r"[\w-]+:\d+:\d+", label):
+            logger.warning("compose dropped inline citation reference %r", label)
+            return ""
+        return label if match[2] else match[0]
+
+    return re.sub(r"\[([^\]\n]+)\](\([^\n)]*\)|\[[^\]\n]*\])?", replace, text).strip()
 
 
 async def compose(
@@ -847,6 +893,8 @@ async def compose(
             content=(
                 "# Composer\nWrite the answer as self-contained claims in reading order. Every factual claim must "
                 "cite evidence_ids from the notes. The final answer is assembled from those claims. "
+                "Copy those ids exactly into evidence_ids; write plain claim text without citation markers "
+                "or Markdown links. Code adds the citation links from the supplied notes. "
                 "Do not claim success for unevidenced requirements.\n\n"
                 "# One claim, one fact\nEach claim must be supported by the quotes it cites, in full. Cite every "
                 "evidence_id that supports it, and split a statement that combines separately evidenced facts "
@@ -868,9 +916,8 @@ async def compose(
     room = tokens.remaining_chars(
         "".join(message.content for message in messages) + json.dumps(_AnswerDraft.model_json_schema())
     )
-    messages[-1] = messages[-1].model_copy(
-        update={"content": messages[-1].content + notes.render(room, preserve_requirements=True)}
-    )
+    offered = notes.render_with_ids(room, preserve_requirements=True)
+    messages[-1] = messages[-1].model_copy(update={"content": messages[-1].content + offered.text})
     result = await llm.generate(
         LLMPurpose.COMPOSE,
         messages,
@@ -880,14 +927,20 @@ async def compose(
     )
     if ledger is not None:
         ledger.record(result.cost)
-    known = notes.evidence.keys()
-    claims = tuple(claim for claim in result.data.claims if claim.evidence_ids and set(claim.evidence_ids) <= known)
+    known = set(offered.evidence_ids)
+    claims: list[Claim] = []
+    for claim in result.data.claims:
+        unknown = set(claim.evidence_ids) - known
+        if unknown:
+            logger.warning("compose dropped claim with unknown citation references: %s", sorted(unknown))
+        if claim.evidence_ids and not unknown:
+            claims.append(claim.model_copy(update={"text": _without_citation_markup(claim.text)}))
     return Generation(
-        data=ComposedAnswer(
-            answer="\n\n".join(claim.text for claim in claims),
-            claims=claims,
+        data=assemble_answer(
+            claims,
+            notes,
+            plan.requirements,
             dropped_claims=len(result.data.claims) - len(claims),
-            requirements=plan.requirements,
         ),
         cost=result.cost,
     )
@@ -906,11 +959,7 @@ def draft_answer(plan: Plan, notes: Notes) -> ComposedAnswer | None:
                 claims.setdefault(key, Claim(text=fact.text, evidence_ids=(key,)))
     if not claims:
         return None
-    return ComposedAnswer(
-        answer="\n\n".join(claim.text for claim in claims.values()),
-        claims=tuple(claims.values()),
-        requirements=plan.requirements,
-    )
+    return assemble_answer(tuple(claims.values()), notes, plan.requirements)
 
 
 def claim_check_questions(

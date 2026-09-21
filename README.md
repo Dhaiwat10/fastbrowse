@@ -261,6 +261,18 @@ complete {'package': 'httpx', 'version': '0.28.1'} $0.0114
 the run opens a tab and closes that tab, and the browser is left as it was found. With neither that nor a
 cloud key, it runs local Chrome.
 
+`RunResult.citations` is a tuple of `Citation` objects, also importable from `fastbrowse`. Each has `id`
+(the number in the answer), `text` (the Notes fact), `requirement_id` (or `None`), `url`, `quote` and
+`deep_link`. Each claim in `result.answer` carries numbered Markdown links to its supporting facts.
+Only verified Notes facts supply citation URLs and quotes; an unknown composer reference drops its claim
+and logs a warning. Facts omitted from the answer have no citation, and citation numbers can have gaps.
+
+Deep links follow the [WICG Text Fragments syntax](https://wicg.github.io/scroll-to-text-fragment/#syntax):
+`url#existing-anchor:~:text=start`. Text is percent-encoded, including hyphens, ampersands and commas.
+Whitespace is collapsed for the link; `quote` keeps the verbatim capture. Quotes over 120 characters with
+more than ten words use the first and last five words as `text=start,end`. An existing anchor is preserved;
+an old text directive is replaced. Pages that change or require a session may no longer show the quote.
+
 To show a run as it happens, pass `on_event=`: a `BrowserEvent` arrives first with the live-view URL of a
 cloud browser, then a `StepEvent` per step. `Config(step_frames=True)` adds a PNG of the page each step acted
 on, for an interface that renders the run; a step whose page is showing a resolved secret sends no frame.

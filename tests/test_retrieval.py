@@ -439,7 +439,7 @@ def test_field_constraints_and_explicit_unsupported_records() -> None:
     assert field_candidates(capture((BlockKind.PARAGRAPH, "2026-02-30")), Fields.model_fields["when"]) == ()
 
 
-async def test_compose_drops_uncited_and_unknown_claims_including_answer_text() -> None:
+async def test_compose_drops_uncited_and_unknown_claims_including_answer_text(caplog: pytest.LogCaptureFixture) -> None:
     page = capture((BlockKind.PARAGRAPH, "Price is $12"))
     evidence = locate_quote(page, "s0", "Price is $12")
     assert evidence is not None
@@ -449,7 +449,7 @@ async def test_compose_drops_uncited_and_unknown_claims_including_answer_text() 
         [
             {
                 "claims": [
-                    {"text": "It is $12.", "evidence_ids": [key]},
+                    {"text": "It is $12. [99](https://invented.test)", "evidence_ids": [key, key]},
                     {"text": "Shipping is free.", "evidence_ids": []},
                     {"text": "It arrives tomorrow.", "evidence_ids": ["invented"]},
                 ],
@@ -465,7 +465,13 @@ async def test_compose_drops_uncited_and_unknown_claims_including_answer_text() 
     )
     result = await compose(llm, "Find price and shipping", plan, notes, tokens=TokenBudget(compose_output_tokens=4096))
     assert llm.output_caps == [4096]
-    assert result.data.answer == "It is $12."
+    assert result.data.answer == "It is $12. [1](<https://example.test#:~:text=Price%20is%20%2412>)"
+    assert len(result.data.citations) == 1
+    citation = result.data.citations[0]
+    assert (citation.id, citation.text, citation.requirement_id) == (1, "Price is $12", "r1")
+    assert (citation.url, citation.quote) == (evidence.url, evidence.quote)
+    assert "invented" in caplog.text and "99" in caplog.text
+    assert all(record.levelname == "WARNING" for record in caplog.records)
     assert result.data.dropped_claims == 2 and len(result.data.claims) == 1
     assert result.cost.dollars == 0.001
     questions = claim_check_questions(result.data, notes)
@@ -473,6 +479,30 @@ async def test_compose_drops_uncited_and_unknown_claims_including_answer_text() 
     assert "Price is $12" in questions["unsupported_0"].instructions
     assert "Find shipping" in questions["requirement_omitted"].instructions
     assert all(question.true is not None and question.true.startswith("Yes,") for question in questions.values())
+
+
+async def test_composer_cannot_cite_a_note_omitted_from_its_input(caplog: pytest.LogCaptureFixture) -> None:
+    page = capture((BlockKind.PARAGRAPH, "Price is $12"), (BlockKind.PARAGRAPH, "Shipping is free"))
+    notes = Notes()
+    for index, text in enumerate(("Price is $12", "Unused context " * 1000)):
+        evidence = locate_quote(page, f"s{index}", page.text[page.blocks[index].start : page.blocks[index].end])
+        assert evidence is not None
+        notes.add(Fact(reader=FactReader.LLM, text=text, evidence=evidence))
+    key, omitted = tuple(notes.evidence)
+    llm = ScriptedLLM(
+        [{"claims": [{"text": "It is $12.", "evidence_ids": [key]}, {"text": "Free", "evidence_ids": [omitted]}]}]
+    )
+    result = await compose(
+        llm,
+        "Find the price",
+        Plan(requirements=(), answer_expected=True),
+        notes,
+        tokens=TokenBudget(state_plus_largest_question=2000),
+    )
+    assert key in llm.calls[0][1][-1].content and omitted not in llm.calls[0][1][-1].content
+    assert result.data.dropped_claims == 1
+    assert len(result.data.citations) == 1 and result.data.citations[0].quote == "Price is $12"
+    assert omitted in caplog.text
 
 
 async def test_compose_cannot_return_uncited_free_text_without_claims() -> None:
@@ -642,7 +672,8 @@ async def test_only_a_confident_jev_no_lets_the_read_facts_stand_as_the_answer(
         answer_expected=True,
     )
     draft = draft_answer(plan, notes)
-    assert draft is not None and draft.answer == "The price is $12."
+    assert draft is not None and draft.answer.startswith("The price is $12. [1](<")
+    assert draft.citations[0].quote == evidence.quote
     assert draft.claims[0].evidence_ids == (evidence_id(evidence),)
     observation = Observation(
         url=page.url,
@@ -677,7 +708,7 @@ async def test_action_only_completion_never_sends_empty_claim_check(answer: str,
 async def test_a_doubted_claim_is_dropped_only_if_the_rest_still_answers(omitted_after: float) -> None:
     from fastbrowse.jev import Evaluation, NoulAnswer
     from fastbrowse.models import CostBasis, CostComponent, CostLine
-    from fastbrowse.retrieval import Claim, ComposedAnswer
+    from fastbrowse.retrieval import Claim, assemble_answer
     from fastbrowse.verification import check_claims
 
     class Jev:
@@ -692,16 +723,24 @@ async def test_a_doubted_claim_is_dropped_only_if_the_rest_still_answers(omitted
             return Evaluation(model="test", answers=answers, input_tokens=1, cost=free)
 
     requirement = Requirement(id="r1", text="What does the page say?", kind=RequirementKind.INFORMATION)
+    page = capture((BlockKind.PARAGRAPH, "Logged in"), (BlockKind.PARAGRAPH, "Log out"))
+    notes = Notes()
+    for index, text in enumerate(("Logged in", "Log out")):
+        evidence = locate_quote(page, f"s{index}", text)
+        assert evidence is not None
+        notes.add(Fact(reader=FactReader.LLM, requirement_id="r1", text=text, evidence=evidence))
+    first, second = tuple(notes.evidence)
     claims = (
-        Claim(text="It says you are logged in.", evidence_ids=("e1",)),
-        Claim(text="It has a Log out button.", evidence_ids=("e1",)),
+        Claim(text="It says you are logged in.", evidence_ids=(first,)),
+        Claim(text="It has a Log out button.", evidence_ids=(second,)),
     )
-    composed = ComposedAnswer(answer="unused", claims=claims, requirements=(requirement,))
-    held = await check_claims(Jev(), composed, Notes(), Thresholds())
+    composed = assemble_answer(claims, notes, (requirement,))
+    held = await check_claims(Jev(), composed, notes, Thresholds())
     if omitted_after > 0.5:
         assert held is None
     else:
-        assert held is not None and held.answer == "It says you are logged in."
+        assert held is not None and held.answer.startswith("It says you are logged in. [1](<")
+        assert held.citations == composed.citations[:1]
 
 
 async def test_pruning_the_only_claim_for_a_requirement_is_an_omission() -> None:
