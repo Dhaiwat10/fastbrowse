@@ -83,6 +83,7 @@ def local_chrome(options: LocalChrome) -> Generator[BrowserConnection]:
         # left a window in which something else could take it, and Chrome then never answered.
         active = Path(profile) / "DevToolsActivePort"
         active.unlink(missing_ok=True)
+        _quiet_password_manager(Path(profile))
         proc = subprocess.Popen(
             [
                 binary,
@@ -108,6 +109,28 @@ def local_chrome(options: LocalChrome) -> Generator[BrowserConnection]:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+
+
+def _quiet_password_manager(profile: Path) -> None:
+    """Keep Chrome's password manager out of a profile that has no preferences yet.
+
+    After a sign-in, its save and leaked-password bubbles take the browser's input: the page still renders
+    and hit tests still pass, but no click reaches it. saucedemo's shared password is a known leak, so every
+    click after its sign-in did nothing. A profile with preferences of its own is left as its owner set it.
+    """
+    preferences = profile / "Default" / "Preferences"
+    if preferences.exists():
+        return
+    preferences.parent.mkdir(parents=True, exist_ok=True)
+    preferences.write_text(
+        json.dumps(
+            {
+                "credentials_enable_service": False,
+                "profile": {"password_manager_enabled": False, "password_manager_leak_detection": False},
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _wait_for_ws(active: Path, proc: subprocess.Popen[bytes], log: IO[bytes], timeout: float = 90.0) -> str:
