@@ -1461,15 +1461,25 @@ class Agent:
             # Jev took the reader's facts as the answer and then doubted a claim in them, which is what
             # the composer exists for.
             prepared = None
-        composed = await (
-            prepared
-            if prepared is not None
-            else compose(
-                self._llm, state.task, state.plan, state.notes, tokens=self._config.tokens, ledger=state.ledger
+        facts = draft_answer(state.plan, state.notes)
+        try:
+            composed = await (
+                prepared
+                if prepared is not None
+                else compose(
+                    self._llm, state.task, state.plan, state.notes, tokens=self._config.tokens, ledger=state.ledger
+                )
             )
-        )
+        except LLMError:
+            # A composer that fails (one looped to its output cap) leaves the reader's facts, each with its quote,
+            # which is an answer the claim check can still pass; failing the run over it threw away read evidence.
+            if facts is None:
+                raise
+            logger.warning("The composer failed; offering the reader's facts to the claim check", exc_info=True)
+            held = await self._holds(state, facts)
+            return held or facts, held is not None
         held = await self._holds(state, composed.data)
-        if held is None and (facts := draft_answer(state.plan, state.notes)) is not None:
+        if held is None and facts is not None:
             # A list of forty records came back as one claim citing one quote, which no claim check should pass. The
             # reader's own facts each carry the quote that shows them, so they are offered to the same check.
             held = await self._holds(state, facts)
