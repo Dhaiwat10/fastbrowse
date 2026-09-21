@@ -109,12 +109,12 @@ Run on 2026-09-18. Every arm used a Browser Use Cloud browser and the same limit
 
 Each arm meets the others only on the tasks both can be graded on (see `arms` above), so there are two headline tables, not one. `wasted actions per run` counts escalations, actions that failed or changed nothing, and an action repeated on the same target from the same page, from each run's step log (the target alone for rows from before the step log, such as this run) (`scripts/h2h_report.py`); hosted Browser Use returns no trace to count.
 
-### Uncapped, 2026-09-20
+### Head-to-head, 2026-09-20
 
-The answer tasks re-run with **no cost cap on either arm** and a 600s ceiling neither reached, both on the
-same day, both at eight runs in flight. This replaces a capped comparison whose pass rates said more about
-the cap than about either arm: hosted Browser Use exceeded the shared $0.25 cap on 28 of 42 runs there, and
-each was scored a failure. Uncapped it passes every one, and 36 of its 42 runs cost more than $0.25.
+The answer tasks on both arms, same day, eight runs in flight, under a 600s ceiling neither reached. No
+dollar limit applies, so every run ends when its agent finishes and the figures compare the agents rather
+than their budgets. Hosted Browser Use spends more than $0.25 on 36 of its 42 runs, which is why a shared
+dollar limit would measure the limit instead.
 
 | | passed | correct answer | median time | mean time | median cost | mean cost | suite total |
 |:--|:--|:--|:--|:--|:--|:--|:--|
@@ -184,17 +184,15 @@ were transient, and `google-flights` 2/3, which is the one that is genuinely unr
 single 42-run pass rate as having a couple of points of noise in it, in either direction.
 
 **What is not in this run.** Only the tasks both arms are graded on, so the navigation tasks and the safety
-task are absent - they have no hosted counterpart. The figures below are from the earlier capped run and are
-kept for the jev-ultrafast comparison and the per-arm detail.
+task are absent - they have no hosted counterpart. Those, and the jev-ultrafast comparison, are below.
 
-### The earlier capped run
+### Under a $0.25 limit per task, 2026-09-18
 
-**On reading the pass rates below.** Both arms were given the same $0.25 cap, and every one of hosted
-Browser Use's 28 failures is that cap being reached ($0.37 to $0.92 spent), not a task it could not do. The
-uncapped run above is what settles that; these tables are kept for the arms it does not cover.
+Every arm on the same suite with a shared dollar limit. Read the hosted pass rate as what that limit does and
+not as what the agent can do: all 28 of its failures are the limit being reached, at $0.37 to $0.92 spent.
+The head-to-head above is the comparison of the agents themselves.
 
-**Answer tasks** (lookups, sign-ins, checkout and Flights), fastbrowse against hosted Browser Use, under the
-$0.25 cap. The pass column is what the uncapped run above corrects:
+**Answer tasks** (lookups, sign-ins, checkout and Flights), fastbrowse against hosted Browser Use:
 
 | | passed | correct answer | median time | mean time | cost per task | wasted actions per run |
 |:--|:--|:--|:--|:--|:--|:--|
@@ -227,9 +225,13 @@ three patterns showed up across all 93 fastbrowse runs that day:
 - `saucedemo-locked-out` clicks the site's **Dismiss error** button in five runs of nine, removing the message
   the task asks it to report, then escalates twice and signs in again to get it back: 35s and $0.0088 against
   16s and $0.0020 on the runs that read it first ([#74](https://github.com/agent-labs-dev/fastbrowse/issues/74)).
-- `pypi-newer` writes the search box two to four times per search in five runs of six, every fill executing
-  cleanly. It is the most expensive lookup in the suite at $0.0160 against the category's $0.0052
-  ([#75](https://github.com/agent-labs-dev/fastbrowse/issues/75); #7 bounded this, it did not remove it).
+- `pypi-newer` wrote the search box two to four times per search in five runs of six, every fill executing
+  cleanly, making it the most expensive lookup in the suite at $0.0160 against the category's $0.0052
+  ([#75](https://github.com/agent-labs-dev/fastbrowse/issues/75)). Fixed: a re-write of a value a field
+  already holds is no longer counted as progress, whatever the page did. The fill's own autocomplete popup was
+  a page change, which both stall guards read as the action having worked. The run is now five steps and two
+  fills where it was eleven and five, and the shadow `action_repetition` tripwire fires on none of the suite's
+  passing runs where it fired on this one.
 - Every step in those 93 runs that did not execute cleanly - 11 stale, 2 failed, 1 covered - is on
   `google-flights`. The other 462 executed steps had none ([#12]).
 

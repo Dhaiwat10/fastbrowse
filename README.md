@@ -32,8 +32,8 @@ something that was never on the page. Every claim in an answer cites a verbatim 
 ### Against Browser Use
 
 The same 14 answer tasks (lookups, sign-ins, checkout, Google Flights), three passes each, on the same kind of
-cloud browser, run the same day with **no cost cap on either side**, so a run stops when the agent is done
-rather than when a budget runs out. Neither arm hit a limit.
+cloud browser, run the same day under a 600s ceiling neither arm reached. Every run ended when the agent
+finished, so these figures compare the agents rather than their budgets.
 
 | | passed | cost per task | median time |
 |:--|:--|:--|:--|
@@ -43,11 +43,9 @@ rather than when a budget runs out. Neither arm hit a limit.
 
 The whole suite cost $0.35 here and $22.28 there.
 
-**Reliability is a tie, and the earlier claim was wrong.** An earlier version of this table read "2.9x the
-passes", from a run where both arms were given a $0.25 cap. Browser Use exceeded that cap on 28 of 42 runs and
-each was scored a failure. Uncapped it passes every one: 36 of its 42 runs cost more than $0.25, so the cap was
-measuring our budget, not its ability. We have no reliability advantage to claim on this suite, and the one
-failure in the table is ours (`saucedemo-locked-out`, one pass of three).
+**Reliability is a tie.** There is no reliability advantage to claim on this suite: Browser Use passes every
+task, and the one failure in the table is ours (`saucedemo-locked-out`, one pass of three). Cost is the
+difference, and it is the whole difference.
 
 **Where the cost difference comes from.** It grows with how much a task does: 63x on a lookup, 88x on the
 checkout, 182x on the sign-ins. Jev picks each action from the controls already on the page, so a step costs a
@@ -72,13 +70,13 @@ as fast (38.5s against 71.7s), and it is the one task whose grade here wobbles r
 Treat the whole-suite median as the summary and the rows as the shape: the more a task does, the further
 ahead this gets.
 
-[Every run, what it cost, and how a failure is counted](docs/evals.md#uncapped-2026-09-20).
+[Every run, what it cost, and how a failure is counted](docs/evals.md#head-to-head-2026-09-20).
 
 ### Why fastbrowse, against each kind of agent
 
 - **LLM agents that generate actions** (Browser Use and similar): Jev picks each action from the controls
   that are on the page, so there is no invented selector to retry. A task costs a fraction as much (a lookup,
-  $0.005 against $0.33, uncapped and measured the same day), and every claim in the answer cites a verbatim
+  $0.005 against $0.33, both measured the same day), and every claim in the answer cites a verbatim
   quote. Reliability is about the same; the cost is the difference.
 - **Choice-model navigators** ([jev-ultrafast](https://github.com/browser-use/jev-ultrafast)): the same
   core technique, plus everything a real task needs. fastbrowse reads pages and returns cited answers,
