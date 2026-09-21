@@ -316,3 +316,24 @@ async def test_an_unstable_target_expires_without_a_press(page: CdpPage, monkeyp
     outcome, _ = await page._click_point(("session", "main", 1, ["guard"]), (10.0, 10.0))
     assert outcome is StepOutcome.STALE
     pressed.assert_not_called()
+
+
+async def test_hydration_marking_a_control_enabled_does_not_make_it_stale(
+    page: CdpPage, browser_session: BrowserSession, main_site: str
+) -> None:
+    """Google Flights adds aria-disabled="false" as it hydrates, after the run first observed its controls."""
+    await page.navigate(main_site)
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.body.innerHTML = '<button onclick=\"this.dataset.clicked = 1\">Round trip</button>'; true",
+    )
+    obs = await page.observe()
+    await eval_value(
+        browser_session,
+        browser_session.active_session_id,
+        "document.querySelector('button').setAttribute('aria-disabled', 'false'); true",
+    )
+    target = next(c for c in obs.controls if c.label == "Round trip")
+    result = await page.act(Action(operation=Operation.CLICK, target_id=target.id), obs)
+    assert result.outcome is StepOutcome.EXECUTED

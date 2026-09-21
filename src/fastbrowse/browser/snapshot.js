@@ -200,8 +200,10 @@
     const source = sourceOf(e);
     if (source !== e && (source.matches(':disabled') || source.closest('[aria-disabled="true"],[inert]'))) return null;
     const scope = e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
+    // An absent aria-disabled and "false" both mean enabled. Google Flights adds the "false" as it hydrates, and
+    // the raw attribute turned the run's first click stale.
     return [identity(e), roleOf(e), labelOf(e), reveal(source), source.checked ?? null, e.selectedIndex ?? null,
-      e.readOnly ?? null, e.matches(':disabled'), e.getAttribute('aria-disabled'),
+      e.readOnly ?? null, e.matches(':disabled'), e.getAttribute('aria-disabled') === 'true',
       e.getAttribute('aria-expanded'), e.getAttribute('aria-checked'), e.getAttribute('aria-selected'),
       e.getAttribute('href'), scope?.innerText?.slice(0, GUARD_TEXT_CHARS) || '',
       e.ownerDocument.location.origin, e.ownerDocument.defaultView.performance.timeOrigin, submitSemantics(e),
