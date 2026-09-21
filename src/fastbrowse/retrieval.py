@@ -329,12 +329,9 @@ async def read(
     if jev is not None and wanted and not notice:
         chosen = await _read_choices(jev, capture, wanted, tokens=tokens, ledger=ledger)
         costs.extend(chosen.cost_lines)
-        for claim in chosen.claims:
-            fact = _remember(capture, claim, FactReader.JEV_CHOICE, notes)
-            if fact is None:
-                rejected += 1
-            else:
-                facts[(evidence_id(fact.evidence), fact.requirement_id)] = fact
+        for fact in chosen.facts:
+            notes.add(fact)
+            facts[(evidence_id(fact.evidence), fact.requirement_id)] = fact
         answered = {fact.requirement_id for fact in facts.values()}
         requirement_ids = [key for key in requirement_ids if key not in answered and key not in chosen.absent]
         if not requirement_ids:
@@ -764,7 +761,7 @@ def read_candidates(capture: Capture) -> tuple[Candidate, ...]:
 
 
 class _ChoiceRead(Frozen):
-    claims: tuple[_ReadClaim, ...] = ()
+    facts: tuple[Fact, ...] = ()
     absent: tuple[str, ...] = ()
     cost_lines: tuple[CostLine, ...] = ()
 
@@ -839,7 +836,7 @@ async def _read_choices(
         return _ChoiceRead()
     if ledger is not None:
         ledger.record(evaluation.cost)
-    claims: list[_ReadClaim] = []
+    facts: list[Fact] = []
     absent: list[str] = []
     for requirement in requirements:
         answer = evaluation.answers.get(requirement.id)
@@ -860,15 +857,16 @@ async def _read_choices(
             continue
         value, evidence = copied
         logger.debug("read reader=jev_choice requirement=%s reason=scalar_candidate", requirement.id)
-        claims.append(
-            _ReadClaim(
+        # The candidate's evidence was cut from this capture by code, so it is kept as selected, not re-found.
+        facts.append(
+            Fact(
                 requirement_id=requirement.id,
                 text=f"{requirement.text}\n{value}",
-                source_id=evidence.source_id,
-                quote=evidence.quote,
+                evidence=evidence,
+                reader=FactReader.JEV_CHOICE,
             )
         )
-    return _ChoiceRead(claims=tuple(claims), absent=tuple(absent), cost_lines=(evaluation.cost,))
+    return _ChoiceRead(facts=tuple(facts), absent=tuple(absent), cost_lines=(evaluation.cost,))
 
 
 class Claim(Frozen):

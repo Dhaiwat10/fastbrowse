@@ -1074,38 +1074,28 @@ async def test_mixed_read_routes_keep_provenance_and_narrow_the_llm_request() ->
     assert "Version 1.2.3" in request.split("# Collected evidence\n")[1]
 
 
-@pytest.mark.parametrize("reader", list(FactReader))
-async def test_both_readers_verify_quotes_at_the_notes_write_and_log_bounded_rejections(
-    reader: FactReader, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+async def test_the_reader_verifies_quotes_at_the_notes_write_and_logs_bounded_rejections(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     from fastbrowse import retrieval
 
     page = capture((BlockKind.PARAGRAPH, "The only page text"))
     rejected = "unverified " * retrieval._READ_SPAN_CHARS
     requirement = Requirement(id="r", text="Find the fact", kind=RequirementKind.INFORMATION)
-    if reader is FactReader.JEV_CHOICE:
-        candidate = read_candidates(page)[0]
-        # A malformed candidate must not bypass the same quote check used for generated claims.
-        bad = candidate.model_copy(update={"evidence": candidate.evidence.model_copy(update={"quote": rejected})})
-        monkeypatch.setattr(retrieval, "read_candidates", lambda _: (bad,))
-        jev = _ReadJev({"r": _choice(candidate.id)})
-        llm = ScriptedLLM([{"claims": [], "answered": False}])
-    else:
-        jev = None
-        llm = ScriptedLLM(
-            [
-                {
-                    "claims": [{"requirement_id": "r", "text": "Invented", "source_id": "s0", "quote": rejected}],
-                    "answered": True,
-                }
-            ]
-        )
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [{"requirement_id": "r", "text": "Invented", "source_id": "s0", "quote": rejected}],
+                "answered": True,
+            }
+        ]
+    )
     notes = Notes()
     with caplog.at_level("DEBUG", logger="fastbrowse.retrieval"):
-        result = await read(llm, page, requirement.text, ["r"], notes, jev=jev, requirements=(requirement,))
+        result = await read(llm, page, requirement.text, ["r"], notes, requirements=(requirement,))
     assert result.rejected_quotes == 1 and not notes.facts
     record = next(record for record in caplog.records if "rejected quote" in record.message)
-    assert record.args == (reader.value, rejected[: retrieval._READ_SPAN_CHARS])
+    assert record.args == (FactReader.LLM.value, rejected[: retrieval._READ_SPAN_CHARS])
     assert page.text not in caplog.text and rejected not in caplog.text
 
 
