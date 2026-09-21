@@ -15,6 +15,18 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   record across pages and records which facts a conclusion draws on. Drafted and composed answers carry
   those records through claim checks, citation links and `RunResult.citations`. Required evidence keeps
   its full basis within the notes budget or stops at `observation_limit`.
+- **Long lists are read to the end before they are answered.** A single block longer than the reader's
+  input, such as a flight results list, is split at line breaks rather than stopping the run at
+  `observation_limit`, and the last chunk of a page decides whether its list goes on. When the list does
+  go on, recovery and the next-step hint say to load the rest or narrow it with the page's own filter or
+  sort, instead of finishing early with the best record seen so far.
+- **The completion check keeps the page state that matters on long pages.** When the page and the notes
+  do not both fit, the check drops page text and controls without state before it drops the evidence, so
+  a checked filter such as "Nonstop only" still counts.
+- **Recovery can direct a read or a finish.** A recovery subgoal that names READ or DONE is followed; a
+  finish is still judged by the completion check.
+- **Page-script output is validated.** What the browser scripts return is parsed into typed models, so a
+  mismatch raises `BrowserError` at once instead of failing later in the run.
 - **Concurrent live evals keep separate traces.** Each run records only its own events, including events
   from its child tasks. Finishing one run no longer disables trace collection for the others.
 - **Answer claims link to the words that support them.** `RunResult.citations` exposes each cited
