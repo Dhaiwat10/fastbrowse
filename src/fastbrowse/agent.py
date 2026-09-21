@@ -9,7 +9,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
 
@@ -187,6 +187,8 @@ class _RunState:
     directed: tuple[Operation, str | None] | None = None
     """The operation and control id recovery named, taken when Jev is still unsure of the next step."""
     unchanged: int = 0
+    written: set[str] = field(default_factory=set[str])
+    """Controls a fill or select has written, so only a field's first new value counts as progress by itself."""
     recoveries: int = 0
     recovered_at: int = 0
     """`len(history)` when a tripwire last recovered the run. Evidence a recovery already acted on is
@@ -561,7 +563,9 @@ class Agent:
             # A value edit answers "was this progress" itself, and its answer beats `changed`: the popup a fill
             # draws IS a page change, so `changed` alone kept crediting the identical re-fill even once the
             # written-value check had stopped doing so. `changed` decides every other operation.
-            edit = self._edit_progress(decision, action)
+            edit = self._edit_progress(decision, action, state.written)
+            if act.outcome is StepOutcome.EXECUTED and edit is not None and decision.target is not None:
+                state.written.add(decision.target.id)
             progressed = act.outcome is StepOutcome.EXECUTED and (changed if edit is None else edit)
             # Moving between two pages changes the page every time, and a run went round "open the author,
             # back to the list" to its step limit with its stall budget reset at every hop. The same action
@@ -785,9 +789,12 @@ class Agent:
         return tuple(ref.name for ref in self._secrets.available() if secret_allowed(ref, origin))
 
     @staticmethod
-    def _edit_progress(decision: Decision, action: Action) -> bool | None:
-        """Rewriting the observed field value vetoes progress even when the page changes.
-        Other edits, including uploads, return None so the page's effect decides.
+    def _edit_progress(decision: Decision, action: Action, written: Set[str]) -> bool | None:
+        """Rewriting the observed field value vetoes progress even when the page changes, and the first new value
+        a field receives is progress even when the page does not: a page's fingerprint ignores field values, so
+        a three-field checkout form counted three unchanged steps and tripped the stall recovery every run.
+        A later rewrite of a field already written returns None, as do other edits, including uploads, so the
+        page's effect decides; crediting every new value let a run grind on a search box it never submitted.
         """
         if decision.operation not in {Operation.FILL, Operation.SELECT} or decision.target is None:
             return None
@@ -795,7 +802,9 @@ class Agent:
             return None
         # A secret's value never leaves the page; only its length is observed, so that is what to compare.
         held = "\u2022" * len(action.text) if action.secret else action.text
-        return False if decision.target.value == held else None
+        if decision.target.value == held:
+            return False
+        return True if decision.target.id not in written else None
 
     async def _record_step(self, state: _RunState, step: StepResult) -> None:
         state.steps.append(step)

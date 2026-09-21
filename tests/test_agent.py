@@ -1250,24 +1250,24 @@ def test_writing_a_value_a_field_already_holds_is_not_progress() -> None:
     A checkout writes one name into billing and the same name into shipping, and the second write is the whole
     point. A remembered (operation, label, value) key called it a repeat; the field's own value does not.
     """
-    # None, not True: writing into an empty field is not evidence on its own, so `changed` decides. Returning
-    # True here credited three fills that changed nothing and let a PyPI run grind on.
-    assert Agent._edit_progress(*edit("Ada", holds=None)) is None
-    assert Agent._edit_progress(*edit("Ada", holds="")) is None
-    assert Agent._edit_progress(*edit("Ada", holds="Ada")) is False
+    assert Agent._edit_progress(*edit("Ada", holds="Ada"), set()) is False
+    # A field's first value is progress: a checkout's three fields changed no page fingerprint and tripped the
+    # stall recovery. Only the first: every new value credited let a PyPI run grind on one search box.
+    assert Agent._edit_progress(*edit("Ada", holds=None), set()) is True
+    assert Agent._edit_progress(*edit("Ada", holds=""), {"f"}) is None
     # A corrected value is not vetoed, even though the field is not empty.
-    assert Agent._edit_progress(*edit("Ada", holds="Adz")) is None
+    assert Agent._edit_progress(*edit("Ada", holds="Adz"), {"f"}) is None
 
 
 def test_a_secret_is_compared_by_the_length_the_page_reveals() -> None:
     """A password's value never leaves the page: only bullets of its length are observed."""
-    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 7, secret=True)) is False
-    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 4, secret=True)) is None
+    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 7, secret=True), set()) is False
+    assert Agent._edit_progress(*edit("hunter2", holds="\u2022" * 4, secret=True), {"f"}) is None
 
 
 def test_an_upload_is_judged_by_the_page_not_by_a_value() -> None:
     """A file input's value is not the file, so every upload after the first read as the same nothing."""
-    assert Agent._edit_progress(*edit("a.pdf", holds=None, operation=Operation.UPLOAD)) is None
+    assert Agent._edit_progress(*edit("a.pdf", holds=None, operation=Operation.UPLOAD), set()) is None
 
 
 async def test_same_text_can_be_read_for_a_new_document_or_new_requirement() -> None:
