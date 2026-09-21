@@ -183,7 +183,7 @@ class _RunState:
     written: set[tuple[Operation, str | None, str | None]] = field(
         default_factory=set[tuple[Operation, str | None, str | None]]
     )
-    """Every value edit the run has made, as operation, target and value. Never cleared: see `_first_edit`."""
+    """Every value edit the run has made, as operation, target and value. Never cleared: see `_edit_progress`."""
     attempts: dict[Signature, _Attempts] = field(default_factory=dict[Signature, "_Attempts"])
     """What became of each action taken from each page state, which is how a cycle is told from progress."""
     last_page: tuple[str, str] | None = None
@@ -751,12 +751,13 @@ class Agent:
         A value edit is progress once per target per VALUE, for the whole run; re-writing it is a loop.
 
         Keyed on the value and never cleared, because the previous key -- target alone, cleared on every page
-        change -- was defeated by the action's own cosmetic side effect. A PyPI run filled the search box, hit
-        enter, and the enter did not submit; each fill drew the autocomplete popup, so `page_changed` was true,
-        which cleared the set and made the IDENTICAL next fill a "first" edit again. That reset `unchanged` to
-        zero every time, and the popup opening and closing moved `state_key` too, so the per-page-state repeat
-        guard counted each fill separately as well. Both stall guards were blind for five steps until an
-        escalation happened to say "click the Search button".
+        change -- was defeated by the action's own cosmetic side effect. `_fill` clicks the field before typing
+        on purpose, so that pointer handlers run; on a search box that opens the autocomplete list, and opening
+        it is a page change. A PyPI run therefore filled the same box with the same word five times: each fill
+        cleared the set, so the IDENTICAL next fill was a "first" edit again and `unchanged` reset to zero, and
+        the list opening and closing moved `state_key` too, so the per-page-state repeat guard counted each
+        fill separately as well. Nothing ever reported the fill as a no-op, so the run never moved on to the
+        submit it needed, and both stall guards stayed blind until an escalation said "click the Search button".
 
         Writing a value a field already holds cannot be progress, whatever the page did -- that is an invariant,
         not a threshold, so it needs no budget. A genuinely new page reached by a genuinely new action still
