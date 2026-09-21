@@ -72,9 +72,9 @@ async def test_concurrent_traces_keep_only_their_runs_events(
         await asyncio.gather(first, second, return_exceptions=True)
 
 
-def test_videos_count_up_past_existing_files(tmp_path: Path) -> None:
+def test_videos_count_up_past_names_already_claimed(tmp_path: Path) -> None:
+    # Repeats are allocated before any of them records, so a name must be taken the moment it is handed out.
     first = live.video_path(tmp_path, "fast", task("hn-top"))
-    first.write_bytes(b"")
     assert first == tmp_path.resolve() / "fast" / "hn-top-1.mp4"
     assert live.video_path(tmp_path, "fast", task("hn-top")).name == "hn-top-2.mp4"
     assert live.video_path(tmp_path, "ultrafast", task("hn-top")).name == "hn-top-1.mp4"

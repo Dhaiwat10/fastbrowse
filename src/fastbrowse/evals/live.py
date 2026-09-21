@@ -84,13 +84,19 @@ def _secrets(task: LiveTask, bitwarden: bool) -> ScopedSecrets | None:
 def video_path(folder: Path, arm: str, task: LiveTask) -> Path:
     """The first free DIR/<arm>/<task>-<n>.mp4, absolute because the ultrafast runner has its own working directory.
 
-    Counting past existing files means repeated invocations never overwrite a video.
+    Counting past existing files means repeated invocations never overwrite a video. The name is claimed by creating
+    it empty: every repeat is allocated before any run writes, so an existence check alone gave them all one name.
     """
+    (folder.resolve() / arm).mkdir(parents=True, exist_ok=True)
     n = 1
-    while (path := folder.resolve() / arm / f"{task.id}-{n}.mp4").exists():
-        n += 1
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    while True:
+        path = folder.resolve() / arm / f"{task.id}-{n}.mp4"
+        try:
+            path.touch(exist_ok=False)
+        except FileExistsError:
+            n += 1
+        else:
+            return path
 
 
 @dataclass
@@ -423,7 +429,8 @@ async def hosted_arm(task: LiveTask, http: httpx.AsyncClient, *, record: Path | 
 
 
 def _video(record: Path | None) -> str | None:
-    return str(record) if record is not None and record.exists() else None
+    # A claimed name stays empty when the run recorded nothing.
+    return str(record) if record is not None and record.exists() and record.stat().st_size else None
 
 
 async def run_arm(
