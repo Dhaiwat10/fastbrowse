@@ -1176,7 +1176,7 @@ async def test_a_list_the_reader_needs_whole_is_read_page_by_page_without_decidi
                 }
             ],
             "answered": True,
-            "continues": ["r1"],
+            "continues": [{"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}]}],
         },
         {
             "claims": [
@@ -1223,7 +1223,13 @@ async def test_a_list_goes_on_to_jev_with_a_hint_when_code_finds_no_next_page() 
         answer_expected=True,
     )
     here = _at("https://example.test/quotes/", _button("Load more"))
-    reads: list[JsonValue] = [{"claims": [], "answered": False, "continues": ["r1"]}]
+    reads: list[JsonValue] = [
+        {
+            "claims": [],
+            "answered": False,
+            "continues": [{"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}]}],
+        }
+    ]
     agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "none"}), ScriptedLLM(reads))
     await agent._read(state, capture((BlockKind.PARAGRAPH, "Einstein quote")), here)
     assert not state.next_page
@@ -1239,7 +1245,13 @@ async def test_the_pages_code_opens_are_capped() -> None:
     )
     state.pages = Config().max_pages
     here = _at("https://example.test/list/", _link("next", "next", "/list/2"))
-    reads: list[JsonValue] = [{"claims": [], "answered": False, "continues": ["r1"]}]
+    reads: list[JsonValue] = [
+        {
+            "claims": [],
+            "answered": False,
+            "continues": [{"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}]}],
+        }
+    ]
     agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "none"}), ScriptedLLM(reads))
     await agent._read(state, capture((BlockKind.PARAGRAPH, "a book")), here)
     assert not state.next_page

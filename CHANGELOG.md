@@ -11,6 +11,13 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A page that cannot settle a list now has to say what it compared.** The reader's prompt asked a continuing
+  page to quote every record it compared, and about half the time it quoted only the leading one, so the
+  winner on a later page could not show the values it beat and the claim check scored it unsupported. The
+  records are now a required part of the reader's answer rather than a request in prose, and code copies each
+  quote from the blocks named, so a record is the page's own text. A read that settles its list pays nothing
+  for this.
+
 - **A run reads what its last interaction changed before it calls itself finished.** A run clicked a filter
   and declared itself done against the results as they were before the filter applied, so the check read a
   list the run never saw. A done check that follows an interaction now waits for the page to settle, and a

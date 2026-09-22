@@ -327,16 +327,33 @@ def _remember(
     return fact
 
 
+# A page of a list costs two short block labels a record. The cap is what one capture can plausibly show, and
+# bounds the output a reader can be asked for when a page turns out to list far more than it compares.
+_MAX_CONTINUING_RECORDS = 60
+
+
+class _Continuation(Frozen):
+    requirement_id: str = Field(
+        description=(
+            "A requirement whose answer ranges over a list this capture shows only part of, because it continues "
+            "on further pages or behind a load-more control, and the collected evidence does not cover the rest."
+        )
+    )
+    records: tuple[_Cite, ...] = Field(
+        min_length=1,
+        max_length=_MAX_CONTINUING_RECORDS,
+        description=(
+            "Every record this capture adds to that comparison, each as the run of source blocks holding it and "
+            "the value being compared. A later page cannot show what its winner beat unless this page names the "
+            "records it was compared against, so this is required rather than asked for in prose."
+        ),
+    )
+
+
 class _ReadResponse(Frozen):
     claims: tuple[_ReadClaim, ...]
     answered: bool
-    continues: tuple[str, ...] = Field(
-        default=(),
-        description=(
-            "Requirement ids whose answer ranges over a list this capture shows only part of, because it continues "
-            "on further pages or behind a load-more control, and the collected evidence does not cover the rest."
-        ),
-    )
+    continues: tuple[_Continuation, ...] = ()
 
 
 class ReadOutcome(Frozen):
@@ -346,6 +363,9 @@ class ReadOutcome(Frozen):
     cost_lines: tuple[CostLine, ...]
     continues: tuple[str, ...] = ()
     """Requirements whose list goes on past this capture, so no claim from it closes them."""
+    uncovered: int = 0
+    """Records a continuation named that no run of offered blocks resolved, so this page's comparison is
+    incomplete in the notes even though the reader believed it had listed them."""
 
 
 def _notes_room(tokens: TokenBudget, messages: Sequence[Message], response: type[Frozen]) -> int:
@@ -404,6 +424,7 @@ async def read(
     continues: dict[str, None] = {}
     found: list[Fact] = []
     rejected = 0
+    uncovered = 0
     wanted = [
         r
         for r in requirements
@@ -452,9 +473,10 @@ async def read(
                     "- Values typed into fields, suggestions and previews are inputs, not results.\n\n"
                     "# Lists over several pages\nA count, total or superlative over a list needs the whole "
                     "list. Earlier pages are in the collected evidence under their own URLs. When the list goes "
-                    "on past this capture and the collected evidence does not cover the rest, list the "
-                    "requirement in continues and still cite every record this capture adds, with a null "
-                    "requirement id. Once the collected evidence and this capture cover every page, the "
+                    "on past this capture and the collected evidence does not cover the rest, add an entry to "
+                    "continues naming the requirement, and give in its records every record this capture adds "
+                    "to that comparison, each as the blocks holding it and the value compared. "
+                    "Once the collected evidence and this capture cover every page, the "
                     "conclusion takes the requirement id and draws on each record once. A task that bounds the "
                     "pages it covers ends at the last page it names.\n\n"
                     f"# Trust\n{UNTRUSTED} Never infer facts the capture and evidence do not show."
@@ -481,7 +503,8 @@ async def read(
         # The latest chunk decides: it holds the page's foot, where a pager sits, reads every earlier chunk's
         # records in its collected evidence, and is given the caller's next-page notice. An earlier chunk's
         # "continues" meant the list went on into this chunk; a union let it block the last chunk's conclusion.
-        continues = dict.fromkeys(key for key in result.data.continues if key in requirement_ids)
+        carried = [c for c in result.data.continues if c.requirement_id in requirement_ids]
+        continues = dict.fromkeys(c.requirement_id for c in carried)
         references = {key: key for key in offered.evidence_ids}
         for index, claim in enumerate(result.data.claims):
             # Carried to the next chunk without its requirement id, which only the whole page can settle.
@@ -493,6 +516,24 @@ async def read(
             requirement_id = claim.requirement_id if claim.requirement_id in requirement_ids else None
             found.append(fact.model_copy(update={"requirement_id": requirement_id}))
             accepted += 1
+        # The records a continuing page compared, kept as facts so a later page's winner can show what it beat.
+        # Code copies each quote from the blocks named, exactly as it does for a claim, so a record is the
+        # page's own text and never the reader's retyping of it.
+        for continuation in carried:
+            for cite in continuation.records:
+                evidence = _cited(capture, part, cite)
+                if evidence is None:
+                    uncovered += 1
+                    continue
+                record = Fact(
+                    requirement_id=None,
+                    text=evidence.quote,
+                    evidence=evidence,
+                    basis=(),
+                    reader=FactReader.LLM,
+                )
+                so_far.add(record)
+                found.append(record)
         rejected += rejected_here
         # An unsupported assertion of completion cannot suppress reading the remaining chunks. Nor can it end a
         # read of a page whose list goes on, whether this chunk said so or the caller's notice did: the rest of
@@ -517,6 +558,7 @@ async def read(
         rejected_claims=rejected,
         cost_lines=tuple(costs),
         continues=tuple(continues),
+        uncovered=uncovered,
     )
 
 

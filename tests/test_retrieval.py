@@ -984,7 +984,10 @@ async def test_a_winner_from_part_of_a_list_is_kept_but_does_not_answer() -> Non
             {
                 "claims": [{"requirement_id": "r1", "text": "cheapest", "cite": {"first": "s0", "last": "s0"}}],
                 "answered": True,
-                "continues": ["r1", "not-asked"],
+                "continues": [
+                    {"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}]},
+                    {"requirement_id": "not-asked", "records": [{"first": "s0", "last": "s0"}]},
+                ],
             }
         ]
     )
@@ -992,6 +995,99 @@ async def test_a_winner_from_part_of_a_list_is_kept_but_does_not_answer() -> Non
     assert outcome.continues == ("r1",)
     assert len(notes.facts) == 1 and not notes.evidenced("r1")
     assert "This page has a next-page control." in llm.calls[0][1][-1].content
+
+
+async def test_a_continuing_page_keeps_every_record_it_compared() -> None:
+    """The prose used to ask for the records and the reader complied about half the time. The schema requires
+    them, and code copies each quote from the blocks named, so a later page's winner can show what it beat."""
+    from tests.test_policy import ScriptedJev
+
+    page = capture(
+        (BlockKind.PARAGRAPH, "Sharp Objects 47.82"),
+        (BlockKind.PARAGRAPH, "Tastes Like Fear 10.69"),
+        (BlockKind.PARAGRAPH, "A Murder in Time 16.64"),
+    )
+    requirement = Requirement(id="r1", text="The cheapest book", kind=RequirementKind.INFORMATION)
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [],
+                "answered": False,
+                "continues": [
+                    {
+                        "requirement_id": "r1",
+                        "records": [
+                            {"first": "s0", "last": "s0"},
+                            {"first": "s1", "last": "s1"},
+                            {"first": "s2", "last": "s2"},
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+    notes = Notes()
+    outcome = await read(
+        llm, page, "Cheapest?", ["r1"], notes, jev=ScriptedJev({"r1": "none"}), requirements=[requirement]
+    )
+    assert outcome.continues == ("r1",)
+    assert outcome.uncovered == 0
+    quotes = [fact.evidence.quote for fact in notes.facts if fact.evidence is not None]
+    assert quotes == ["Sharp Objects 47.82", "Tastes Like Fear 10.69", "A Murder in Time 16.64"]
+    # The list still goes on, so nothing here closes the requirement.
+    assert not notes.evidenced("r1")
+
+
+async def test_a_record_naming_blocks_the_page_did_not_offer_is_counted_not_credited() -> None:
+    from tests.test_policy import ScriptedJev
+
+    page = capture((BlockKind.PARAGRAPH, "Sharp Objects 47.82"))
+    requirement = Requirement(id="r1", text="The cheapest book", kind=RequirementKind.INFORMATION)
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [],
+                "answered": False,
+                "continues": [
+                    {
+                        "requirement_id": "r1",
+                        "records": [{"first": "s0", "last": "s0"}, {"first": "s9", "last": "s9"}],
+                    }
+                ],
+            }
+        ]
+    )
+    notes = Notes()
+    outcome = await read(
+        llm, page, "Cheapest?", ["r1"], notes, jev=ScriptedJev({"r1": "none"}), requirements=[requirement]
+    )
+    assert outcome.uncovered == 1
+    assert [fact.evidence.quote for fact in notes.facts if fact.evidence is not None] == ["Sharp Objects 47.82"]
+
+
+async def test_a_read_that_settles_a_list_carries_no_records() -> None:
+    """Records are the price of a page that cannot conclude. A read that concludes pays nothing for them."""
+    from tests.test_policy import ScriptedJev
+
+    page = capture((BlockKind.PARAGRAPH, "Tastes Like Fear 10.69"))
+    requirement = Requirement(id="r1", text="The cheapest book", kind=RequirementKind.INFORMATION)
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {"text": "Tastes Like Fear 10.69", "cite": {"first": "s0", "last": "s0"}, "requirement_id": "r1"}
+                ],
+                "answered": True,
+            }
+        ]
+    )
+    notes = Notes()
+    outcome = await read(
+        llm, page, "Cheapest?", ["r1"], notes, jev=ScriptedJev({"r1": "none"}), requirements=[requirement]
+    )
+    assert outcome.continues == ()
+    assert outcome.uncovered == 0
+    assert notes.evidenced("r1")
 
 
 async def test_the_choice_shortcut_is_skipped_when_a_next_page_control_qualifies_the_read() -> None:
@@ -1002,7 +1098,15 @@ async def test_the_choice_shortcut_is_skipped_when_a_next_page_control_qualifies
     page = capture((BlockKind.PARAGRAPH, "Sharp Objects £47.82"))
     jev = ScriptedJev({"r1": "none"})
     requirement = Requirement(id="r1", text="The cheapest book", kind=RequirementKind.INFORMATION)
-    llm = ScriptedLLM([{"claims": [], "answered": False, "continues": ["r1"]}])
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [],
+                "answered": False,
+                "continues": [{"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}]}],
+            }
+        ]
+    )
     outcome = await read(
         llm,
         page,
@@ -1032,8 +1136,16 @@ async def test_a_later_chunk_saying_the_list_goes_on_reopens_an_earlier_chunks_c
                 "claims": [{"requirement_id": "r1", "text": "cheapest", "cite": {"first": "s0", "last": "s0"}}],
                 "answered": True,
             },
-            {"claims": [], "answered": False, "continues": ["r1"]},
-            {"claims": [], "answered": False, "continues": ["r1"]},
+            {
+                "claims": [],
+                "answered": False,
+                "continues": [{"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}]}],
+            },
+            {
+                "claims": [],
+                "answered": False,
+                "continues": [{"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}]}],
+            },
         ]
     )
     outcome = await read(llm, page, "Cheapest?", ["r1"], notes, notice="This page has a next-page control.")
@@ -1056,9 +1168,13 @@ async def test_a_list_that_runs_on_into_the_next_chunk_is_settled_by_the_last_on
             {
                 "claims": [{"text": "Virgin $1,200", "cite": {"first": "s0", "last": "s0"}}],
                 "answered": False,
-                "continues": ["r1"],
+                "continues": [{"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}]}],
             },
-            {"claims": [], "answered": False, "continues": ["r1"]},
+            {
+                "claims": [],
+                "answered": False,
+                "continues": [{"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}]}],
+            },
             {
                 "claims": [
                     {"requirement_id": "r1", "text": "JetBlue at $1,061", "cite": {"first": "s2", "last": "s2"}}
@@ -1125,7 +1241,7 @@ async def test_derived_answer_cites_and_checks_every_record_across_pages(compose
                     },
                 ],
                 "answered": False,
-                "continues": ["r"],
+                "continues": [{"requirement_id": "r", "records": [{"first": "s0", "last": "s0"}]}],
             }
         ]
     )
