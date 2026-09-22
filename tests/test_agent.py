@@ -799,8 +799,41 @@ async def test_a_filter_returning_to_its_prior_value_routes_to_recovery(changed:
     prompt = llm.calls[0][1][-1].content
     assert "Direct only keeps returning to checked=False" in prompt
     assert "intervening actions: click Direct only, click Direct only" in prompt
-    assert agent._settle(state, current) is None
-    assert agent._reversal(state) is None
+    assert len(llm.calls) == 1
+
+
+async def test_a_filter_that_keeps_redrawing_the_results_cannot_renew_the_recovery_budget() -> None:
+    toggle = _button("Direct only").model_copy(update={"role": "checkbox", "checked": False})
+    current = observation((toggle, _button("0 results"))).model_copy(update={"document_key": "results"})
+    page = Mock(spec=Page)
+
+    async def observe() -> Observation:
+        return current
+
+    async def act(*args: object) -> ActResult:
+        nonlocal current
+        box, results = current.controls
+        # Every toggle redraws the results, so each state is one the run has never seen.
+        redrawn = results.model_copy(update={"label": f"{page.act.await_count} results"})
+        current = current.model_copy(
+            update={"controls": (box.model_copy(update={"checked": not box.checked}), redrawn)}
+        )
+        return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
+
+    page.observe = AsyncMock(side_effect=observe)
+    page.act = AsyncMock(side_effect=act)
+    page.screenshot = AsyncMock(return_value=b"")
+    llm = ScriptedLLM([{"diagnosis": "The filter is cycling", "next_subgoal": "Read results", "give_up": False}] * 4)
+    agent = Agent(
+        page,
+        ScriptedJev({"operation": "click", "click_target": toggle.id}, noul=0.0),
+        llm,
+        config=Config(stall=StallRules(max_recoveries=1)),
+    )
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    with pytest.raises(_Stop):
+        await agent._loop(state, None, None)
     assert len(llm.calls) == 1
 
 
@@ -816,7 +849,7 @@ async def test_scrolling_controls_in_and_out_of_view_is_not_a_reversal() -> None
         await agent._step(state, before, _code_decision(Operation.SCROLL, None))
         agent._note_effect(state, after)
         agent._settle(state, after)
-        assert agent._reversal(state) is None
+        assert agent._reversal(state) == (None, True)
 
 
 @pytest.mark.parametrize("recoveries", [2, 6])
@@ -837,7 +870,7 @@ async def test_recovery_prompts_and_requests_remember_the_last_four_diagnoses_re
     for n in range(recoveries):
         await agent._recover(state, obs, f"Reason {n} hunter2")
     second = llm.calls[1][1][-1].content
-    assert f"recovery 2 of {recoveries} in the current stall episode" in second
+    assert f"recovery 2 of {recoveries} in this stall" in second
     for field in ("Reason", "Diagnosis", "Subgoal"):
         assert f"{field}: {field} 0 [secret:password]" in second
     assert "hunter2" not in second
