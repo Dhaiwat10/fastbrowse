@@ -39,15 +39,18 @@ what changed and why.
 ## Changes to how the agent behaves
 
 Unit tests cannot tell whether the agent still browses well, so a change to prompts, choices, recovery or
-verification needs eval results in the PR. Iterate against the `dev` suite, then run `heldout` once before
-and once after:
+verification needs eval results in the PR, in this order:
+
+1. Run `heldout` on `main` before changing anything. That is the baseline.
+2. Make and iterate on the change against `dev` only.
+3. Run `heldout` again on the finished change, and never tune against it.
 
 ```sh
-uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse --suite dev --repeat 3
 uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse --suite heldout --repeat 3
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse --suite dev --repeat 3
 ```
 
-Paste the pass counts, time and cost from both runs. A handful of runs on one site shows the change can
+Paste the pass counts, time and cost from the final `dev` run and both `heldout` runs. A handful of runs on one site shows the change can
 help; the suites show it does not hurt elsewhere.
 
 The agent must work on any site, so a rule written for one site, such as matching a label only Google uses,
