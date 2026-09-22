@@ -19,20 +19,37 @@ from decimal import Decimal, InvalidOperation
 from pydantic import Field, JsonValue, TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 
+from fastbrowse.batches import evaluate_batches
 from fastbrowse.citations import text_fragment
 from fastbrowse.config import TokenBudget
-from fastbrowse.jev import MAX_CHOICE_OPTIONS, ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulQuestion
+from fastbrowse.jev import (
+    MAX_CHOICE_OPTIONS,
+    ChoiceAnswer,
+    ChoiceQuestion,
+    JevClient,
+    JevError,
+    NoulAnswer,
+    NoulQuestion,
+)
 from fastbrowse.llm import Generation, LLMClient, Message
 from fastbrowse.memory import Fact, Notes, fact_id
 from fastbrowse.models import UNTRUSTED, Citation, CostComponent, CostLine, Evidence, FactReader, Frozen, LLMPurpose
 from fastbrowse.page import Block, BlockKind, Capture
 from fastbrowse.planner import Plan, Requirement, RequirementKind
-from fastbrowse.telemetry import Ledger
+from fastbrowse.telemetry import Ledger, trace
 
 # A mistaken choice marks a requirement evidenced; favor the reader whenever selection is uncertain.
 _READ_CONFIDENCE = 0.90
 # Long passages belong with the reader; bounded spans keep one batched choice cheaper than generation.
 _READ_SPAN_CHARS = 320
+# Long passages crowd out other relevance questions, so score bounded windows of neighboring blocks.
+_FOCUS_WINDOW_CHARS = 1500
+# Ours. Near even odds is Jev unable to tell, not relevance: on PyPI's release history the window holding the asked
+# version scored 0.95 and its neighbor 0.73, while every other window, site navigation included, scored 0.44 to 0.54.
+_FOCUS_KEEP_FROM = 0.6
+FOCUS = f"""{UNTRUSTED}
+Does this passage state, qualify or contradict anything the requirements ask for, including headers and
+labels that give a nearby value its meaning? Site chrome, navigation, footers and unrelated sections do not."""
 # Twelve thousand characters leave room for source blocks, accumulated evidence and instructions per read.
 _READ_CHUNK_CHARS = 12_000
 # One repeated block carries boundary context without rereading the preceding chunk.
@@ -749,9 +766,9 @@ def copy_field(answer: ChoiceAnswer, candidates: Sequence[Candidate]) -> tuple[S
     return matches[0].value, matches[0].evidence
 
 
-def read_candidates(capture: Capture) -> tuple[Candidate, ...]:
-    candidates: list[Candidate] = []
-    for block in capture.blocks:
+def _iter_read_candidates(capture: Capture, blocks: Sequence[Block]) -> Iterator[Candidate]:
+    index = 0
+    for block in blocks:
         text = capture.text[block.start : block.end]
         spans = _cells(text) if block.kind is BlockKind.TABLE else _spans(text, str)
         for start, end, raw in spans:
@@ -759,20 +776,25 @@ def read_candidates(capture: Capture) -> tuple[Candidate, ...]:
                 continue
             start += len(raw) - len(raw.lstrip())
             end -= len(raw) - len(raw.rstrip())
-            # A cell alone loses its column and row identity at claim checking. Keep the original
-            # header and preceding row text in its quote, with a distinct end for each selected cell.
-            quote_start = 0 if block.kind is BlockKind.TABLE else start
-            candidates.append(
-                Candidate(
-                    id=f"c{len(candidates)}",
-                    value=text[start:end],
-                    evidence=_evidence(capture, block, block.start + quote_start, block.start + end),
-                    context=_context(text, start, end, block.kind),
-                )
+            # A cell alone loses its column and row identity at claim checking, and a record's date loses the
+            # version it belongs to. Keep the preceding row or record text in the quote, with a distinct end each.
+            quote_start = 0 if block.kind in (BlockKind.TABLE, BlockKind.RECORD) else start
+            yield Candidate(
+                id=f"c{index}",
+                value=text[start:end],
+                evidence=_evidence(capture, block, block.start + quote_start, block.start + end),
+                context=_context(text, start, end, block.kind),
             )
-            # Truncation could hide the right answer while leaving a plausible wrong one to choose.
-            if len(candidates) > MAX_CHOICE_OPTIONS - 2:
-                return ()
+            index += 1
+
+
+def read_candidates(capture: Capture, blocks: Sequence[Block] | None = None) -> tuple[Candidate, ...]:
+    candidates: list[Candidate] = []
+    for candidate in _iter_read_candidates(capture, capture.blocks if blocks is None else blocks):
+        candidates.append(candidate)
+        # Truncation could hide the right answer while leaving a plausible wrong one to choose.
+        if len(candidates) > MAX_CHOICE_OPTIONS - 2:
+            return ()
     return tuple(candidates)
 
 
@@ -782,18 +804,13 @@ class _ChoiceRead(Frozen):
     cost_lines: tuple[CostLine, ...] = ()
 
 
-async def _read_choices(
-    jev: JevClient,
+def _read_request(
     capture: Capture,
     requirements: Sequence[Requirement],
+    candidates: Sequence[Candidate],
     *,
-    tokens: TokenBudget,
-    ledger: Ledger | None,
-) -> _ChoiceRead:
-    candidates = read_candidates(capture)
-    if not candidates:
-        logger.debug("read reader=llm reason=no_bounded_candidate_set")
-        return _ChoiceRead()
+    blocks: Sequence[Block] | None = None,
+) -> tuple[JsonValue, dict[str, ChoiceQuestion]]:
     questions: dict[str, ChoiceQuestion] = {}
     for requirement in requirements:
         # Plan has no answer-shape field. Jev judges the requirement's meaning in this same call;
@@ -806,6 +823,11 @@ async def _read_choices(
                 "inference; a total the page states is a scalar, counting items is not. Otherwise select "
                 "synthesis: lists, comparisons, summaries, explanations, counts, calculations, several facts, "
                 "or relevant passages no candidate covers, including one side of a comparison."
+                + (
+                    " Only passages judged relevant are shown; other passages have been omitted."
+                    if blocks is not None
+                    else ""
+                )
             ),
             criteria={
                 **{
@@ -826,19 +848,104 @@ async def _read_choices(
             "url": capture.url,
             "title": capture.title,
             # Unoffered passages can disqualify a plausible candidate, for example an older version.
-            "text": capture.text,
+            "text": (
+                capture.text
+                if blocks is None
+                else "\n...\n".join(capture.text[block.start : block.end] for block in blocks)
+            ),
+            **({"focused": True} if blocks is not None else {}),
             "inaccessible_frames": capture.inaccessible_frames,
         }
     }
+    return state, questions
+
+
+def _read_fits(state: JsonValue, questions: Mapping[str, ChoiceQuestion], tokens: TokenBudget) -> bool:
     state_size = len(json.dumps(state)) / tokens.chars_per_token
     sizes = [len(question.model_dump_json()) / tokens.chars_per_token for question in questions.values()]
-    # Oversized captures should reach the chunked reader without paying for a doomed choice request.
+    return (
+        state_size + max(sizes, default=0) <= tokens.state_plus_largest_question
+        and state_size + sum(sizes) <= tokens.state_plus_all_questions
+    )
+
+
+async def _focus(
+    jev: JevClient,
+    capture: Capture,
+    requirements: Sequence[Requirement],
+    *,
+    tokens: TokenBudget,
+    ledger: Ledger | None,
+) -> tuple[tuple[Block, ...], tuple[Candidate, ...], tuple[CostLine, ...]]:
+    """The blocks Jev should choose from, or none when the page cannot be narrowed without risking the answer."""
+    windows: list[list[Block]] = []
+    window_chars = 0
+    for block in capture.blocks:
+        size = block.end - block.start
+        if not windows or window_chars + 1 + size > _FOCUS_WINDOW_CHARS:
+            windows.append([])
+            window_chars = -1
+        windows[-1].append(block)
+        window_chars += 1 + size
+    questions: dict[str, NoulQuestion] = {}
+    for i, blocks in enumerate(windows):
+        text = "\n".join(capture.text[block.start : block.end] for block in blocks)
+        # A block longer than a window is asked about in pieces: a passage scored on its opening alone could hide
+        # the current version below an outdated one.
+        for j, piece in enumerate(range(0, len(text), _FOCUS_WINDOW_CHARS)):
+            questions[f"w{i}.{j}"] = NoulQuestion(
+                instructions="Does this passage bear on the requirements? " + text[piece : piece + _FOCUS_WINDOW_CHARS]
+            )
+    state: JsonValue = {
+        "rules": FOCUS,
+        "requirements": [requirement.text for requirement in requirements],
+        "page": {"url": capture.url, "title": capture.title},
+    }
+    answered = await evaluate_batches(jev, state, questions, tokens=tokens, ledger=ledger)
+    answers = answered.answers if answered is not None else {}
+    cost = answered.cost if answered is not None else ()
+    scores = {key: answer.probability for key, answer in answers.items() if isinstance(answer, NoulAnswer)}
+    relevant = sorted({int(key[1:].split(".")[0]) for key, score in scores.items() if score >= _FOCUS_KEEP_FROM})
+    kept = tuple(block for i in relevant for block in windows[i])
+    candidates = read_candidates(capture, kept)
+    # Choosing among what fits would leave out a passage judged relevant, or one never judged, and a choice made
+    # without it can close the requirement on an outdated value; the LLM reader reads the whole page instead.
     if (
-        state_size + max(sizes) > tokens.state_plus_largest_question
-        or state_size + sum(sizes) > tokens.state_plus_all_questions
+        not candidates
+        or len(scores) < len(questions)
+        or not _read_fits(*_read_request(capture, requirements, candidates, blocks=kept), tokens)
     ):
-        logger.debug("read reader=llm reason=choice_input_too_large")
+        kept, candidates = (), ()
+    trace("read_focus", windows=len(windows), relevant=len(relevant), candidates=len(candidates), requests=len(cost))
+    return kept, candidates, cost
+
+
+async def _read_choices(
+    jev: JevClient,
+    capture: Capture,
+    requirements: Sequence[Requirement],
+    *,
+    tokens: TokenBudget,
+    ledger: Ledger | None,
+) -> _ChoiceRead:
+    candidates = read_candidates(capture)
+    if not candidates and next(_iter_read_candidates(capture, capture.blocks), None) is None:
+        logger.debug("read reader=llm reason=no_bounded_candidate_set")
         return _ChoiceRead()
+    state, questions = _read_request(capture, requirements, candidates)
+    focused = False
+    costs: tuple[CostLine, ...] = ()
+    if not candidates or not _read_fits(state, questions, tokens):
+        blocks, candidates, costs = await _focus(jev, capture, requirements, tokens=tokens, ledger=ledger)
+        if not blocks:
+            logger.debug("read reader=llm reason=unfocused")
+            return _ChoiceRead(cost_lines=costs)
+        state, questions = _read_request(capture, requirements, candidates, blocks=blocks)
+        focused = True
+    # Oversized captures should reach the chunked reader without paying for a doomed choice request.
+    if not _read_fits(state, questions, tokens):
+        logger.debug("read reader=llm reason=choice_input_too_large")
+        return _ChoiceRead(cost_lines=costs)
     if ledger is not None:
         ledger.reserve(CostComponent.JEV)
     try:
@@ -846,7 +953,7 @@ async def _read_choices(
     except JevError:
         # An optional shortcut's rejected input or malformed answer must still reach the reader.
         logger.debug("read reader=llm reason=choice_error")
-        return _ChoiceRead()
+        return _ChoiceRead(cost_lines=costs)
     if ledger is not None:
         ledger.record(evaluation.cost)
     facts: list[Fact] = []
@@ -857,6 +964,9 @@ async def _read_choices(
             logger.debug("read reader=llm requirement=%s reason=uncertain_choice", requirement.id)
             continue
         if answer.choice == "absent":
+            if focused:
+                logger.debug("read reader=llm requirement=%s reason=absent_after_focus", requirement.id)
+                continue
             logger.debug("read reader=none requirement=%s reason=absent", requirement.id)
             absent.append(requirement.id)
             continue
@@ -879,7 +989,7 @@ async def _read_choices(
                 reader=FactReader.JEV_CHOICE,
             )
         )
-    return _ChoiceRead(facts=tuple(facts), absent=tuple(absent), cost_lines=(evaluation.cost,))
+    return _ChoiceRead(facts=tuple(facts), absent=tuple(absent), cost_lines=(*costs, evaluation.cost))
 
 
 class Claim(Frozen):

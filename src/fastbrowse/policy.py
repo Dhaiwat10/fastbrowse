@@ -3,6 +3,7 @@
 Question wording is adapted from browser-use/jev-ultrafast (MIT) `questions.py` and `model.py`, where it was
 live-bench proven. The batch asks for an operation, its possible targets, and an optional login check.
 Choices beyond Jev's option limit use a group choice followed by a separate element request.
+A relevance filter shortlists dense pages before the action choice so late controls can still be offered.
 """
 
 import json
@@ -13,6 +14,7 @@ from typing import assert_never
 
 from pydantic import JsonValue
 
+from fastbrowse.batches import evaluate_batches
 from fastbrowse.config import Config
 from fastbrowse.jev import (
     ChoiceAnswer,
@@ -25,8 +27,8 @@ from fastbrowse.jev import (
     Question,
 )
 from fastbrowse.models import TARGETED, UNTRUSTED, CostComponent, CostLine, Frozen, Operation, StepOutcome
-from fastbrowse.page import Control, Observation
-from fastbrowse.telemetry import Ledger
+from fastbrowse.page import Control, Observation, loads_more, pager_link
+from fastbrowse.telemetry import Ledger, trace
 
 NEXT_ACTION = f"""{UNTRUSTED}
 Advance the user's task from the current page using one operation.
@@ -62,6 +64,11 @@ or subgoal names one of those, choose the element whose context matches it."""
 GROUP = """Too many elements to list at once. Choose the group that contains the best target if the next
 operation is the one this question names. A later question picks the element inside the group."""
 
+RELEVANCE = f"""{UNTRUSTED}
+Could the task's next few actions, or reading what it needs, act on or rely on the element in each question?
+Judge by its label, role, context and href. Site chrome, footers, ads, social links and unrelated navigation
+are not relevant."""
+
 OPERATION_LABELS: Mapping[Operation, str] = {
     Operation.CLICK: "Click an element, button, link, menu option, autocomplete suggestion or calendar day.",
     Operation.HOVER: "Hover over an element to reveal content the page shows only under the pointer.",
@@ -82,11 +89,14 @@ OPERATION_LABELS: Mapping[Operation, str] = {
 
 class Reduction(StrEnum):
     NONE = "none"
+    RELEVANCE = "relevance"
     ONSCREEN_ONLY = "onscreen_only"
     COMPACT = "compact"
     """On-screen elements with long labels shortened and links cut to their path. Amazon's signed-in results
     page offered 112 products with ~200-character titles and ~480-character tracking links, twice over (state
     and target question), and the run stopped at `observation_limit` before it could pick one."""
+    CAPPED = "capped"
+    """Compacted, and only the elements that fit offered; the rest are counted as omitted for a scroll to reach."""
 
 
 COMPACT_CHARS = 80
@@ -102,7 +112,7 @@ class ReadAssessment(StrEnum):
 
 
 class ObservationTooLarge(RuntimeError):
-    """The page cannot be represented within Jev's limits even on-screen only."""
+    """The page's state cannot be represented within Jev's limits even with no controls offered."""
 
 
 class HistoryEntry(Frozen):
@@ -174,24 +184,141 @@ async def decide(
     """Ask Jev for the next action, reducing the observation when it will not fit."""
     controls = observation.controls
     reduction = Reduction.NONE
+    cost: list[CostLine] = []
+    tokens = 0
+    shortlist_tried = len(controls) > config.observation.max_offered_controls
+    if shortlist_tried:
+        shortlist = await _shortlist(jev, observation, controls, context, config, ledger)
+        if shortlist is not None:
+            controls, cost, tokens = shortlist
+            reduction = Reduction.RELEVANCE
+        else:
+            keep = {i for i, control in enumerate(controls) if _protected(control)}
+            room = max(0, config.observation.max_offered_controls - len(keep))
+            keep.update([i for i in range(len(controls)) if i not in keep][:room])
+            controls = tuple(control for i, control in enumerate(controls) if i in keep)
+    # Shortening text loses nothing a choice needs, so it is tried before any control is dropped, and kept for every
+    # rung after it.
+    compact = False
     while True:
-        request = build_request(observation, controls, context, config, compact=reduction is Reduction.COMPACT)
+        request = build_request(observation, controls, context, config, compact=compact)
         if fits(request, config):
             try:
-                return await _evaluate(jev, request, controls, reduction, ledger)
+                decision = await _evaluate(jev, request, controls, reduction, ledger, compact=compact)
+                return decision.model_copy(
+                    update={"cost": (*cost, *decision.cost), "input_tokens": tokens + decision.input_tokens}
+                )
             except JevInputTooLarge:
                 pass
-        match reduction:
-            case Reduction.NONE if any(c.offscreen for c in controls):
-                controls = tuple(c for c in controls if not c.offscreen)
-                reduction = Reduction.ONSCREEN_ONLY
-            case Reduction.NONE | Reduction.ONSCREEN_ONLY:
-                controls = tuple(c for c in controls if not c.offscreen)
+        if not compact:
+            compact = True
+            if reduction is Reduction.NONE:
                 reduction = Reduction.COMPACT
-            case Reduction.COMPACT:
-                raise ObservationTooLarge(f"{len(controls)} controls on {observation.url} exceed Jev's input limits")
-            case _:
-                assert_never(reduction)
+            continue
+        if not shortlist_tried:
+            shortlist_tried = True
+            shortlist = await _shortlist(jev, observation, controls, context, config, ledger, compact=True)
+            if shortlist is not None:
+                controls, cost, tokens = shortlist
+                reduction = Reduction.RELEVANCE
+                continue
+        if reduction not in (Reduction.ONSCREEN_ONLY, Reduction.CAPPED) and any(c.offscreen for c in controls):
+            controls = tuple(c for c in controls if not c.offscreen)
+            reduction = Reduction.ONSCREEN_ONLY
+            continue
+        # A page too dense even on screen is still worked rather than ending the run: the controls that fit are
+        # offered, the rest counted as omitted, and a scroll brings them into the next step's view.
+        capped = _cap(observation, controls, context, config, below=len(controls))
+        if capped is None:
+            raise ObservationTooLarge(f"the state on {observation.url} exceeds Jev's input limits with no controls")
+        controls, reduction = capped, Reduction.CAPPED
+
+
+def _cap(
+    observation: Observation, controls: Sequence[Control], context: StepContext, config: Config, *, below: int
+) -> tuple[Control, ...] | None:
+    """The largest prefix, protected controls first, shorter than `below` whose request fits; None if none does."""
+    order = sorted(range(len(controls)), key=lambda i: not _protected(controls[i]))
+
+    def kept(prefix: int) -> tuple[Control, ...]:
+        indices = set(order[:prefix])
+        return tuple(control for i, control in enumerate(controls) if i in indices)
+
+    if below <= 0 or not fits(build_request(observation, kept(0), context, config, compact=True), config):
+        return None
+    low, high = 0, below - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(build_request(observation, kept(middle), context, config, compact=True), config):
+            low = middle
+        else:
+            high = middle - 1
+    return kept(low)
+
+
+def _protected(control: Control) -> bool:
+    # Only state the task has already set is kept unasked: counting every unchecked option of a long filter list
+    # would fill the shortlist and push out the button that applies it.
+    return bool(
+        pager_link(control)
+        or loads_more(control)
+        or control.blocking
+        or control.value
+        or control.checked
+        or control.selected
+        or control.expanded
+    )
+
+
+async def _shortlist(
+    jev: JevClient,
+    observation: Observation,
+    controls: Sequence[Control],
+    context: StepContext,
+    config: Config,
+    ledger: Ledger | None,
+    *,
+    compact: bool = False,
+) -> tuple[tuple[Control, ...], list[CostLine], int] | None:
+    protected = {i for i, control in enumerate(controls) if _protected(control)}
+    candidates = [i for i in range(len(controls)) if i not in protected]
+    state: JsonValue = {
+        "rules": RELEVANCE,
+        "task": context.task,
+        "subgoal": context.subgoal,
+        "requirements": list(context.requirements),
+        "unread_requirements": (list(context.unread_requirements) if context.unread_requirements is not None else None),
+        "recent_actions": [entry.model_dump(mode="json", exclude_none=True) for entry in context.history],
+        "page": {"url": observation.url, "title": observation.title},
+    }
+    # The rubric sits once in the state; repeating it in every question would pack a third as many per request.
+    questions: dict[str, Question] = {
+        f"r{i}": NoulQuestion(instructions=f"Is this element relevant? {json.dumps(_relevance_element(controls[i]))}")
+        for i in candidates
+    }
+    # An element too large to score is left unscored rather than dropped.
+    answered = await evaluate_batches(jev, state, questions, tokens=config.tokens, ledger=ledger)
+    if answered is None:
+        return None
+    scores = {
+        int(key[1:]): answer.probability for key, answer in answered.answers.items() if isinstance(answer, NoulAnswer)
+    }
+    # A failed answer says nothing about relevance, so keep unscored controls ahead of equally scored ones.
+    ranked = sorted(candidates, key=lambda i: (-scores.get(i, 1.0), i in scores, i))
+
+    def kept(prefix: int) -> tuple[Control, ...]:
+        indices = protected | set(ranked[:prefix])
+        return tuple(control for i, control in enumerate(controls) if i in indices)
+
+    low, high = 0, min(len(ranked), max(0, config.observation.max_offered_controls - len(protected)))
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(build_request(observation, kept(middle), context, config, compact=compact), config):
+            low = middle
+        else:
+            high = middle - 1
+    trace("shortlist", pool=len(controls), offered=len(protected) + low, scored=len(scores), requests=answered.requests)
+    return kept(low), list(answered.cost), answered.input_tokens
 
 
 def _index_controls(controls: Sequence[Control]) -> dict[Operation, tuple[Control, ...]]:
@@ -329,6 +456,8 @@ async def _evaluate(
     controls: Sequence[Control],
     reduction: Reduction,
     ledger: Ledger | None,
+    *,
+    compact: bool = False,
 ) -> Decision:
     if ledger is not None:
         ledger.reserve(CostComponent.JEV)
@@ -353,7 +482,7 @@ async def _evaluate(
             ledger.reserve(CostComponent.JEV)
         inner = await jev.evaluate(
             request.state,
-            {f"{operation.value}_target": _target_question(operation, group, reduction is Reduction.COMPACT)},
+            {f"{operation.value}_target": _target_question(operation, group, compact)},
         )
         if ledger is not None:
             ledger.record(inner.cost)
@@ -400,13 +529,29 @@ def _state(observation: Observation, controls: Sequence[Control], context: StepC
     }
     if context.secrets:
         state["stored_secrets"] = list(context.secrets)
-    if observation.omitted_controls:
-        state["omitted_elements"] = observation.omitted_controls
+    omitted = observation.omitted_controls + len(observation.controls) - len(controls)
+    if omitted > 0:
+        state["omitted_elements"] = omitted
     if observation.dialog is not None:
         state["dialog"] = observation.dialog.model_dump(mode="json", exclude_none=True)
     if len(observation.tabs) > 1:
         state["tabs"] = [t.model_dump(mode="json", exclude_none=True) for t in observation.tabs]
     return state
+
+
+def _relevance_element(control: Control) -> dict[str, JsonValue]:
+    element: dict[str, JsonValue] = {
+        "label": control.label,
+        "role": control.role,
+        "operations": [op.value for op in sorted(control.operations)],
+    }
+    if control.context is not None:
+        element["context"] = control.context
+    if control.href is not None:
+        element["href"] = control.href
+    if control.offscreen:
+        element["offscreen"] = True
+    return element
 
 
 def _shortened(text: str, limit: int = COMPACT_CHARS) -> str:

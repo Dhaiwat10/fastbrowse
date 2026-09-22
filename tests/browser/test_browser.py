@@ -333,7 +333,7 @@ async def test_observation_limits_can_exceed_old_javascript_caps(
         "document.body.append(b); }",
     )
     default = await loaded_page.observe()
-    assert len(default.controls) == 40 and default.omitted_controls == 20
+    assert len(default.controls) == 60 and default.omitted_controls == 0
     assert default.viewport_text == (
         "x" * 6000 + "\n[Viewport text cut: 2000 characters omitted; read the page for the rest]"
     )

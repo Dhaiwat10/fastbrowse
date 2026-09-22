@@ -72,6 +72,11 @@ Needs `BROWSER_USE_API_KEY` as well as the Jev and LLM keys; the jev-ultrafast a
 
 A run that ends `unavailable`, a model or browser provider down through every retry, is not a result: the harness runs it again after a pause, and `retries` on the row counts how many times. Every other ending counts.
 
+A provider's transient failures are left out of a run's time the same way. Every retried 503, 429 or dropped
+request marks the stretch from its first attempt to the attempt that answered, and `seconds` is the run's wall
+time less those stretches, calls that overlapped counted once; `transient_seconds` on the row is what was taken
+out. Only the fastbrowse arm can measure it; the other arms retry out of the harness's sight.
+
 ## Probing the reader
 
 A live task spends most of its time reaching the page where a reading bug shows. To measure a reader or

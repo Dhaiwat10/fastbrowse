@@ -1,6 +1,9 @@
 """Spend and call accounting against `Limits`, checked before each call rather than discovered after."""
 
 import logging
+from collections.abc import Generator, Iterable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from decimal import Decimal
 from time import monotonic
@@ -28,14 +31,17 @@ class Ledger:
     jev_calls: int = 0
     llm_calls: int = 0
 
-    def reserve(self, component: CostComponent, estimate_dollars: float = 0.0) -> None:
-        """Raise before a call that would break a limit; `record` the actual line afterwards."""
+    def reserve(self, component: CostComponent, estimate_dollars: float = 0.0, calls: int = 1) -> None:
+        """Raise before calls that would break a limit; `record` the actual lines afterwards.
+
+        Calls sent together are reserved together, so a limit reached partway counts none of them.
+        """
         match component:
             case CostComponent.JEV:
-                if self.jev_calls >= self.limits.max_jev_calls:
+                if self.jev_calls + calls > self.limits.max_jev_calls:
                     raise BudgetExceeded(f"Jev call limit {self.limits.max_jev_calls} reached")
             case CostComponent.LLM:
-                if self.llm_calls >= self.limits.max_llm_calls:
+                if self.llm_calls + calls > self.limits.max_llm_calls:
                     raise BudgetExceeded(f"LLM call limit {self.limits.max_llm_calls} reached")
             case CostComponent.BROWSER | CostComponent.PROXY:
                 pass
@@ -44,9 +50,9 @@ class Ledger:
             raise BudgetExceeded(f"spend limit ${_dollars(self.limits.max_dollars)} reached")
         # Failed requests still consume a call, including retries after an input-size rejection.
         if component is CostComponent.JEV:
-            self.jev_calls += 1
+            self.jev_calls += calls
         elif component is CostComponent.LLM:
-            self.llm_calls += 1
+            self.llm_calls += calls
 
     def check(self, extra_dollars: float = 0.0) -> None:
         limits = self.limits
@@ -80,3 +86,54 @@ scores and redacted addresses, never page text. Nothing is built unless DEBUG is
 def trace(event: str, **fields: object) -> None:
     if TRACE.isEnabledFor(logging.DEBUG):
         TRACE.debug(event, extra={"trace": {"event": event, **fields}})
+
+
+_trace_events: ContextVar[list[object] | None] = ContextVar("trace_events", default=None)
+
+
+class _Collect(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.events: list[object] = []
+        self.previous_level = next(
+            (handler.previous_level for handler in TRACE.handlers if isinstance(handler, _Collect)), TRACE.level
+        )
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if _trace_events.get() is self.events:
+            self.events.append(getattr(record, "trace", record.getMessage()))
+
+
+@contextmanager
+def traced() -> Generator[list[object]]:
+    """Trace records from this context and its child tasks only, so runs that overlap keep separate traces."""
+    handler = _Collect()
+    token = _trace_events.set(handler.events)
+    TRACE.addHandler(handler)
+    TRACE.setLevel(logging.DEBUG)
+    try:
+        yield handler.events
+    finally:
+        TRACE.removeHandler(handler)
+        _trace_events.reset(token)
+        # Runs can finish out of order; the last collector restores the level from before any run started.
+        if not any(isinstance(active, _Collect) for active in TRACE.handlers):
+            TRACE.setLevel(handler.previous_level)
+
+
+def transient_seconds(events: Iterable[object], began: float, ended: float) -> float:
+    """Time within `began`..`ended` that calls spent on transient provider failures, calls that overlapped
+    counted once. Evals take it out of a run's time: a 503 and its backoff say nothing about the agent. An upper
+    bound on the delay: a call running beside the failed one may have taken as long anyway."""
+    spans = sorted(
+        (max(float(event["began"]), began), min(float(event["ended"]), ended))
+        for event in events
+        if isinstance(event, dict) and event.get("event") == "request_transient"
+    )
+    total, reach = 0.0, began
+    for start, end in spans:
+        start = max(start, reach)
+        if end > start:
+            total += end - start
+            reach = end
+    return total

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import math
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from time import monotonic
@@ -12,6 +13,7 @@ import httpx
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from fastbrowse.jev import (
+    JEV_DOLLARS_PER_INPUT_TOKEN,
     Answer,
     ChoiceAnswer,
     ChoiceQuestion,
@@ -221,9 +223,11 @@ async def post_with_retry(
     """
     usage = usage if usage is not None else RequestUsage()
     response: httpx.Response | None = None
+    began = time.monotonic()
     for attempt, delay in enumerate((*RETRY_DELAYS_SECONDS, None)):
         if attempt and before_retry is not None:
             before_retry()
+        attempted = time.monotonic()
         response = await _hedged(
             http,
             url,
@@ -235,6 +239,8 @@ async def post_with_retry(
             usage=usage,
         )
         if response is not None and response.status_code not in RETRYABLE_STATUS:
+            if attempt:
+                _transient(call, began, attempted)
             return response
         if delay is not None:
             wait = _backoff(response, delay)
@@ -244,7 +250,15 @@ async def post_with_retry(
             )
             trace("request_retry", call=call, attempt=attempt + 1, reason=reason, wait=round(wait, 2))
             await asyncio.sleep(wait)
+    _transient(call, began, time.monotonic())
     return response
+
+
+def _transient(call: str, began: float, until: float) -> None:
+    """The stretch a provider's transient failures cost this call: its failed attempts and the waits between them,
+    up to the attempt that answered or to giving up. Evals leave it out of a run's time; it says nothing about the
+    agent. The ends are `monotonic()` readings, so a collector can merge calls that overlapped."""
+    trace("request_transient", call=call, began=began, ended=until, seconds=round(until - began, 2))
 
 
 def _backoff(response: httpx.Response | None, delay: float) -> float:
@@ -440,7 +454,7 @@ def estimated_cost(input_tokens: int, output_tokens: int = 0) -> CostLine:
     return CostLine(
         component=CostComponent.JEV,
         basis=CostBasis.ESTIMATED,
-        dollars=input_tokens * 0.042 / 1_000_000,
+        dollars=input_tokens * JEV_DOLLARS_PER_INPUT_TOKEN,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
     )

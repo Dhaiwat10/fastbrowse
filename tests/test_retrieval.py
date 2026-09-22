@@ -16,6 +16,7 @@ from fastbrowse.jev import (
     JevError,
     JevInputTooLarge,
     NoulAnswer,
+    NoulQuestion,
     Question,
 )
 from fastbrowse.llm import DEFAULT_MAX_OUTPUT_TOKENS, Generation, Message
@@ -344,7 +345,125 @@ async def test_short_read_overflow_uses_reader_without_truncating_candidates() -
     requirement = Requirement(id="r", text="Find the price", kind=RequirementKind.INFORMATION)
     jev, llm = _ReadJev({}), ScriptedLLM([{"claims": [], "answered": False}])
     await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,))
-    assert jev.requests == [] and len(llm.calls) == 1
+    # Only the focus pass is sent; with no passage judged relevant, no truncated choice follows it.
+    assert len(jev.requests) == 1 and len(llm.calls) == 1
+    assert all(isinstance(question, NoulQuestion) for question in jev.requests[0][1].values())
+
+
+def _only_focus(requests: Sequence[tuple[JsonValue, Mapping[str, Question]]]) -> bool:
+    return bool(requests) and all(isinstance(q, NoulQuestion) for _, questions in requests for q in questions.values())
+
+
+class _FocusJev:
+    """Judges a passage relevant when it holds `keyword`, then answers the choice with the candidate `value`."""
+
+    def __init__(self, keyword: str, value: str | None, *, fail_focus: bool = False) -> None:
+        self.keyword, self.value, self.fail_focus = keyword, value, fail_focus
+        self.requests: list[tuple[JsonValue, Mapping[str, Question]]] = []
+
+    async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        self.requests.append((state, questions))
+        answers: dict[str, Answer] = {}
+        for key, question in questions.items():
+            if isinstance(question, NoulQuestion):
+                if self.fail_focus:
+                    raise JevInputTooLarge("too large")
+                answers[key] = NoulAnswer(probability=0.9 if self.keyword in question.instructions else 0.05)
+            elif isinstance(question, ChoiceQuestion):
+                chosen = "absent"
+                for option, criterion in question.criteria.items():
+                    if isinstance(criterion, dict) and self.value and self.value in str(criterion.get("value")):
+                        chosen = option
+                answers[key] = _choice(chosen)
+        return Evaluation(
+            model="test",
+            answers=answers,
+            input_tokens=10,
+            cost=CostLine(component=CostComponent.JEV, basis=CostBasis.ESTIMATED, dollars=0.0001),
+        )
+
+
+def _long_page() -> Capture:
+    filler = [(BlockKind.PARAGRAPH, f"Navigation link {i}") for i in range(MAX_CHOICE_OPTIONS * 2)]
+    return capture(*filler[:300], (BlockKind.PARAGRAPH, "Price: $12"), *filler[300:])
+
+
+async def test_a_long_page_is_focused_and_its_short_fact_read_by_jev() -> None:
+    page = _long_page()
+    assert read_candidates(page) == ()
+    requirement = Requirement(id="r", text="Find the price", kind=RequirementKind.INFORMATION)
+    jev, llm, ledger = _FocusJev("Price", "Price: $12"), ScriptedLLM([]), Ledger(Limits())
+    result = await read(
+        llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,), ledger=ledger
+    )
+    assert llm.calls == [] and [fact.reader for fact in result.facts] == [FactReader.JEV_CHOICE]
+    evidence = result.facts[0].evidence
+    assert evidence is not None
+    assert evidence.quote == page.text[evidence.start : evidence.end] == "Price: $12"
+    state = jev.requests[-1][0]
+    assert isinstance(state, dict) and isinstance(state["page"], dict)
+    assert "Price: $12" in str(state["page"]["text"]) and len(str(state["page"]["text"])) < len(page.text)
+    assert ledger.jev_calls == len(jev.requests) == 2
+
+
+def test_a_record_field_quotes_the_record_it_belongs_to() -> None:
+    page = capture((BlockKind.RECORD, "0.1.0\n\nOct 16, 2023\n17 release files"))
+    date = next(candidate for candidate in read_candidates(page) if candidate.value == "Oct 16, 2023")
+    # The date alone cannot support "0.1.0 was released on Oct 16, 2023" at claim checking.
+    assert date.evidence.quote == "0.1.0\n\nOct 16, 2023"
+
+
+async def test_absent_after_focus_still_reaches_the_reader() -> None:
+    requirement = Requirement(id="r", text="Find the price", kind=RequirementKind.INFORMATION)
+    jev, llm = _FocusJev("Price", None), ScriptedLLM([{"claims": [], "answered": False}] * 4)
+    await read(llm, _long_page(), requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,))
+    # The evidence may sit in a passage the focus pass set aside, so a narrowed page cannot prove absence.
+    assert len(jev.requests) == 2 and llm.calls
+
+
+async def test_a_failed_focus_pass_falls_back_to_the_reader() -> None:
+    requirement = Requirement(id="r", text="Find the price", kind=RequirementKind.INFORMATION)
+    jev = _FocusJev("Price", "Price: $12", fail_focus=True)
+    llm = ScriptedLLM([{"claims": [], "answered": False}] * 4)
+    await read(llm, _long_page(), requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,))
+    assert all(isinstance(q, NoulQuestion) for _, questions in jev.requests for q in questions.values())
+    assert llm.calls
+
+
+async def test_relevant_passages_too_many_to_offer_go_to_the_reader() -> None:
+    # Every row bears on the price, so keeping only those that fit could offer an outdated one alone.
+    page = capture(*((BlockKind.PARAGRAPH, f"Price in {year}: ${year - 1900}") for year in range(1700, 2026)))
+    requirement = Requirement(id="r", text="Find the current price", kind=RequirementKind.INFORMATION)
+    jev, llm = _FocusJev("Price", "Price in 1700"), ScriptedLLM([{"claims": [], "answered": False}] * 4)
+    await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,))
+    assert _only_focus(jev.requests) and llm.calls
+
+
+async def test_a_long_block_is_judged_on_all_of_its_text() -> None:
+    passage = "Older builds of this package are listed in the archive below, sorted by their date. " * 18 + "Price: $12"
+    page = capture(*((BlockKind.PARAGRAPH, f"Navigation link {i}") for i in range(300)), (BlockKind.PARAGRAPH, passage))
+    requirement = Requirement(id="r", text="Find the price", kind=RequirementKind.INFORMATION)
+    jev, llm = _FocusJev("Price", "Price: $12"), ScriptedLLM([])
+    result = await read(llm, page, requirement.text, ["r"], Notes(), jev=jev, requirements=(requirement,))
+    # The price sits past the first window's worth of the block; scoring its opening alone would drop it.
+    assert llm.calls == [] and [fact.reader for fact in result.facts] == [FactReader.JEV_CHOICE]
+
+
+async def test_a_focus_pass_the_spend_limit_cannot_cover_sends_nothing() -> None:
+    requirement = Requirement(id="r", text="Find the price", kind=RequirementKind.INFORMATION)
+    jev, ledger = _FocusJev("Price", "Price: $12"), Ledger(Limits(max_dollars=1e-9))
+    with pytest.raises(BudgetExceeded):
+        await read(
+            ScriptedLLM([]),
+            _long_page(),
+            requirement.text,
+            ["r"],
+            Notes(),
+            jev=jev,
+            requirements=(requirement,),
+            ledger=ledger,
+        )
+    assert jev.requests == []
 
 
 async def test_short_read_reserves_jev_budget_before_calling() -> None:
@@ -380,7 +499,7 @@ async def test_choice_sees_unoffered_passages_or_defers_to_chunked_reader(repeti
     if repetitions == 1:
         assert passage in str(jev.requests[0][0])
     else:
-        assert jev.requests == [] and len(llm.calls) == parts > 2
+        assert _only_focus(jev.requests) and len(llm.calls) == parts > 2
 
 
 class Fields(Frozen):
@@ -1123,4 +1242,5 @@ async def test_short_read_leaves_room_for_both_non_candidate_choices(count: int)
         assert isinstance(question, ChoiceQuestion) and len(question.criteria) == MAX_CHOICE_OPTIONS
         assert not llm.calls
     else:
-        assert not jev.requests and len(llm.calls) == 1
+        # Only the focus pass runs; an overflowing page never gets a truncated choice.
+        assert _only_focus(jev.requests) and len(llm.calls) == 1

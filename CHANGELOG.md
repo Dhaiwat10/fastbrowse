@@ -11,10 +11,16 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **Eval times leave out provider outages.** A run's `seconds` in the live and local evals no longer counts time
+  spent retrying a provider's 503s and dropped requests, which says nothing about the agent; the row's
+  `transient_seconds` holds what was left out.
+- **Relevance passes send small requests in parallel.** Packing a page's Noul questions into as few requests as
+  Jev's 64k limit allows made each one about 26k tokens, and the gateway answered most of those with 503 until
+  the retries ran out, adding up to 25s a pass or ending the run `unavailable`. Questions now go in requests of
+  about 8k tokens, sent together.
 - **A link's name no longer includes a nested stylesheet.** Amazon puts a `<style>` block inside a result's link,
   and the element's name was built from every child's text, so Jev was offered a control named by a page of CSS
   and tried to click it. Style, script, noscript and template children no longer contribute to a name.
-
 - **A dense results page is compacted rather than refused.** Amazon's signed-in search results offered Jev 112
   products with ~200-character titles and ~480-character tracking links, and the run stopped at
   `observation_limit` before it could pick one. When a page does not fit even on-screen only, its elements are now
@@ -29,6 +35,26 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   "Enter mobile number or email", and Jev, seeing only a secret named `username`, chose to write new text,
   so the run stopped `needs_input` before signing in. The field question now says that stored secrets are the
   site's sign-in credentials, named by role.
+- **A dense page keeps the controls the task needs, not the first ones in the document.** The browser now
+  indexes up to 320 controls, and when a page offers more than 160, Jev is asked in one batched pass whether each
+  could serve the task's next actions; the step sees the most relevant 160. Before, a page was cut at its first
+  160 controls, so a result or filter drawn after a long header and sidebar never reached the choice. Pagers,
+  blocking fields and controls holding a value or selection are always kept, and a control Jev did not answer
+  for is kept rather than dropped. A dense page costs one more Jev round trip; a page under the limit costs
+  nothing more.
+  A page whose on-screen controls alone outgrow Jev's input no longer ends the run at `observation_limit`: the
+  controls that fit are offered, pagers and set fields first, and the rest are reported as omitted so a scroll
+  can reach them. The run stops there only when the page's state does not fit with no controls at all.
+- **Jev reads short facts on long pages too.** Jev's quick read of a fact, such as a version or a date, gave
+  up on any page with more than 253 quotable spans or more text than its input allows, which was six of ten real
+  pages measured, from Wikipedia articles to GitHub releases, and the LLM reader then read the page a chunk at a
+  time. Jev now first judges which passages bear on the requirements, one batched pass, and picks the fact from
+  those. A requirement Jev calls absent from a narrowed page still goes to the LLM reader, since the evidence may
+  sit in a passage it set aside.
+  A field Jev picks from a listing record, such as a release date, now quotes the record up to it, so the
+  answer's claim that version 0.1.0 shipped that day still has the version in its citation.
+  A batched Jev pass cut short by the time limit now keeps the cost of the requests that had already answered,
+  and one the call limit cannot cover counts none of its calls.
 - **Every step is credited to Jev or the LLM, never to "code".** A step code dispatches carries out a model's
   choice, and is now recorded as that model's: the next page of a list is the reader's, since the reader asked for
   the rest of the list, and the read taken before an interaction is Jev's, since Jev judged the page to be

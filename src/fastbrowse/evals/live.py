@@ -32,8 +32,6 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Generator
-from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,7 +55,7 @@ from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, St
 from fastbrowse.page import Observation
 from fastbrowse.run import run_task
 from fastbrowse.safety import ScopedSecrets, origin_of
-from fastbrowse.telemetry import TRACE
+from fastbrowse.telemetry import traced, transient_seconds
 
 ARMS = ("fastbrowse", "jev-ultrafast", "browser-use")
 MAX_STEPS = 50
@@ -168,7 +166,6 @@ class _ObservedAgent(Agent):
         return result
 
 
-_trace_events: ContextVar[list[object] | None] = ContextVar("live_trace_events", default=None)
 _running: ContextVar[str] = ContextVar("live_running", default="-")
 """`<arm> <task>` for the run a log record came from: eight runs overlap, and a bare retry warning names none."""
 
@@ -184,6 +181,10 @@ class ArmReport(BaseModel):
 
     status: str
     seconds: float
+    """Wall time, less `transient_seconds` for the arms that can measure it."""
+    transient_seconds: float = 0.0
+    """Time lost to a provider's transient failures, retried 503s and their backoff: it says nothing about the agent,
+    so it is left out of `seconds`. Measured for fastbrowse only; the other arms retry out of our sight."""
     dollars: float | None
     """None when some of the run's spend could not be priced: a known total would then be only a floor."""
     error: str | None = None
@@ -242,36 +243,6 @@ class _UltrafastReport(BaseModel):
     text_dollars: float
     unmetered_requests: int
     text_model: str | None
-
-
-class _Collect(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__(logging.DEBUG)
-        self.events: list[object] = []
-        self.previous_level = next(
-            (handler.previous_level for handler in TRACE.handlers if isinstance(handler, _Collect)), TRACE.level
-        )
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if _trace_events.get() is self.events:
-            self.events.append(getattr(record, "trace", record.getMessage()))
-
-
-@contextmanager
-def _traced() -> Generator[list[object]]:
-    """Only this run and its child tasks contribute to its trace while other runs overlap."""
-    handler = _Collect()
-    token = _trace_events.set(handler.events)
-    TRACE.addHandler(handler)
-    TRACE.setLevel(logging.DEBUG)
-    try:
-        yield handler.events
-    finally:
-        TRACE.removeHandler(handler)
-        _trace_events.reset(token)
-        # Runs can finish out of order; the last collector restores the level from before any run started.
-        if not any(isinstance(active, _Collect) for active in TRACE.handlers):
-            TRACE.setLevel(handler.previous_level)
 
 
 async def fast_arm(
@@ -542,13 +513,16 @@ async def run_arm(
 async def _fast_report(
     task: LiveTask, http: httpx.AsyncClient, downloads: Path, *, bitwarden: bool, record: Path | None, started: float
 ) -> tuple[Outcome, ArmReport]:
-    with _traced() as events:
+    with traced() as events:
         outcome, result, seen = await fast_arm(task, http, downloads, bitwarden=bitwarden, record=record)
     cost = result.cost
     settings = load_settings()
+    ended = seen.ended or time.monotonic()
+    lost = transient_seconds(events, started, ended)
     return outcome, ArmReport(
         status=result.status.value,
-        seconds=(seen.ended or time.monotonic()) - started,
+        seconds=ended - started - lost,
+        transient_seconds=round(lost, 2),
         # An unknown line makes the known total a floor, not a cost.
         dollars=None if cost.has_unknown else cost.known_dollars,
         # A shadow tripwire only earns arming on evidence from LIVE sites: the local fixtures never
@@ -592,6 +566,8 @@ def summarize(rows: list[EvalRow], arms: list[str]) -> None:
             f"{arm}: {passed}/{len(arm_rows)} passed, {correct} correct, median {statistics.median(seconds):.1f}s, "
             f"${sum(priced):.4f}" + (f" ({unknown} runs of unknown cost)" if unknown else "")
         )
+        if lost := sum(r.transient_seconds for r in arm_rows):
+            print(f"  {'transient':18} {lost / len(arm_rows):5.1f}s a task, left out of the median")
         calls: dict[str, float] = {}
         for r in arm_rows:
             for label, spent in r.seconds_by_call.items():

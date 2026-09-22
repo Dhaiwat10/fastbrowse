@@ -32,10 +32,16 @@ class Thresholds(Frozen):
 
 
 class ObservationLimits(Frozen):
-    max_controls: int = Field(default=160, gt=0)
-    """Repeated controls consume both state and target questions, so bound them below Jev's token ceiling."""
-    max_offscreen_controls: int = Field(default=40, ge=0)
+    max_controls: int = Field(default=320, gt=0)
+    """The browser's hard pool bound; late controls beyond it are still cut in DOM order."""
+    max_offscreen_controls: int = Field(default=120, ge=0)
     """Long footers must leave most of the control budget for what is on screen."""
+    max_offered_controls: int = Field(default=160, gt=0)
+    """Jev's step sees at most this many controls; on a denser page a relevance filter picks which.
+
+    Typesafe documents that Jev 1.13 loses accuracy on large state full of irrelevant detail, and a
+    DOM-order cut dropped the control a task needed.
+    """
     viewport_text_chars: int = Field(default=6000, gt=0)
     """Keep navigation's page excerpt small; the reader captures the whole page when it needs more."""
     working_notes_chars: int = Field(default=6000, gt=0)
@@ -56,6 +62,9 @@ class TokenBudget(Frozen):
     """Conservative target under Jev's 32k limit, since tokens are estimated locally."""
     state_plus_all_questions: int = Field(default=48_000, gt=0)
     """Conservative target under Jev's 64k limit."""
+    batch_tokens: int = Field(default=8000, gt=0)
+    """Target for one request among many independent questions. The gateway sheds large requests with 503s (a 26k
+    token request failed five of eight times, 4k never), so a batch of questions is split small and sent in parallel."""
     chars_per_token: float = Field(default=3.0, gt=0)
     """Allow more tokens per character than ordinary English to cover JSON and identifiers."""
     read_output_tokens: int = Field(default=8000, gt=0)

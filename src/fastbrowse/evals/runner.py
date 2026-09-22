@@ -25,6 +25,7 @@ from fastbrowse.config import Config
 from fastbrowse.evals.local import Recorder, fixture_server
 from fastbrowse.evals.tasks import TASKS, LocalTask
 from fastbrowse.models import BrowserConnection, Limits
+from fastbrowse.telemetry import traced, transient_seconds
 
 
 async def run_task(
@@ -40,16 +41,19 @@ async def run_task(
     config = Config()
     jev, llm = settings.jev(http), settings.llm(http)
     started = time.monotonic()
-    async with BrowserSession(connection, sink) as session:
-        page = CdpPage(session, config)
-        result = await Agent(page, jev, llm, config=config).run(
-            task.task,
-            start=base_url + task.start,
-            inputs=task.inputs,
-            output_schema=task.output_schema,
-            limits=Limits(max_steps=25),
-            authorization=task.authorization,
-        )
+    with traced() as events:
+        async with BrowserSession(connection, sink) as session:
+            page = CdpPage(session, config)
+            result = await Agent(page, jev, llm, config=config).run(
+                task.task,
+                start=base_url + task.start,
+                inputs=task.inputs,
+                output_schema=task.output_schema,
+                limits=Limits(max_steps=25),
+                authorization=task.authorization,
+            )
+    ended = time.monotonic()
+    lost = transient_seconds(events, started, ended)
     failure = task.check(result, recorder.snapshot())
     return {
         "task": task.id,
@@ -57,7 +61,9 @@ async def run_task(
         "would_fire": dict(Counter(tripwire.value for tripwire in result.would_fire)),
         "failure": failure,
         "status": result.status.value,
-        "seconds": round(time.monotonic() - started, 1),
+        # A provider's retried 503s say nothing about the agent, so they are left out of its time.
+        "seconds": round(ended - started - lost, 1),
+        "transient_seconds": round(lost, 2),
         "dollars": round(result.cost.known_dollars, 5),
         "unknown_cost": result.cost.has_unknown,
         "seconds_by_call": result.cost.seconds_by_call(),
