@@ -120,6 +120,10 @@ _PAGE_OPERATIONS = frozenset({Operation.READ, Operation.SCROLL, Operation.BACK, 
 _CYCLE_SHOWN = 4
 """Actions named when a run arrives back at a page state, the most recent last."""
 _REVERSAL_WINDOW = 6
+_DONE_SETTLE_SECONDS = 2.0
+"""How long a done check waits for the results an interaction is still drawing. A run clicked a filter and
+declared itself finished against the page as it was before the filter applied, so the check read results that
+had not refreshed and the answer described a list the run never saw."""
 _RECOVERY_RECORDS = 4
 _RECOVERY_CHARS = 240
 _IDLE_CHECKED = frozenset({Operation.CLICK, Operation.ENTER})
@@ -242,6 +246,9 @@ class _RunState:
     )
     """Each document's committed control values seen so far, which a setting put back to cannot renew recovery."""
     ready_plan: Plan | None = None
+    interacted: bool = False
+    """An interaction has executed and changed the page since the last read, so what it did has not been
+    observed. A done check made now would judge the page as it was before the change settled."""
     read_here: bool = False
     """This page has been read since it last changed."""
     tried_unsure: set[str] = field(default_factory=set[str])
@@ -645,6 +652,8 @@ class Agent:
         if decision.operation is Operation.READ:
             progressed, skipped = await self._read(state, capture or await self._capture(), observation)
             state.read_here = True
+            # What the last interaction did has now been looked at, so a done check may judge this page.
+            state.interacted = False
             if skipped:
                 return True
             changed = False
@@ -668,6 +677,7 @@ class Agent:
             if act.outcome is StepOutcome.EXECUTED and action.text is not None:
                 typed = "<secret>" if action.secret else self._redactor.mask(action.text)
             changed = act.page_changed
+            state.interacted = state.interacted or (act.outcome is StepOutcome.EXECUTED and changed)
             # A value edit answers "was this progress" itself, and its answer beats `changed`: the popup a fill
             # draws IS a page change, so `changed` alone kept crediting the identical re-fill even once the
             # written-value check had stopped doing so. `changed` decides every other operation.
@@ -862,6 +872,20 @@ class Agent:
                 break
         state.moves.append((at, made))
         return note, renews, put_back
+
+    async def _still_drawing(self, state: _RunState, fresh: Observation) -> bool:
+        """Whether the page is still producing what the last interaction asked for. A run that clicked a filter
+        and called itself done judged the results as they were before the filter applied. The wait is bought by
+        one interaction: reading the page spends it, so a run cannot be held here twice for the same click."""
+        if not state.interacted:
+            return False
+        state.interacted = False
+        if not await self._page.redrawn(fresh, _DONE_SETTLE_SECONDS):
+            return False
+        # Read what the interaction actually produced before deciding the run is finished.
+        state.read_here = False
+        trace("done_deferred", reason="the page was still drawing what the last interaction changed")
+        return True
 
     @staticmethod
     def _note_effect(state: _RunState, observation: Observation) -> None:
@@ -1572,6 +1596,8 @@ class Agent:
     ) -> RunResult | None:
         """Return the final result when DONE holds up; None sends the loop back to work."""
         fresh = await self._observe()
+        if await self._still_drawing(state, fresh):
+            return None
         state.ledger.reserve(CostComponent.JEV)
         await state.await_plan()
         draft = draft_answer(state.plan, state.notes) if state.plan.answer_expected else None

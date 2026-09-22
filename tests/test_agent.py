@@ -902,6 +902,66 @@ async def test_a_setting_given_a_value_its_page_has_not_held_is_still_progress()
     assert not any(purpose is LLMPurpose.RECOVER for purpose, _ in llm.calls)
 
 
+def _settling(redrawing: bool) -> tuple[Agent, Mock]:
+    page = Mock(spec=Page)
+    page.redrawn = AsyncMock(return_value=redrawing)
+    return Agent(page, ScriptedJev({}), ScriptedLLM([])), page
+
+
+async def test_a_done_after_an_interaction_waits_for_the_results_it_changed() -> None:
+    """A run clicked a filter and called itself done against the results as they were before it applied."""
+    agent, page = _settling(redrawing=True)
+    state = await run_state()
+    state.interacted, state.read_here = True, True
+    here = observation((_button("Stops"),))
+    assert await agent._still_drawing(state, here) is True
+    # The run goes back to read what the click produced rather than judging the page it has not seen.
+    assert state.read_here is False
+    page.redrawn.assert_awaited_once()
+    # One interaction buys one wait, so a page that keeps drawing cannot hold the run here.
+    assert await agent._still_drawing(state, here) is False
+
+
+async def test_a_page_that_has_settled_lets_the_done_check_judge_it() -> None:
+    agent, page = _settling(redrawing=False)
+    state = await run_state()
+    state.interacted, state.read_here = True, True
+    assert await agent._still_drawing(state, observation((_button("Stops"),))) is False
+    assert state.read_here is True
+    page.redrawn.assert_awaited_once()
+
+
+async def test_a_done_after_a_read_pays_no_wait() -> None:
+    agent, page = _settling(redrawing=True)
+    state = await run_state()
+    state.interacted = False
+    assert await agent._still_drawing(state, observation((_button("Stops"),))) is False
+    page.redrawn.assert_not_awaited()
+
+
+async def test_an_executed_interaction_owes_a_look_and_a_read_pays_it() -> None:
+    stops = _button("Stops")
+    here = observation((stops,)).model_copy(update={"document_key": "results"})
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    page.observe = AsyncMock(return_value=here)
+    page.capture = AsyncMock(return_value=capture((BlockKind.PARAGRAPH, "7 results")))
+    page.screenshot = AsyncMock(return_value=b"")
+    page.artifacts = ()
+    llm = ScriptedLLM([{"claims": [], "answered": False}])
+    agent = Agent(page, ScriptedJev({"r1": "synthesis"}), llm)
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="Find the fare", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    state.authorization = Authorization(irreversible_actions=True)
+    await agent._step(state, here, _code_decision(Operation.CLICK, stops))
+    assert state.interacted is True
+    await agent._step(state, here, _code_decision(Operation.READ, None))
+    assert state.interacted is False
+
+
 async def test_scrolling_controls_in_and_out_of_view_is_not_a_reversal() -> None:
     top = observation((_button("1"), _button("Search"))).model_copy(update={"document_key": "doc"})
     below = observation((_button("Search"),)).model_copy(update={"document_key": "doc"})
