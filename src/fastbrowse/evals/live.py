@@ -483,7 +483,12 @@ async def run_arm(
             dollars=None,
             video=_video(record),
         )
-    failure = task.check(outcome, truth)
+    try:
+        failure = task.check(outcome, truth)
+    except Exception as exc:
+        # One task's grader must not discard every other run in the suite: gather propagates, and a 114-run
+        # pass is an hour and real money. A grader that raises is that row's failure and nobody else's.
+        failure = f"check raised {type(exc).__name__}: {exc}"
     # Right and proven are graded apart: a correct answer the agent could not back with quotes is a
     # different defect from a wrong one, and one pass/fail column hid which the suite was showing.
     correct = failure is None
