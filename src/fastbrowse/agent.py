@@ -152,6 +152,11 @@ class _Recovery(Frozen):
         default=None, description="What the subgoal does to that control, or to the page (read, scroll, back, escape)."
     )
     give_up: bool = Field(description="True only when the task cannot progress without the user.")
+    needs_input: bool = Field(
+        default=False,
+        description="With give_up: true when what the user must supply is a value the task never gave, such as a "
+        "field it names no value for; false for any other dead end.",
+    )
 
 
 class _Stop(Exception):
@@ -163,6 +168,11 @@ class _Stop(Exception):
 
 class _Unsure(Exception):
     """The next action is authorized but not confidently the right one: a case for recovery, not for the caller."""
+
+    def __init__(self, reason: str, *, gives_up_as: Status = Status.STUCK) -> None:
+        super().__init__(reason)
+        # How the run ends if recovery finds no other way: a missing value is still the user's to give.
+        self.gives_up_as = gives_up_as
 
 
 @dataclass(slots=True)
@@ -227,6 +237,9 @@ class _RunState:
     """The first page the run looked at, which is what a task's "this page" means once the run has moved on."""
     redecided: bool = False
     """A decision was dropped because the page redrew under it, so nothing is watched until an action is taken."""
+    missing: set[tuple[str, str | None]] = field(default_factory=set[tuple[str, str | None]])
+    """Fields the task gives no value for, which recovery has been told about once, by label and the context that
+    tells twins apart: a second passenger's frequent-flyer box is not the first one revisited."""
     continuing: set[str] = field(default_factory=set[str])
     """Requirements the reader said range over a list that goes on past the page it read. A scalar choice cannot
     answer one of those, so it is not asked about them again on the next page."""
@@ -458,7 +471,7 @@ class Agent:
                 if await self._step(state, observation, decision, decided_by):
                     await self._recover(state, observation, _read_exhausted(state))
             except _Unsure as unsure:
-                await self._recover(state, observation, str(unsure))
+                await self._recover(state, observation, str(unsure), gives_up_as=unsure.gives_up_as)
 
     async def _unless_redrawn[T](
         self, state: _RunState, work: Coroutine[None, None, T], observation: Observation, target: Control | None
@@ -1140,7 +1153,7 @@ class Agent:
         # same task and notes, so it is asked whether the value really is absent before the run stops, and the
         # writer gets one more attempt with the disagreement put to it.
         if await self._value_absent(state, observation, target):
-            raise _Stop(Status.NEEDS_INPUT, f"{target.label!r} needs a value the task does not give")
+            raise self._missing(state, target)
         insisted = [
             *messages,
             Message(
@@ -1154,8 +1167,24 @@ class Agent:
         ]
         written = await self._write_field(state, insisted)
         if written is None:
-            raise _Stop(Status.NEEDS_INPUT, f"{target.label!r} needs a value the task does not give")
+            raise self._missing(state, target)
         return written
+
+    @staticmethod
+    def _missing(state: _RunState, target: Control) -> Exception:
+        """A field the task gives no value for is first a wrong pick, then a missing input.
+
+        Most such fields are optional, and the right move is to leave them: Google Flights opens a "Where else?"
+        box beside the origin, and a run stopped there at needs_input with nothing yet searched. Recovery is told
+        once, so it can pick another step; a required field it sends the run back to still ends it here."""
+        key = (target.label, target.context)
+        if key in state.missing:
+            return _Stop(Status.NEEDS_INPUT, f"{target.label!r} needs a value the task does not give")
+        state.missing.add(key)
+        return _Unsure(
+            f"the task gives no value for {target.label!r}: leave it unless the task cannot go on without it",
+            gives_up_as=Status.NEEDS_INPUT,
+        )
 
     async def _write_field(self, state: _RunState, messages: Sequence[Message]) -> str | None:
         """The text for one field, or None when the writer says the value was never given."""
@@ -1311,14 +1340,16 @@ class Agent:
             "the list with the page's own filter or sort so the answer is in view."
         )
 
-    async def _recover(self, state: _RunState, observation: Observation, reason: str) -> None:
+    async def _recover(
+        self, state: _RunState, observation: Observation, reason: str, *, gives_up_as: Status = Status.STUCK
+    ) -> None:
         state.recoveries += 1
         # Recovery spends every tripwire's evidence so the same threshold crossing cannot trigger it again.
         state.unchanged = 0
         state.recovered_at = len(state.history)
         state.plan_marks.clear()
         if state.recoveries > self._config.stall.max_recoveries:
-            raise _Stop(Status.STUCK, reason)
+            raise _Stop(gives_up_as, reason)
         steps = "\n".join(
             f"- {h.operation.value if h.operation else 'open'} {h.target or ''} -> {h.outcome.value}"
             + (f": {h.effect}" if h.effect else "")
@@ -1384,7 +1415,10 @@ class Agent:
         )
         state.ledger.record(generation.cost)
         if generation.data.give_up:
-            raise _Stop(Status.STUCK, generation.data.diagnosis)
+            # Asked of the model rather than carried from the step that raised it: a missing value can surface
+            # recoveries later, after an attempt to go on without it has failed for its absence.
+            status = Status.NEEDS_INPUT if generation.data.needs_input else Status.STUCK
+            raise _Stop(status, generation.data.diagnosis)
         state.hint = generation.data.next_subgoal
         trace(
             "recover",

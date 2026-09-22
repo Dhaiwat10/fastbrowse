@@ -106,12 +106,18 @@ async def test_field_writer_receives_popup_context_and_other_field_values() -> N
     assert prompt["page"]["text"] == "Choose a station"
 
 
-async def test_missing_personal_information_still_stops_without_filling() -> None:
+async def test_missing_personal_information_stops_once_recovery_returns_to_it() -> None:
+    """The first missing verdict is recovery's to route around, since most such fields are optional; a field
+    recovery sends the run back to is required, and ends it."""
     target = field("Account number")
     page = Mock(spec=Page)
-    agent = Agent(page, ScriptedJev({}, noul=0.1), ScriptedLLM([{"missing": True, "text": ""}]))
+    llm = ScriptedLLM([{"missing": True, "text": ""}, {"missing": True, "text": ""}])
+    agent = Agent(page, ScriptedJev({}, noul=0.1), llm)
+    state = await run_state()
+    with pytest.raises(_Unsure):
+        await agent._generate_text(state, observation((target,)), target)
     with pytest.raises(_Stop) as stopped:
-        await agent._generate_text(await run_state(), observation((target,)), target)
+        await agent._generate_text(state, observation((target,)), target)
     assert stopped.value.status is Status.NEEDS_INPUT
     page.act.assert_not_called()
 
@@ -125,13 +131,40 @@ async def test_a_value_the_task_states_is_asked_for_again_rather_than_ending_the
     assert "never invent one" in llm.calls[1][1][-1].content
 
 
-async def test_a_second_missing_verdict_ends_the_run() -> None:
+async def test_a_second_missing_verdict_goes_to_recovery() -> None:
     target = field("Account number")
     llm = ScriptedLLM([{"missing": True, "text": ""}, {"missing": True, "text": ""}])
     agent = Agent(Mock(spec=Page), ScriptedJev({}, noul=0.9), llm)
-    with pytest.raises(_Stop) as stopped:
+    with pytest.raises(_Unsure):
         await agent._generate_text(await run_state(), observation((target,)), target)
+
+
+@pytest.mark.parametrize("max_recoveries", [0, 1])
+async def test_recovery_giving_up_on_a_missing_value_ends_the_run_needing_input(max_recoveries: int) -> None:
+    """Out of budget, or recovery saying only the user can go on: either way the caller is owed the value, and
+    `stuck` would tell it to narrow the task instead."""
+    target = field("Account number")
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=observation((target,)))
+    page.redrawn = AsyncMock(return_value=False)
+    page.screenshot = AsyncMock(return_value=b"")
+    page.artifacts = ()
+    recovery: JsonValue = {
+        "diagnosis": "Only the user knows the account number",
+        "next_subgoal": "Ask",
+        "give_up": True,
+        "needs_input": True,
+    }
+    agent = Agent(
+        page,
+        ScriptedJev({"operation": "fill", "fill_target": target.id}, noul=0.1),
+        ScriptedLLM([{"missing": True, "text": ""}, recovery]),
+        config=Config(stall=StallRules(max_recoveries=max_recoveries)),
+    )
+    with pytest.raises(_Stop) as stopped:
+        await agent._loop(await run_state(), None, None)
     assert stopped.value.status is Status.NEEDS_INPUT
+    page.act.assert_not_called()
 
 
 @pytest.mark.parametrize("outcome", [StepOutcome.EXECUTED, StepOutcome.STALE])
