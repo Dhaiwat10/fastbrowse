@@ -237,8 +237,9 @@ class _RunState:
     """The first page the run looked at, which is what a task's "this page" means once the run has moved on."""
     redecided: bool = False
     """A decision was dropped because the page redrew under it, so nothing is watched until an action is taken."""
-    missing: set[str] = field(default_factory=set[str])
-    """Fields the task gives no value for, which recovery has been told about once."""
+    missing: set[tuple[str, str | None]] = field(default_factory=set[tuple[str, str | None]])
+    """Fields the task gives no value for, which recovery has been told about once, by label and the context that
+    tells twins apart: a second passenger's frequent-flyer box is not the first one revisited."""
     continuing: set[str] = field(default_factory=set[str])
     """Requirements the reader said range over a list that goes on past the page it read. A scalar choice cannot
     answer one of those, so it is not asked about them again on the next page."""
@@ -1176,9 +1177,10 @@ class Agent:
         Most such fields are optional, and the right move is to leave them: Google Flights opens a "Where else?"
         box beside the origin, and a run stopped there at needs_input with nothing yet searched. Recovery is told
         once, so it can pick another step; a required field it sends the run back to still ends it here."""
-        if target.label in state.missing:
+        key = (target.label, target.context)
+        if key in state.missing:
             return _Stop(Status.NEEDS_INPUT, f"{target.label!r} needs a value the task does not give")
-        state.missing.add(target.label)
+        state.missing.add(key)
         return _Unsure(
             f"the task gives no value for {target.label!r}: leave it unless the task cannot go on without it",
             gives_up_as=Status.NEEDS_INPUT,
