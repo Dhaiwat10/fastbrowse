@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
+from fastbrowse.models import Frozen
 from fastbrowse.page import Control, Observation
 
 _SHOWN = 4
@@ -18,6 +19,65 @@ class Effect:
     summary: str
     set_something: bool
     """The address, or a surviving control's label, value, checked or selected state, changed."""
+
+
+type ControlKey = tuple[str | None, str | None, str, str, str | None]
+type ControlValue = tuple[str | None, bool | None, bool | None]
+
+
+class Move(Frozen):
+    """Committed control values before and after an action on the same document."""
+
+    document: str
+    values_before: dict[ControlKey, ControlValue]
+    values_after: dict[ControlKey, ControlValue]
+
+
+def _control_values(observation: Observation) -> dict[ControlKey, ControlValue]:
+    controls: dict[ControlKey, list[Control]] = {}
+    for c in observation.controls:
+        key = c.frame_id, c.frame_origin, c.role, c.label, c.context
+        controls.setdefault(key, []).append(c)
+    # A redraw replaces node ids. Exact names can survive it, but unnamed twins cannot stand in for each other.
+    return {
+        key: (c.value, c.checked, c.selected)
+        for key, items in controls.items()
+        if len(items) == 1
+        for c in items
+        if c.value is not None or c.checked is not None or c.selected is not None
+    }
+
+
+def move(before: Observation, after: Observation) -> Move | None:
+    if not before.document_key or before.document_key != after.document_key:
+        return None
+    return Move(
+        document=before.document_key,
+        values_before=_control_values(before),
+        values_after=_control_values(after),
+    )
+
+
+def reversal(later: Move, earlier: Move) -> str | None:
+    """Name a restored value only when the document and every other committed value also return."""
+    if later.document != earlier.document or later.values_after != earlier.values_before:
+        return None
+    for key in sorted(
+        earlier.values_before.keys() & earlier.values_after.keys() & later.values_before.keys(), key=repr
+    ):
+        value = later.values_after[key]
+        if earlier.values_after[key] != value and later.values_before[key] != value:
+            held = ", ".join(
+                f"{name}={_short(v)}"
+                for name, v in zip(("value", "checked", "selected"), value, strict=True)
+                if v is not None
+            )
+            return f"{_control_name(key)} keeps returning to {held}"
+    return None
+
+
+def _control_name(key: ControlKey) -> str:
+    return f"{key[3]} ({key[4]})" if key[4] else key[3]
 
 
 def state_key(observation: Observation) -> str:

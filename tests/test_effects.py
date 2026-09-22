@@ -1,6 +1,8 @@
 """What an action did, as the policy and recovery are told it."""
 
-from fastbrowse.effects import effect, state_key
+import pytest
+
+from fastbrowse.effects import effect, move, reversal, state_key
 from fastbrowse.models import Operation
 from fastbrowse.page import Control
 from tests.test_policy import observation
@@ -45,6 +47,67 @@ def test_a_page_state_ignores_text_but_not_values() -> None:
     page = observation((TRIGGER,))
     assert state_key(page) == state_key(page.model_copy(update={"viewport_text": "12:01"}))
     assert state_key(page) != state_key(observation((TRIGGER.model_copy(update={"value": "One way"}),)))
+
+
+@pytest.mark.parametrize("scope", ["document_key", "context", "frame_id", "frame_origin"])
+def test_reversals_do_not_match_a_control_from_another_document_or_context(scope: str) -> None:
+    toggle = control("filter", "Direct only", "checkbox", checked=False, context="Outbound")
+    off = observation((toggle,)).model_copy(update={"document_key": "doc"})
+    on = off.model_copy(update={"controls": (toggle.model_copy(update={"checked": True}),)})
+    earlier = move(off, on)
+    assert earlier is not None
+    changed = []
+    for obs in (on, off):
+        changed.append(
+            obs.model_copy(update={"document_key": "another"})
+            if scope == "document_key"
+            else obs.model_copy(update={"controls": (obs.controls[0].model_copy(update={scope: "another"}),)})
+        )
+    later = move(*changed)
+    assert later is not None and reversal(later, earlier) is None
+    assert move(on, off.model_copy(update={"document_key": "new"})) is None
+
+
+@pytest.mark.parametrize(
+    ("attribute", "before", "after"), [("checked", False, True), ("selected", False, True), ("value", "Price", "Name")]
+)
+@pytest.mark.parametrize("other_returns", [False, True])
+def test_reversal_requires_every_committed_value_to_return(
+    attribute: str, before: str | bool, after: str | bool, other_returns: bool
+) -> None:
+    setting = control("setting", "Setting").model_copy(update={attribute: before})
+    other = control("other", "Other", value="original")
+    original = observation((setting, other)).model_copy(update={"document_key": "doc"})
+    changed = original.model_copy(update={"controls": (setting.model_copy(update={attribute: after}), other)})
+    returned = original.model_copy(
+        update={"controls": (setting, other if other_returns else other.model_copy(update={"value": "new"}))}
+    )
+    earlier, later = move(original, changed), move(changed, returned)
+    assert earlier is not None and later is not None
+    note = reversal(later, earlier)
+    assert note == (f"Setting keeps returning to {attribute}={before}" if other_returns else None)
+
+
+@pytest.mark.parametrize("value", ["Round trip", "One way"])
+def test_reopening_controls_with_new_results_is_not_a_value_reversal(value: str) -> None:
+    panel = observation((TRIGGER, control("done", "Done"))).model_copy(update={"document_key": "doc"})
+    form = observation((TRIGGER.model_copy(update={"expanded": False}), control("search", "Search"))).model_copy(
+        update={"document_key": "doc"}
+    )
+    earlier = move(panel, form)
+    later = move(
+        form,
+        panel.model_copy(
+            update={
+                "controls": (
+                    TRIGGER.model_copy(update={"value": value}),
+                    panel.controls[1],
+                    control("result", "New result"),
+                )
+            }
+        ),
+    )
+    assert earlier is not None and later is not None and reversal(later, earlier) is None
 
 
 def test_a_value_set_on_the_field_an_overlay_stood_in_for_counts() -> None:

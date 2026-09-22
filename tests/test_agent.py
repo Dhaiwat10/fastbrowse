@@ -42,7 +42,7 @@ from fastbrowse.models import (
 )
 from fastbrowse.page import Action, ActResult, BlockKind, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
-from fastbrowse.policy import Decision, HistoryEntry, ReadAssessment, decide
+from fastbrowse.policy import Decision, HistoryEntry, ReadAssessment, build_request, decide
 from fastbrowse.retrieval import ComposedAnswer
 from fastbrowse.safety import ScopedSecrets
 from fastbrowse.telemetry import Ledger
@@ -768,6 +768,121 @@ async def test_going_back_after_reading_a_page_is_progress() -> None:
     assert agent._settle(state, results) is None
     assert state.unchanged == 0
     assert state.history[-1].effect is None
+
+
+@pytest.mark.parametrize("changed", [False, True])
+async def test_a_filter_returning_to_its_prior_value_routes_to_recovery(changed: bool) -> None:
+    toggle = _button("Direct only").model_copy(update={"role": "checkbox", "checked": False})
+    current = observation((toggle,)).model_copy(update={"document_key": "results"})
+    page = Mock(spec=Page)
+
+    async def observe() -> Observation:
+        return current
+
+    async def act(*args: object) -> ActResult:
+        nonlocal current
+        toggle = current.controls[0]
+        current = current.model_copy(update={"controls": (toggle.model_copy(update={"checked": not toggle.checked}),)})
+        return ActResult(outcome=StepOutcome.EXECUTED, page_changed=changed)
+
+    page.observe = AsyncMock(side_effect=observe)
+    page.act = AsyncMock(side_effect=act)
+    page.screenshot = AsyncMock(return_value=b"")
+    llm = ScriptedLLM([{"diagnosis": "The filter is cycling", "next_subgoal": "Read results", "give_up": True}])
+    agent = Agent(page, ScriptedJev({"operation": "click", "click_target": toggle.id}, noul=0.0), llm)
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    with pytest.raises(_Stop):
+        await agent._loop(state, None, None)
+    assert page.act.await_count == 2
+    assert llm.calls[0][0] is LLMPurpose.RECOVER
+    prompt = llm.calls[0][1][-1].content
+    assert "Direct only keeps returning to checked=False" in prompt
+    assert "intervening actions: click Direct only, click Direct only" in prompt
+    assert len(llm.calls) == 1
+
+
+async def test_a_filter_that_keeps_redrawing_the_results_cannot_renew_the_recovery_budget() -> None:
+    toggle = _button("Direct only").model_copy(update={"role": "checkbox", "checked": False})
+    current = observation((toggle, _button("0 results"))).model_copy(update={"document_key": "results"})
+    page = Mock(spec=Page)
+
+    async def observe() -> Observation:
+        return current
+
+    async def act(*args: object) -> ActResult:
+        nonlocal current
+        box, results = current.controls
+        # Every toggle redraws the results, so each state is one the run has never seen.
+        redrawn = results.model_copy(update={"label": f"{page.act.await_count} results"})
+        current = current.model_copy(
+            update={"controls": (box.model_copy(update={"checked": not box.checked}), redrawn)}
+        )
+        return ActResult(outcome=StepOutcome.EXECUTED, page_changed=True)
+
+    page.observe = AsyncMock(side_effect=observe)
+    page.act = AsyncMock(side_effect=act)
+    page.screenshot = AsyncMock(return_value=b"")
+    llm = ScriptedLLM([{"diagnosis": "The filter is cycling", "next_subgoal": "Read results", "give_up": False}] * 4)
+    agent = Agent(
+        page,
+        ScriptedJev({"operation": "click", "click_target": toggle.id}, noul=0.0),
+        llm,
+        config=Config(stall=StallRules(max_recoveries=1)),
+    )
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    with pytest.raises(_Stop):
+        await agent._loop(state, None, None)
+    assert len(llm.calls) == 1
+
+
+async def test_scrolling_controls_in_and_out_of_view_is_not_a_reversal() -> None:
+    top = observation((_button("1"), _button("Search"))).model_copy(update={"document_key": "doc"})
+    below = observation((_button("Search"),)).model_copy(update={"document_key": "doc"})
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
+    state = await run_state()
+    agent._settle(state, top)
+    for before, after in ((top, below), (below, top), (top, below)):
+        await agent._step(state, before, _code_decision(Operation.SCROLL, None))
+        agent._note_effect(state, after)
+        agent._settle(state, after)
+        assert agent._reversal(state) == (None, True)
+
+
+@pytest.mark.parametrize("recoveries", [2, 6])
+async def test_recovery_prompts_and_requests_remember_the_last_four_diagnoses_redacted(recoveries: int) -> None:
+    page = Mock(spec=Page)
+    page.screenshot = AsyncMock(return_value=b"")
+    llm = ScriptedLLM(
+        [
+            {"diagnosis": f"Diagnosis {n} hunter2", "next_subgoal": f"Subgoal {n} hunter2", "give_up": False}
+            for n in range(recoveries)
+        ]
+    )
+    config = Config(stall=StallRules(max_recoveries=recoveries))
+    agent = Agent(page, ScriptedJev({}), llm, config=config)
+    agent._redactor.register("password", "hunter2")
+    state = await run_state()
+    obs = observation((_button("Search"),))
+    for n in range(recoveries):
+        await agent._recover(state, obs, f"Reason {n} hunter2")
+    second = llm.calls[1][1][-1].content
+    assert f"recovery 2 of {recoveries} in this stall" in second
+    for field in ("Reason", "Diagnosis", "Subgoal"):
+        assert f"{field}: {field} 0 [secret:password]" in second
+    assert "hunter2" not in second
+    request = build_request(obs, obs.controls, agent._context(state, (), check_login=False, check_bot=False), config)
+    assert isinstance(request.state, dict)
+    memory = request.state["recovery_memory"]
+    assert isinstance(memory, str)
+    assert f"recovery {recoveries} of {recoveries}" in memory
+    for n in range(recoveries):
+        for field in ("Reason", "Diagnosis", "Subgoal"):
+            assert (f"{field}: {field} {n} [secret:password]" in memory) is (n >= recoveries - 4)
+    assert "hunter2" not in memory
 
 
 @pytest.mark.parametrize(

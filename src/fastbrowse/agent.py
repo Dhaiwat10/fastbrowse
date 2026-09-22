@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import time
+from collections import deque
 from collections.abc import Coroutine, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field, JsonValue
 
 from fastbrowse.citations import ANSWER_LINK, text_fragment
 from fastbrowse.config import Config, ObservationLimits
-from fastbrowse.effects import SETTING_ROLES, effect, state_key
+from fastbrowse.effects import SETTING_ROLES, ControlKey, ControlValue, Move, effect, move, reversal, state_key
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, LLMError, Message
 from fastbrowse.memory import Fact, Notes, NotesTooLarge
@@ -54,7 +55,6 @@ from fastbrowse.page import (
     Observation,
     Page,
     pager_link,
-    pages_forward,
 )
 from fastbrowse.planner import Plan, Requirement, RequirementKind, make_plan
 from fastbrowse.policy import (
@@ -108,6 +108,9 @@ _PAGE_OPERATIONS = frozenset({Operation.READ, Operation.SCROLL, Operation.BACK, 
 """Recovery can direct page operations without a control; directed DONE still requires verification."""
 _CYCLE_SHOWN = 4
 """Actions named when a run arrives back at a page state, the most recent last."""
+_REVERSAL_WINDOW = 6
+_RECOVERY_RECORDS = 4
+_RECOVERY_CHARS = 240
 _IDLE_CHECKED = frozenset({Operation.CLICK, Operation.ENTER})
 """Operations not taken twice from a page state where they changed nothing. A hover can reveal content through CSS
 alone, which leaves the DOM as it was, so it is not judged by the DOM."""
@@ -204,6 +207,7 @@ class _RunState:
     """Controls a fill or select has written, by document, so only a field's first new value counts as progress by
     itself. A new document restarts control ids, and its fields would otherwise inherit the last page's writes."""
     recoveries: int = 0
+    recovery_log: deque[str] = field(default_factory=lambda: deque(maxlen=_RECOVERY_RECORDS))
     recovered_at: int = 0
     """`len(history)` when a tripwire last recovered the run. Evidence a recovery already acted on is
     spent: `history` only grows, so a repetition count that reached the limit once would hold forever and
@@ -220,6 +224,12 @@ class _RunState:
     """The state the last action that changed the page was taken from, until the next observation judges it."""
     acted_from: Observation | None = None
     """The page the last action was taken on, until the next observation says what it did."""
+    pending_move: Move | None = None
+    moves: list[tuple[int, Move]] = field(default_factory=list[tuple[int, Move]])
+    settings_held: set[tuple[str, frozenset[tuple[ControlKey, ControlValue]]]] = field(
+        default_factory=set[tuple[str, frozenset[tuple[ControlKey, ControlValue]]]]
+    )
+    """Each document's committed control values seen so far, which a setting put back to cannot renew recovery."""
     ready_plan: Plan | None = None
     read_here: bool = False
     """This page has been read since it last changed."""
@@ -347,7 +357,9 @@ class Agent:
             observation = await self._observe()
             state.first_url = state.first_url or observation.url
             self._note_effect(state, observation)
-            if (stalled := self._settle(state, observation)) is not None:
+            undone, renews = self._reversal(state)
+            stalled = self._settle(state, observation, renews=renews)
+            if (stalled := undone or stalled) is not None:
                 await self._recover(state, observation, stalled)
                 continue
             # Walking a list is dispatched before Jev is asked, because not asking is the point: the reader asked for
@@ -398,7 +410,7 @@ class Agent:
             if await self._read_before_interaction(state, observation, decision, decided_by):
                 continue
             pager = (
-                decision.operation is Operation.CLICK and decision.target is not None and pages_forward(decision.target)
+                decision.operation is Operation.CLICK and decision.target is not None and pager_link(decision.target)
             )
             # Only a pager waits for the plan: the clicks that set a search up run while it is still being written.
             plan = await state.await_plan() if pager else state.ready_plan
@@ -664,7 +676,9 @@ class Agent:
             if act.outcome is StepOutcome.EXECUTED and target is not None and target.role in SETTING_ROLES:
                 # Choosing an option has an intended effect to check: a menu that closed without the value
                 # changing still changes the page, and Google Flights' "One way" was clicked to the step limit.
-                done = effect(observation, await self._observe(), target)
+                landed = await self._observe()
+                done = effect(observation, landed, target)
+                state.pending_move = move(observation, landed)
                 state.acted_from = None
                 effective = done.set_something
                 if not done.set_something:
@@ -758,7 +772,7 @@ class Agent:
             action.model_copy(update={"target_id": twins[0].id}), self._raw_observation or fresh
         )
 
-    def _settle(self, state: _RunState, observation: Observation) -> str | None:
+    def _settle(self, state: _RunState, observation: Observation, *, renews: bool = True) -> str | None:
         """Judge the last page-changing action by the state it led to; the reason to recover, if the run is stuck.
 
         Recoveries are spent on being stuck, not on the whole run, so a page state never seen before restores the
@@ -771,7 +785,9 @@ class Agent:
         first = state.reached.get(key)
         if first is None:
             state.reached[key] = len(state.history)
-            state.recoveries = 0
+            if renews:
+                state.recoveries = 0
+                state.recovery_log.clear()
         left, state.left = state.left, None
         if left is None:
             return None
@@ -793,12 +809,44 @@ class Agent:
         return note
 
     @staticmethod
+    def _reversal(state: _RunState) -> tuple[str | None, bool]:
+        """The reason to recover when a setting went back to an earlier value, and whether the state reached may
+        renew the recovery budget. Settings put back to values their page already held are not progress, however
+        the results redraw: a filter toggled on and off reached a state never seen on every click."""
+        made, state.pending_move = state.pending_move, None
+        at = len(state.history)
+        state.moves = [(index, m) for index, m in state.moves if index >= at - _REVERSAL_WINDOW]
+        if (
+            made is None
+            or made.values_after == made.values_before
+            or state.history[-1].outcome is not StepOutcome.EXECUTED
+            # Scrolling shows and hides controls without changing a setting.
+            or state.history[-1].operation in _PAGE_OPERATIONS
+        ):
+            return None, True
+        held = made.document, frozenset(made.values_after.items())
+        renews = held not in state.settings_held
+        state.settings_held.update((held, (made.document, frozenset(made.values_before.items()))))
+        note = None
+        for index, earlier in reversed(state.moves):
+            # Recovery spent what came before it, and a read in between makes a return a comparison, as in _settle.
+            if index <= state.recovered_at or any(e.operation is Operation.READ for e in state.history[index:]):
+                break
+            if (returned := reversal(made, earlier)) is not None:
+                actions = ", ".join(_described(entry) for entry in state.history[index - 1 :][-_CYCLE_SHOWN:])
+                note = f"{returned}; intervening actions: {actions}"
+                break
+        state.moves.append((at, made))
+        return note, renews
+
+    @staticmethod
     def _note_effect(state: _RunState, observation: Observation) -> None:
         """Record on the last action what it did, which the next choice and recovery both read."""
         before, state.acted_from = state.acted_from, None
         if before is None or not state.history or state.history[-1].effect is not None:
             return
         state.history[-1] = state.history[-1].model_copy(update={"effect": effect(before, observation).summary})
+        state.pending_move = move(before, observation)
 
     async def _observe(self) -> Observation:
         """Every observation models see has resolved secret values blanked, wherever the page echoes them."""
@@ -1355,6 +1403,7 @@ class Agent:
     async def _recover(
         self, state: _RunState, observation: Observation, reason: str, *, gives_up_as: Status = Status.STUCK
     ) -> None:
+        reason = self._redactor.redact(reason)
         state.recoveries += 1
         # Recovery spends every tripwire's evidence so the same threshold crossing cannot trigger it again.
         state.unchanged = 0
@@ -1403,7 +1452,9 @@ class Agent:
                         "the observed control it acts on, with no alternatives. A read, scroll, back or escape acts "
                         "on the page and names no control. A read takes in the whole page, so scroll only to reach "
                         "a control or to load more. When the notes already answer every open requirement, the next "
-                        "subgoal is to finish. Dates are relative to the supplied current date.\n\n"
+                        "subgoal is to finish. Recovery memory records earlier diagnoses and subgoals; "
+                        "use the recent steps to judge whether to try another way. "
+                        "Dates are relative to the supplied current date.\n\n"
                         f"# Trust\n{UNTRUSTED}"
                     ),
                 ),
@@ -1415,6 +1466,8 @@ class Agent:
                         "## Notes read so far\n"
                         f"{state.notes.render(self._config.observation.working_notes_chars) or 'none'}\n\n"
                         f"## Recent steps\n{steps}\n\n"
+                        "## Recovery memory\n"
+                        f"{_recovery_memory(state, self._config.stall.max_recoveries, self._redactor)}\n\n"
                         f"## Current date\n{observation.captured_at.date().isoformat()}\n\n"
                         f"## Still to find\n{open_requirements or 'nothing'}\n\n"
                         f"## Task\n{state.task}\n\n## Problem\n{reason}"
@@ -1431,7 +1484,12 @@ class Agent:
             # recoveries later, after an attempt to go on without it has failed for its absence.
             status = Status.NEEDS_INPUT if generation.data.needs_input else Status.STUCK
             raise _Stop(status, generation.data.diagnosis)
-        state.hint = generation.data.next_subgoal
+        state.hint = self._redactor.redact(generation.data.next_subgoal)
+        diagnosis = self._redactor.redact(generation.data.diagnosis)
+        state.recovery_log.append(
+            f"- Reason: {_recovery_text(reason)}. Diagnosis: {_recovery_text(diagnosis)}. "
+            f"Subgoal: {_recovery_text(state.hint)}."
+        )
         trace(
             "recover",
             reason=reason,
@@ -1732,6 +1790,7 @@ class Agent:
             requirements=tuple(r.text for r in state.ready_plan.requirements) if state.ready_plan else (),
             notes=state.notes.render(self._config.observation.working_notes_chars),
             history=_history(state.history, self._config.observation),
+            recovery_memory=_recovery_memory(state, self._config.stall.max_recoveries, self._redactor),
             check_login=check_login,
             check_bot=check_bot,
             has_attachments=bool(state.attachments),
@@ -1825,6 +1884,18 @@ def _history(history: Sequence[HistoryEntry], limits: ObservationLimits) -> tupl
     split = len(history) - limits.history_entries
     earlier = history[max(0, split - limits.earlier_history_entries) : max(0, split)]
     return (*(entry.model_copy(update={"effect": None}) for entry in earlier), *history[max(0, split) :])
+
+
+def _recovery_text(text: str) -> str:
+    return " ".join(text.split())[:_RECOVERY_CHARS]
+
+
+def _recovery_memory(state: _RunState, limit: int, redactor: Redactor) -> str:
+    """One bounded account for both models, without presenting a proposed subgoal as an executed action."""
+    if not state.recovery_log and not state.recoveries:
+        return ""
+    # Redacted again on the way out: a secret resolved after a record was written is still blanked.
+    return redactor.redact("\n".join((f"recovery {state.recoveries} of {limit} in this stall", *state.recovery_log)))
 
 
 def _controls_text(observation: Observation) -> str:

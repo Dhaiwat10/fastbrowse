@@ -7,10 +7,17 @@ pages, server-rendered forms) on sites the agent was never tuned against. Agent 
 measure of whether a round improved the agent or only its dev score. Each pair of tasks across the split
 exercises the same skill.
 
-Truth is fixed by a practice site, or fetched from a live API at run time, as in `live_tasks`.
+`STRETCH_DEV` and `STRETCH_HELDOUT` are a harder split, kept because the two above now pass almost every run.
+Each stretch task failed at least once in three runs of the unmodified agent, for a reason other than
+infrastructure, when it was chosen; a candidate that passed every run was dropped. They cover a multi-step form
+with a correction, a date relative to today, a list aggregated across pages, and a filter changed and then undone.
+
+Truth is fixed by a practice site, fetched from a live API at run time as in `live_tasks`, or computed from the
+date an attempt runs on.
 """
 
 import re
+from datetime import UTC, date, datetime, timedelta
 from urllib.parse import unquote, urlparse
 
 import httpx
@@ -231,5 +238,187 @@ HELDOUT: tuple[LiveTask, ...] = (
         _fixed(None),
         _has("man of success", "man of value"),
         Category.LOOKUP,
+    ),
+)
+
+
+# The stretch split. Form and date tasks are graded on the controls of the page the run ended on.
+
+
+def _prose(outcome: Outcome) -> str:
+    """The answer without its citations: a numbered link or a URL carries digits that are not the answer's."""
+    text = re.sub(r"\[(\d+)\]\(<?[^)>]*>?\)|\[\d+\]|https?://\S+", " ", outcome.answer or "")
+    return _flat(re.sub(r"\[([^\]]*)\]\(<?[^)>]*>?\)", r"\1", text))
+
+
+def _number(value: str) -> str:
+    """The value as a whole number, with only zero cents allowed: 399 is not 1399 or 399.99."""
+    return rf"(?<![\d.]){re.escape(value)}(?:\.0+)?(?!\.?\d)"
+
+
+def _pairs(*pairs: tuple[str, str]) -> Check:
+    """Each value follows a mention of its own name before any other name: "Pixel 2 XL $1399" is not Pixel 2's 399."""
+
+    def check(outcome: Outcome, _: object) -> str | None:
+        answer = _prose(outcome)
+        mentions = sorted(
+            (m.start(), m.end(), name) for name, _ in pairs for m in re.finditer(re.escape(_flat(name)), answer)
+        )
+        spans = [
+            (name, answer[end : next((s for s, _, _ in mentions if s >= end), len(answer))])
+            for _, end, name in mentions
+        ]
+        wrong = [
+            f"{name} {value}"
+            for name, value in pairs
+            if not any(said == name and re.search(_number(value), span) for said, span in spans)
+        ]
+        return f"answer lacks {wrong}: {outcome.answer!r}" if wrong else None
+
+    return check
+
+
+def _says(outcome: Outcome, day: date, *, weekday: bool = False) -> str | None:
+    """The answer states this date with its year, day before or after the month, and its weekday if asked for."""
+    answer = _prose(outcome)
+    month, number = _flat(f"{day:%B}"), rf"(?<!\d){day.day}(?:st|nd|rd|th)?(?!\d)"
+    stated = (
+        re.search(rf"{month}\W+{number}|{number}\W+(?:of\W+)?{month}", answer)
+        and re.search(rf"(?<!\d){day.year}(?!\d)", answer)
+        and (not weekday or _flat(f"{day:%A}") in answer)
+    )
+    return None if stated else f"answer does not state {day:%A %d %B %Y}: {outcome.answer!r}"
+
+
+def _controls(outcome: Outcome) -> dict[str, str | None]:
+    return {label.strip(): value for label, value in outcome.controls or ()}
+
+
+def _today() -> date:
+    """The agent is given the UTC date, so relative dates are counted from it, not from this machine's zone."""
+    return datetime.now(UTC).date()
+
+
+async def _next_monday_range(_: httpx.AsyncClient) -> object:
+    """Strictly after today: a run that lands on a Monday books the one seven days out, not the same day."""
+    start = _today() + timedelta(days=(0 - _today().weekday()) % 7 or 7)
+    return {"start": start.isoformat(), "end": (start + timedelta(days=9)).isoformat(), "nights": "9"}
+
+
+def _date_range_check(outcome: Outcome, truth: object) -> str | None:
+    """The page reports "You selected a range of N days."; the dates come from the final controls where the arm
+    has them, and from the answer where it does not."""
+    assert isinstance(truth, dict)
+    wrong = [] if re.search(rf"{_number(truth['nights'])} days", _prose(outcome)) else [f"no {truth['nights']} days"]
+    values = _controls(outcome)
+    for label, key in (("Start Date", "start"), ("End Date", "end")):
+        if not values:
+            wrong += [e for e in [_says(outcome, date.fromisoformat(truth[key]))] if e]
+        elif values.get(label) != truth[key]:
+            wrong.append(f"{label}={values.get(label)!r}, expected {truth[key]!r}")
+    return "; ".join(wrong) or None
+
+
+async def _next_month_first_friday(_: httpx.AsyncClient) -> object:
+    first_of_next = (_today().replace(day=1) + timedelta(days=32)).replace(day=1)
+    friday = first_of_next + timedelta(days=(4 - first_of_next.weekday()) % 7)
+    return {"date": friday.isoformat(), "mdy": f"{friday:%m/%d/%Y}"}
+
+
+def _first_friday_check(outcome: Outcome, truth: object) -> str | None:
+    assert isinstance(truth, dict)
+    picked = _controls(outcome).get("Click to pick a date:")
+    if picked is not None and picked != truth["mdy"]:
+        return f"date input = {picked!r}, expected {truth['mdy']!r}"
+    return _says(outcome, date.fromisoformat(truth["date"]), weekday=True)
+
+
+STRETCH_DEV: tuple[LiveTask, ...] = (
+    LiveTask(
+        "stretch-wizard-review",
+        "https://qapracticehub.com/#practice-lab",
+        "In the Automation Practice Lab section, fill out the Multi-Step Wizard: Full Name 'Ada Lovelace', "
+        "Email 'ada.lovelace@example.com', City 'London', ZIP Code 'SW1A 1AA'. Review your details, submit, "
+        "and tell me what the page says.",
+        _fixed(None),
+        _has("Wizard submitted successfully"),
+        Category.CHECKOUT,
+        authorize=True,
+    ),
+    LiveTask(
+        "stretch-date-range-monday",
+        "https://testautomationpractice.blogspot.com/",
+        "Find Date Picker 3, the date range picker. Book a stay starting the next Monday that is strictly "
+        "after today, for nine nights, then submit. Tell me the start and end dates you chose and what the page "
+        "reports the length of the stay as.",
+        _next_monday_range,
+        _date_range_check,
+        Category.WIDGET,
+    ),
+    LiveTask(
+        "stretch-books-nonfiction-five-star",
+        "https://books.toscrape.com/catalogue/category/books/nonfiction_13/index.html",
+        "Across every page of the Nonfiction category, which three five-star-rated books are the cheapest, "
+        "and what does each cost?",
+        _fixed(None),
+        _pairs(
+            ("Agnostic: A Spirited Manifesto", "12.51"),
+            ("Disrupted: My Misadventure in the Start-Up Bubble", "15.28"),
+            ("Mother, Can You Not?", "16.89"),
+        ),
+        Category.LOOKUP,
+    ),
+    LiveTask(
+        "stretch-bstack-apple-google",
+        "https://bstackdemo.com/",
+        "Filter the product list to Apple and Google together. Then remove the Apple filter, so only Google "
+        "remains. Sort by price lowest to highest, and tell me the two cheapest Google phones and their "
+        "prices.",
+        _fixed(None),
+        _pairs(("Pixel 2", "399"), ("Pixel 3", "599")),
+        Category.WIDGET,
+    ),
+)
+
+STRETCH_HELDOUT: tuple[LiveTask, ...] = (
+    LiveTask(
+        "stretch-wizard-correction",
+        "https://lab.hakdogan.com/practice/form-multi-step/",
+        "In the Live Interactive Form widget, fill First Name 'Priya Sharma', Email "
+        "'priya.sharma@example.com', Address '221B Baker Street', City 'Manchester', Language 'Turkish', and "
+        "check the QA newsletter box. Reach the Review step, then go back and correct the first name to "
+        "'Priya Sharman' before continuing through Submit. Tell me what the confirmation says.",
+        _fixed(None),
+        _has("Priya Sharman", "submitted successfully"),
+        Category.CHECKOUT,
+        authorize=True,
+    ),
+    LiveTask(
+        "stretch-calendar-first-friday",
+        "https://practice.softwaretestingmentor.com/calendar/",
+        "Using the jQuery UI Datepicker (the calendar popup, not the native date input), navigate to next "
+        "month and select its first Friday. Tell me the date, day, and month it shows.",
+        _next_month_first_friday,
+        _first_friday_check,
+        Category.WIDGET,
+    ),
+    LiveTask(
+        "stretch-quotes-top-authors",
+        "https://quotes.toscrape.com/",
+        "Across every page of this site, which three authors have the most quotes attributed to them, and "
+        "how many quotes does each have?",
+        _fixed(None),
+        _pairs(("Albert Einstein", "10"), ("J.K. Rowling", "9"), ("Marilyn Monroe", "7")),
+        Category.LOOKUP,
+    ),
+    LiveTask(
+        "stretch-bstack-apple-samsung",
+        "https://bstackdemo.com/",
+        "Filter the product list to Apple and Samsung together, then remove the Apple filter so only Samsung "
+        "remains. Sort by price highest to lowest, and tell me the three most expensive phones and their "
+        "prices.",
+        _fixed(None),
+        _pairs(("Galaxy S20 Ultra", "1399"), ("Galaxy Note 20 Ultra", "1299"), ("Galaxy S20+", "1199")),
+        Category.WIDGET,
     ),
 )
