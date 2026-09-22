@@ -148,6 +148,23 @@ async def test_oversized_request_drops_offscreen_then_gives_up() -> None:
         await decide(ScriptedJev({}), observation(controls), context(), tiny)
 
 
+async def test_a_page_too_dense_on_screen_offers_what_fits_and_scrolls_for_the_rest() -> None:
+    # Room for about ten buttons and no relevance pass to cap them: ending the run here would give up on a page a
+    # scroll could work through.
+    config = Config(
+        tokens=TokenBudget(state_plus_largest_question=2_000, state_plus_all_questions=2_000),
+        observation=ObservationLimits(max_offered_controls=20),
+    )
+    applied = button(39).model_copy(update={"checked": True})
+    controls = (*(button(i) for i in range(39)), applied)
+    jev = RelevanceJev({"operation": "scroll"}, set(), fail=True)
+    decision = await decide(jev, observation(controls), context(), config)
+    assert decision.reduction is Reduction.CAPPED and 0 < decision.offered_controls < len(controls)
+    offered = set(jev.requests[-1]["click_target"].criteria)  # ty: ignore[unresolved-attribute]
+    assert "b39" in offered and "b0" in offered
+    assert "scroll" in jev.requests[-1]["operation"].criteria  # ty: ignore[unresolved-attribute]
+
+
 @pytest.mark.parametrize("retry", [False, True])
 async def test_each_request_including_groups_and_retries_needs_budget(retry: bool) -> None:
     from fastbrowse.models import Limits

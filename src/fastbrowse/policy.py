@@ -91,6 +91,7 @@ class Reduction(StrEnum):
     NONE = "none"
     RELEVANCE = "relevance"
     ONSCREEN_ONLY = "onscreen_only"
+    CAPPED = "capped"
 
 
 class ReadAssessment(StrEnum):
@@ -100,7 +101,7 @@ class ReadAssessment(StrEnum):
 
 
 class ObservationTooLarge(RuntimeError):
-    """The page cannot be represented within Jev's limits even on-screen only."""
+    """The page's state cannot be represented within Jev's limits even with no controls offered."""
 
 
 class HistoryEntry(Frozen):
@@ -202,10 +203,38 @@ async def decide(
                 controls, cost, tokens = shortlist
                 reduction = Reduction.RELEVANCE
                 continue
-        if reduction is Reduction.ONSCREEN_ONLY or not any(c.offscreen for c in controls):
-            raise ObservationTooLarge(f"{len(controls)} controls on {observation.url} exceed Jev's input limits")
-        controls = tuple(c for c in controls if not c.offscreen)
-        reduction = Reduction.ONSCREEN_ONLY
+        if reduction in (Reduction.NONE, Reduction.RELEVANCE) and any(c.offscreen for c in controls):
+            controls = tuple(c for c in controls if not c.offscreen)
+            reduction = Reduction.ONSCREEN_ONLY
+            continue
+        # A page too dense even on screen is still worked rather than ending the run: the controls that fit are
+        # offered, the rest counted as omitted, and a scroll brings them into the next step's view.
+        capped = _cap(observation, controls, context, config, below=len(controls))
+        if capped is None:
+            raise ObservationTooLarge(f"the state on {observation.url} exceeds Jev's input limits with no controls")
+        controls, reduction = capped, Reduction.CAPPED
+
+
+def _cap(
+    observation: Observation, controls: Sequence[Control], context: StepContext, config: Config, *, below: int
+) -> tuple[Control, ...] | None:
+    """The largest prefix, protected controls first, shorter than `below` whose request fits; None if none does."""
+    order = sorted(range(len(controls)), key=lambda i: not _protected(controls[i]))
+
+    def kept(prefix: int) -> tuple[Control, ...]:
+        indices = set(order[:prefix])
+        return tuple(control for i, control in enumerate(controls) if i in indices)
+
+    if below <= 0 or not fits(build_request(observation, kept(0), context, config), config):
+        return None
+    low, high = 0, below - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(build_request(observation, kept(middle), context, config), config):
+            low = middle
+        else:
+            high = middle - 1
+    return kept(low)
 
 
 def _protected(control: Control) -> bool:

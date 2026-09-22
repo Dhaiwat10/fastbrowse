@@ -28,6 +28,9 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   blocking fields and controls holding a value or selection are always kept, and a control Jev did not answer
   for is kept rather than dropped. A dense page costs one more Jev round trip; a page under the limit costs
   nothing more.
+  A page whose on-screen controls alone outgrow Jev's input no longer ends the run at `observation_limit`: the
+  controls that fit are offered, pagers and set fields first, and the rest are reported as omitted so a scroll
+  can reach them. The run stops there only when the page's state does not fit with no controls at all.
 - **Jev reads short facts on long pages too.** Jev's quick read of a fact, such as a version or a date, gave
   up on any page with more than 253 quotable spans or more text than its input allows, which was six of ten real
   pages measured, from Wikipedia articles to GitHub releases, and the LLM reader then read the page a chunk at a
