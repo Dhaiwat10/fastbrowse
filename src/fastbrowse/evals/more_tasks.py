@@ -17,7 +17,7 @@ date an attempt runs on.
 """
 
 import re
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from urllib.parse import unquote, urlparse
 
 import httpx
@@ -245,11 +245,22 @@ HELDOUT: tuple[LiveTask, ...] = (
 # The stretch split. Form and date tasks are graded on the controls of the page the run ended on.
 
 
+def _prose(outcome: Outcome) -> str:
+    """The answer without its citations: a numbered link or a URL carries digits that are not the answer's."""
+    text = re.sub(r"\[(\d+)\]\(<?[^)>]*>?\)|\[\d+\]|https?://\S+", " ", outcome.answer or "")
+    return _flat(re.sub(r"\[([^\]]*)\]\(<?[^)>]*>?\)", r"\1", text))
+
+
+def _number(value: str) -> str:
+    """The value as a whole number, with only zero cents allowed: 399 is not 1399 or 399.99."""
+    return rf"(?<![\d.]){re.escape(value)}(?:\.0+)?(?!\.?\d)"
+
+
 def _pairs(*pairs: tuple[str, str]) -> Check:
     """Each value follows a mention of its own name before any other name: "Pixel 2 XL $1399" is not Pixel 2's 399."""
 
     def check(outcome: Outcome, _: object) -> str | None:
-        answer = _flat(outcome.answer or "")
+        answer = _prose(outcome)
         mentions = sorted(
             (m.start(), m.end(), name) for name, _ in pairs for m in re.finditer(re.escape(_flat(name)), answer)
         )
@@ -260,58 +271,66 @@ def _pairs(*pairs: tuple[str, str]) -> Check:
         wrong = [
             f"{name} {value}"
             for name, value in pairs
-            if not any(said == name and re.search(rf"(?<![\d.]){re.escape(value)}(?!\d)", span) for said, span in spans)
+            if not any(said == name and re.search(_number(value), span) for said, span in spans)
         ]
         return f"answer lacks {wrong}: {outcome.answer!r}" if wrong else None
 
     return check
 
 
+def _says(outcome: Outcome, day: date, *, weekday: bool = False) -> str | None:
+    """The answer states this date with its year, day before or after the month, and its weekday if asked for."""
+    answer = _prose(outcome)
+    month, number = _flat(f"{day:%B}"), rf"(?<!\d){day.day}(?:st|nd|rd|th)?(?!\d)"
+    stated = (
+        re.search(rf"{month}\W+{number}|{number}\W+(?:of\W+)?{month}", answer)
+        and re.search(rf"(?<!\d){day.year}(?!\d)", answer)
+        and (not weekday or _flat(f"{day:%A}") in answer)
+    )
+    return None if stated else f"answer does not state {day:%A %d %B %Y}: {outcome.answer!r}"
+
+
 def _controls(outcome: Outcome) -> dict[str, str | None]:
     return {label.strip(): value for label, value in outcome.controls or ()}
 
 
+def _today() -> date:
+    """The agent is given the UTC date, so relative dates are counted from it, not from this machine's zone."""
+    return datetime.now(UTC).date()
+
+
 async def _next_monday_range(_: httpx.AsyncClient) -> object:
     """Strictly after today: a run that lands on a Monday books the one seven days out, not the same day."""
-    today = date.today()
-    days_ahead = (0 - today.weekday()) % 7 or 7
-    start = today + timedelta(days=days_ahead)
-    end = start + timedelta(days=9)
-    return {"start": start.isoformat(), "end": end.isoformat(), "nights": "9"}
+    start = _today() + timedelta(days=(0 - _today().weekday()) % 7 or 7)
+    return {"start": start.isoformat(), "end": (start + timedelta(days=9)).isoformat(), "nights": "9"}
 
 
 def _date_range_check(outcome: Outcome, truth: object) -> str | None:
+    """The page reports "You selected a range of N days."; the dates come from the final controls where the arm
+    has them, and from the answer where it does not."""
     assert isinstance(truth, dict)
-    reported = _has(f"{truth['nights']} days")(outcome, truth)
+    wrong = [] if re.search(rf"{_number(truth['nights'])} days", _prose(outcome)) else [f"no {truth['nights']} days"]
     values = _controls(outcome)
-    if not values:
-        return reported
-    wrong = [
-        f"{label}={values.get(label)!r}, expected {truth[key]!r}"
-        for label, key in (("Start Date", "start"), ("End Date", "end"))
-        if values.get(label) != truth[key]
-    ]
-    return "; ".join([*wrong, *([reported] if reported else [])]) or None
+    for label, key in (("Start Date", "start"), ("End Date", "end")):
+        if not values:
+            wrong += [e for e in [_says(outcome, date.fromisoformat(truth[key]))] if e]
+        elif values.get(label) != truth[key]:
+            wrong.append(f"{label}={values.get(label)!r}, expected {truth[key]!r}")
+    return "; ".join(wrong) or None
 
 
 async def _next_month_first_friday(_: httpx.AsyncClient) -> object:
-    today = date.today()
-    first_of_next = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+    first_of_next = (_today().replace(day=1) + timedelta(days=32)).replace(day=1)
     friday = first_of_next + timedelta(days=(4 - first_of_next.weekday()) % 7)
-    return {
-        "mdy": f"{friday.month:02d}/{friday.day:02d}/{friday.year}",
-        "day_name": "Friday",
-        "month_name": f"{friday:%B}",
-        "day": str(friday.day),
-    }
+    return {"date": friday.isoformat(), "mdy": f"{friday:%m/%d/%Y}"}
 
 
 def _first_friday_check(outcome: Outcome, truth: object) -> str | None:
     assert isinstance(truth, dict)
     picked = _controls(outcome).get("Click to pick a date:")
-    if picked is not None:
-        return None if picked == truth["mdy"] else f"date input = {picked!r}, expected {truth['mdy']!r}"
-    return _has(truth["day_name"])(outcome, truth) or _pairs((truth["month_name"], truth["day"]))(outcome, truth)
+    if picked is not None and picked != truth["mdy"]:
+        return f"date input = {picked!r}, expected {truth['mdy']!r}"
+    return _says(outcome, date.fromisoformat(truth["date"]), weekday=True)
 
 
 STRETCH_DEV: tuple[LiveTask, ...] = (
@@ -330,8 +349,8 @@ STRETCH_DEV: tuple[LiveTask, ...] = (
         "stretch-date-range-monday",
         "https://testautomationpractice.blogspot.com/",
         "Find Date Picker 3, the date range picker. Book a stay starting the next Monday that is strictly "
-        "after today, for nine nights, then submit and tell me what the page reports the length of the stay "
-        "as.",
+        "after today, for nine nights, then submit. Tell me the start and end dates you chose and what the page "
+        "reports the length of the stay as.",
         _next_monday_range,
         _date_range_check,
         Category.WIDGET,
