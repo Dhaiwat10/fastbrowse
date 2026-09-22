@@ -349,7 +349,6 @@ class Agent:
                 if start is None and opening is not None:
                     # The caller gave a goal and no page, so this address was worked out from the task too.
                     invented.add(opening)
-                if start is None and opening is not None:
                     await self._front_page_if_blank(opening)
                 state = _RunState(
                     task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planning
@@ -1454,6 +1453,9 @@ class Agent:
             rejected_claims=outcome.rejected_claims,
             evidenced=[r.id for r in wanted if state.notes.evidenced(r.id)],
             continues=continues,
+            # Records the reader said this page compared that no run of blocks resolved. A comparison carried
+            # forward with these missing is incomplete in the notes, which the trace should say out loud.
+            uncovered=outcome.uncovered,
         )
         spent(progressed)
         if observation is not None:
