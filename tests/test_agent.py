@@ -153,6 +153,7 @@ async def test_recovery_giving_up_on_a_missing_value_ends_the_run_needing_input(
         "diagnosis": "Only the user knows the account number",
         "next_subgoal": "Ask",
         "give_up": True,
+        "needs_input": True,
     }
     agent = Agent(
         page,

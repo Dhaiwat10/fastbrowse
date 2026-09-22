@@ -152,6 +152,11 @@ class _Recovery(Frozen):
         default=None, description="What the subgoal does to that control, or to the page (read, scroll, back, escape)."
     )
     give_up: bool = Field(description="True only when the task cannot progress without the user.")
+    needs_input: bool = Field(
+        default=False,
+        description="With give_up: true when what the user must supply is a value the task never gave, such as a "
+        "field it names no value for; false for any other dead end.",
+    )
 
 
 class _Stop(Exception):
@@ -1408,7 +1413,10 @@ class Agent:
         )
         state.ledger.record(generation.cost)
         if generation.data.give_up:
-            raise _Stop(gives_up_as, generation.data.diagnosis)
+            # Asked of the model rather than carried from the step that raised it: a missing value can surface
+            # recoveries later, after an attempt to go on without it has failed for its absence.
+            status = Status.NEEDS_INPUT if generation.data.needs_input else Status.STUCK
+            raise _Stop(status, generation.data.diagnosis)
         state.hint = generation.data.next_subgoal
         trace(
             "recover",
