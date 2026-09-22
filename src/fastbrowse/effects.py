@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
+from fastbrowse.models import Frozen
 from fastbrowse.page import Control, Observation
 
 _SHOWN = 4
@@ -18,6 +19,88 @@ class Effect:
     summary: str
     set_something: bool
     """The address, or a surviving control's label, value, checked or selected state, changed."""
+
+
+type ControlKey = tuple[str | None, str | None, str, str, str | None]
+type ControlValue = tuple[str | None, bool | None, bool | None, bool | None]
+
+
+class Move(Frozen):
+    """A document's controls and settings before and after an action, without incidental page text."""
+
+    document: str
+    url_before: str
+    url_after: str
+    shown: frozenset[ControlKey]
+    hidden: frozenset[ControlKey]
+    values_before: dict[ControlKey, ControlValue]
+    values_after: dict[ControlKey, ControlValue]
+
+
+def _control_states(observation: Observation) -> tuple[frozenset[ControlKey], dict[ControlKey, ControlValue]]:
+    controls: dict[ControlKey, list[Control]] = {}
+    for c in observation.controls:
+        key = c.frame_id, c.frame_origin, c.role, c.label, c.context
+        controls.setdefault(key, []).append(c)
+    # A redraw replaces node ids. Exact names can survive it, but unnamed twins cannot stand in for each other.
+    unique = {key: items[0] for key, items in controls.items() if len(items) == 1}
+    # Unselected days can redraw their prices; only a selection commits a value to compare.
+    values = {
+        key: (c.value, c.checked, c.selected, c.expanded)
+        for key, c in unique.items()
+        if c.value is not None or c.checked is not None or c.selected or c.expanded is not None
+    }
+    return frozenset(unique), values
+
+
+def move(before: Observation, after: Observation) -> Move | None:
+    if not before.document_key or before.document_key != after.document_key:
+        return None
+    old, was = _control_states(before)
+    new, now = _control_states(after)
+    return Move(
+        document=before.document_key,
+        url_before=before.url,
+        url_after=after.url,
+        shown=new - old,
+        hidden=old - new,
+        values_before=was,
+        values_after=now,
+    )
+
+
+def reversal(later: Move, earlier: Move) -> str | None:
+    """Name a restored setting or panel, only when the document and all committed values also return."""
+    if (
+        later.document != earlier.document
+        or later.url_after != earlier.url_before
+        or later.values_after != earlier.values_before
+    ):
+        return None
+    for key in sorted(earlier.values_before.keys() | earlier.values_after.keys(), key=repr):
+        value = later.values_after.get(key)
+        if key not in later.hidden and earlier.values_after.get(key) != value and later.values_before.get(key) != value:
+            held = ", ".join(
+                f"{name}={_short(v)}"
+                for name, v in zip(
+                    ("value", "checked", "selected", "expanded"), value or (None, None, False, None), strict=True
+                )
+                if v is not None
+            )
+            return f"{_control_name(key)} keeps returning to {held}"
+    # A reopened panel redraws prices and node ids. Its exact named controls still disappear and return;
+    # neither shared label prefixes nor unrelated controls that stayed visible identify that panel.
+    shown, hidden = later.shown & earlier.hidden, later.hidden & earlier.shown
+    if (shown or hidden) and bool(later.shown) == bool(earlier.hidden) and bool(later.hidden) == bool(earlier.shown):
+        if (later.shown and not shown) or (later.hidden and not hidden):
+            return None
+        key = min(shown or hidden, key=repr)
+        return f"{_control_name(key)} keeps returning to {'visible' if shown else 'hidden'}"
+    return None
+
+
+def _control_name(key: ControlKey) -> str:
+    return f"{key[3]} ({key[4]})" if key[4] else key[3]
 
 
 def state_key(observation: Observation) -> str:

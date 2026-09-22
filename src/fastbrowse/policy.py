@@ -143,6 +143,8 @@ class StepContext(Frozen):
     """Names of stored secrets the current origin may receive; a fill can type one without Jev seeing it."""
     unread_requirements: tuple[str, ...] | None = None
     """None while planning; an empty tuple means no information remains to collect."""
+    recovery_memory: str = ""
+    """Recent diagnoses, subgoals and observed outcomes, separate from actions actually taken."""
 
 
 class Decision(Frozen):
@@ -527,6 +529,8 @@ def _state(observation: Observation, controls: Sequence[Control], context: StepC
         "recent_actions": [entry.model_dump(mode="json", exclude_none=True) for entry in context.history],
         "elements": [_element(c, compact=compact) for c in controls],
     }
+    if context.recovery_memory:
+        state["recovery_memory"] = context.recovery_memory
     if context.secrets:
         state["stored_secrets"] = list(context.secrets)
     omitted = observation.omitted_controls + len(observation.controls) - len(controls)

@@ -1,6 +1,8 @@
 """What an action did, as the policy and recovery are told it."""
 
-from fastbrowse.effects import effect, state_key
+import pytest
+
+from fastbrowse.effects import effect, move, reversal, state_key
 from fastbrowse.models import Operation
 from fastbrowse.page import Control
 from tests.test_policy import observation
@@ -45,6 +47,45 @@ def test_a_page_state_ignores_text_but_not_values() -> None:
     page = observation((TRIGGER,))
     assert state_key(page) == state_key(page.model_copy(update={"viewport_text": "12:01"}))
     assert state_key(page) != state_key(observation((TRIGGER.model_copy(update={"value": "One way"}),)))
+
+
+@pytest.mark.parametrize("scope", ["document_key", "context", "frame_id", "frame_origin"])
+def test_reversals_do_not_match_a_control_from_another_document_or_context(scope: str) -> None:
+    toggle = control("filter", "Direct only", "checkbox", checked=False, context="Outbound")
+    off = observation((toggle,)).model_copy(update={"document_key": "doc"})
+    on = off.model_copy(update={"controls": (toggle.model_copy(update={"checked": True}),)})
+    earlier = move(off, on)
+    assert earlier is not None
+    changed = []
+    for obs in (on, off):
+        changed.append(
+            obs.model_copy(update={"document_key": "another"})
+            if scope == "document_key"
+            else obs.model_copy(update={"controls": (obs.controls[0].model_copy(update={scope: "another"}),)})
+        )
+    later = move(*changed)
+    assert later is not None and reversal(later, earlier) is None
+    assert move(on, off.model_copy(update={"document_key": "new"})) is None
+
+
+def test_reopening_a_panel_after_changing_a_value_is_not_a_reversal() -> None:
+    panel = observation((TRIGGER, control("done", "Done"))).model_copy(update={"document_key": "doc"})
+    form = observation((TRIGGER, control("search", "Search"))).model_copy(update={"document_key": "doc"})
+    earlier = move(panel, form)
+    later = move(
+        form,
+        panel.model_copy(update={"controls": (TRIGGER.model_copy(update={"value": "One way"}), panel.controls[1])}),
+    )
+    assert earlier is not None and later is not None and reversal(later, earlier) is None
+
+
+def test_a_shared_label_prefix_does_not_identify_a_returned_panel() -> None:
+    prefix = "Choose an outbound journey "
+    old = observation((control("old", prefix + "date"),)).model_copy(update={"document_key": "doc"})
+    form = observation((control("search", "Search"),)).model_copy(update={"document_key": "doc"})
+    new = observation((control("new", prefix + "destination"),)).model_copy(update={"document_key": "doc"})
+    earlier, later = move(old, form), move(form, new)
+    assert earlier is not None and later is not None and reversal(later, earlier) is None
 
 
 def test_a_value_set_on_the_field_an_overlay_stood_in_for_counts() -> None:

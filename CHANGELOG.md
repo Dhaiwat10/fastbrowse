@@ -64,6 +64,8 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   answer's claim that version 0.1.0 shipped that day still has the version in its citation.
   A batched Jev pass cut short by the time limit now keeps the cost of the requests that had already answered,
   and one the call limit cannot cover counts none of its calls.
+- Returning a filter or panel to an earlier state now triggers recovery, so toggles and redrawn panels cannot keep renewing the stall budget.
+- Recovery and action choices now share recent diagnoses, subgoals and observed outcomes, so a failed approach is remembered on the next attempt.
 - **`stretch-dev` and `stretch-heldout` eval suites.** `dev` and `heldout` now pass almost every run, so these
   harder tasks (a multi-step form with a correction, a date relative to today, a list aggregated across pages, a
   filter applied and partly undone) are what show whether an agent change helps.
