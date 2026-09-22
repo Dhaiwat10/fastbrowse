@@ -655,6 +655,73 @@ async def test_text_fields_are_kept_only_when_their_block_holds_the_value_verbat
     assert value == "0.28.1" and evidence.quote == "httpx 0.28.1"
 
 
+# A page writes its own punctuation; a model quoting it does not. These are the shapes seen in the wild.
+_APOSTROPHE, _EN_DASH, _ELLIPSIS_CHAR = chr(0x2019), chr(0x2013), chr(0x2026)
+_HEADLINE = "AX " + _EN_DASH + " Google" + _APOSTROPHE + "s Open Agentic Orchestrator"
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        pytest.param(_HEADLINE, id="verbatim"),
+        pytest.param(_HEADLINE.replace(_APOSTROPHE, "'"), id="straight-apostrophe"),
+        pytest.param(_HEADLINE.replace(_EN_DASH, "-"), id="hyphen-for-en-dash"),
+        pytest.param(_HEADLINE.replace(_APOSTROPHE, "'").replace(_EN_DASH, "-"), id="both-normalized"),
+    ],
+)
+async def test_a_text_field_survives_the_punctuation_shape_a_model_rewrites(typed: str) -> None:
+    page = capture((BlockKind.HEADING, _HEADLINE))
+    llm = ScriptedLLM([{"fields": [{"field": "label", "value": typed, "source_id": "s0"}]}])
+    found, _ = await propose_text_fields(llm, "Get the title", page, {"label": Fields.model_fields["label"]})
+    assert found.keys() == {"label"}
+    # The page's own bytes are the evidence however the model typed it: a model's shape never becomes evidence.
+    assert found["label"][1].quote == _HEADLINE
+
+
+async def test_a_text_field_in_a_table_cell_survives_the_backslash_the_capture_adds_to_a_pipe() -> None:
+    page = capture((BlockKind.TABLE, r"| Mystery \| 12.99 |"))
+    llm = ScriptedLLM([{"fields": [{"field": "label", "value": "Mystery | 12.99", "source_id": "s0"}]}])
+    found, _ = await propose_text_fields(llm, "Get the row", page, {"label": Fields.model_fields["label"]})
+    assert found.keys() == {"label"}
+
+
+@pytest.mark.parametrize(
+    ("written", "typed"),
+    [
+        pytest.param("Read more" + _ELLIPSIS_CHAR, "Read more...", id="page-ellipsis-model-dots"),
+        pytest.param("Read more...", "Read more" + _ELLIPSIS_CHAR, id="page-dots-model-ellipsis"),
+        pytest.param(chr(0x201C) + "quoted" + chr(0x201D), '"quoted"', id="curly-double-quotes"),
+    ],
+)
+async def test_a_text_field_matches_across_a_punctuation_family_in_either_direction(written: str, typed: str) -> None:
+    page = capture((BlockKind.PARAGRAPH, written))
+    llm = ScriptedLLM([{"fields": [{"field": "label", "value": typed, "source_id": "s0"}]}])
+    found, _ = await propose_text_fields(llm, "Get the text", page, {"label": Fields.model_fields["label"]})
+    assert found.keys() == {"label"}
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        pytest.param("Bing " + _EN_DASH + " Google" + _APOSTROPHE + "s Open Agentic Orchestrator", id="other-words"),
+        pytest.param("AX, Google" + _APOSTROPHE + "s Open Agentic Orchestrator", id="comma-where-page-has-a-dash"),
+        pytest.param("AX " + _EN_DASH + " Googles Open Agentic Orchestrator", id="letter-where-page-has-an-apostrophe"),
+    ],
+)
+async def test_tolerating_punctuation_does_not_widen_a_text_field_past_its_shape(typed: str) -> None:
+    page = capture((BlockKind.HEADING, _HEADLINE))
+    llm = ScriptedLLM([{"fields": [{"field": "label", "value": typed, "source_id": "s0"}]}])
+    found, _ = await propose_text_fields(llm, "Get the title", page, {"label": Fields.model_fields["label"]})
+    assert found == {}
+
+
+async def test_a_text_field_is_not_taken_from_a_block_other_than_the_one_it_cites() -> None:
+    page = capture((BlockKind.HEADING, _HEADLINE), (BlockKind.PARAGRAPH, "Unrelated"))
+    llm = ScriptedLLM([{"fields": [{"field": "label", "value": _HEADLINE, "source_id": "s1"}]}])
+    found, _ = await propose_text_fields(llm, "Get the title", page, {"label": Fields.model_fields["label"]})
+    assert found == {}
+
+
 async def test_a_text_field_off_the_final_page_is_taken_from_a_note_that_quotes_it() -> None:
     earlier = capture((BlockKind.PARAGRAPH, "requests 2.33.0 released May 14, 2026"))
     quote = block_evidence(earlier, "s0")

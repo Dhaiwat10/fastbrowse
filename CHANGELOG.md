@@ -11,6 +11,13 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A value is still the page's when the model retypes its punctuation.** A field the page writes with a curly
+  apostrophe, an en dash or an ellipsis was dropped when the model quoted it with a straight apostrophe, a
+  hyphen or three dots, so the fact never landed, the requirement stayed open, and the run read the same page
+  until it stalled. A value now matches across a punctuation family, and across the backslash a capture puts
+  before a table cell's own pipe. The quote kept as evidence is still the page's own bytes, and the words,
+  their order and their spacing all still have to be there.
+
 ## [0.5.3] - 2026-09-22
 
 - **Eval times leave out provider outages.** A run's `seconds` in the live and local evals no longer counts time

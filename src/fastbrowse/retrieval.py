@@ -203,6 +203,49 @@ def _evidence(capture: Capture, block: Block, start: int, end: int) -> Evidence:
     )
 
 
+# A model asked to quote a page rewrites its punctuation: a curly apostrophe becomes a straight one, an en dash
+# a hyphen, an ellipsis three dots. The words are still the page's own, so a byte-exact test drops a correct
+# value, the fact never lands, and the requirement it would have evidenced stays open until the run stalls.
+# Built from code points because scripts/no_slop.py fails the build on a line holding one of these characters.
+_PUNCTUATION_FAMILIES: tuple[str, ...] = (
+    "'" + chr(0x2018) + chr(0x2019) + chr(0x02BC) + chr(0x00B4) + "`",
+    '"' + chr(0x201C) + chr(0x201D) + chr(0x201E) + chr(0x201F) + chr(0x00AB) + chr(0x00BB),
+    "-" + chr(0x2010) + chr(0x2011) + chr(0x2012) + chr(0x2013) + chr(0x2014) + chr(0x2015) + chr(0x2212),
+)
+_ELLIPSIS = chr(0x2026)
+
+
+def _family(character: str) -> str:
+    """A character class holding every shape of `character` a model might write, or the character alone."""
+    for members in _PUNCTUATION_FAMILIES:
+        if character in members:
+            return "[" + "".join(re.escape(member) for member in members) + "]"
+    return re.escape(character)
+
+
+def _loose(value: str) -> re.Pattern[str]:
+    """`value` as a pattern tolerating the punctuation shape a model rewrites, and the backslash a capture puts
+    before a table cell's own pipe when it renders the row as markdown. It widens nothing but punctuation
+    shape: the words, their order and their spacing all still have to be there, and the caller still decides
+    which block the match has to lie inside."""
+    parts: list[str] = []
+    for token in re.findall(r"\s+|\.\.\.|.", value, flags=re.DOTALL):
+        if token.isspace():
+            parts.append(r"\s+")
+        elif token == "..." or token == _ELLIPSIS:
+            parts.append("(?:" + re.escape("...") + "|" + re.escape(_ELLIPSIS) + ")")
+        elif token.isalnum():
+            parts.append(re.escape(token))
+        else:
+            parts.append(r"(?:\\)?" + _family(token))
+    return re.compile("".join(parts))
+
+
+def _holds(text: str, value: str) -> bool:
+    """Whether `text` writes `value`, allowing for the punctuation shape and the markdown escaping."""
+    return _loose(value).search(" ".join(text.split())) is not None
+
+
 class _Cite(Frozen):
     first: str
     """The first source block the claim reads, by label without brackets (main/:12 for a line shown as
@@ -673,7 +716,7 @@ async def propose_text_fields(
             if proposal.field not in missing or not value:
                 continue
             evidence = _cited(capture, part, _Cite(first=proposal.source_id, last=proposal.source_id))
-            if evidence is not None and value in " ".join(evidence.quote.split()):
+            if evidence is not None and _holds(evidence.quote, value):
                 found[proposal.field] = (value, evidence)
     return found, tuple(costs)
 
@@ -738,7 +781,7 @@ async def propose_text_fields_from_notes(
             and proposal.field not in found
             and value
             and evidence is not None
-            and (value in " ".join(evidence.quote.split()) or _names(task, value))
+            and (_holds(evidence.quote, value) or _names(task, value))
         ):
             found[proposal.field] = (value, evidence)
     return found
@@ -754,7 +797,7 @@ def _compared(notes: Notes, key: str, name: str) -> Evidence | None:
 
 def _names(task: str, value: str) -> bool:
     """Whether the task gives `value` as a whole word or phrase, not just as part of a longer word."""
-    return re.search(rf"(?<!\w){re.escape(value)}(?!\w)", " ".join(task.split())) is not None
+    return re.search(rf"(?<!\w){_loose(value).pattern}(?!\w)", " ".join(task.split())) is not None
 
 
 def copy_field(answer: ChoiceAnswer, candidates: Sequence[Candidate]) -> tuple[ScalarValue, Evidence] | None:
