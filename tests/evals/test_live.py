@@ -14,7 +14,7 @@ import pytest
 from fastbrowse.evals import live, live_tasks
 from fastbrowse.evals.live_tasks import TASKS, LiveTask, Outcome
 from fastbrowse.models import Unavailable
-from fastbrowse.telemetry import TRACE, trace
+from fastbrowse.telemetry import TRACE, trace, traced
 
 RUNNER: dict[str, Any] = runpy.run_path(str(live.ULTRAFAST_RUNNER))
 
@@ -37,7 +37,7 @@ async def test_concurrent_traces_keep_only_their_runs_events(
         trace("child", run=name)
 
     async def run(name: str, ready: asyncio.Event, finish: asyncio.Event) -> None:
-        with live._traced() as events:
+        with traced() as events:
             collected[name] = events
             trace("start", run=name)
             await asyncio.create_task(child(name))

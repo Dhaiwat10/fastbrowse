@@ -11,6 +11,9 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **Eval times leave out provider outages.** A run's `seconds` in the live and local evals no longer counts time
+  spent retrying a provider's 503s and dropped requests, which says nothing about the agent; the row's
+  `transient_seconds` holds what was left out.
 - **Relevance passes send small requests in parallel.** Packing a page's Noul questions into as few requests as
   Jev's 64k limit allows made each one about 26k tokens, and the gateway answered most of those with 503 until
   the retries ran out, adding up to 25s a pass or ending the run `unavailable`. Questions now go in requests of

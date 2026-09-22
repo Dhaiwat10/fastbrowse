@@ -7,6 +7,7 @@ import pytest
 from fastbrowse.clients.validation import RequestUsage, post, post_with_retry, with_discarded
 from fastbrowse.jev import JevError, JevRetriesExhausted
 from fastbrowse.models import CostBasis, CostComponent, CostLine, Unavailable
+from fastbrowse.telemetry import traced
 
 
 @pytest.mark.parametrize("winner", [1, 2])
@@ -165,3 +166,19 @@ async def test_a_request_that_can_never_be_sent_is_not_an_outage() -> None:
         with pytest.raises(JevError, match="could not be sent") as error:
             await post(http, "https://jev.test/v1", "secret-key", {})
     assert calls == 1 and not isinstance(error.value, Unavailable)
+
+
+async def test_time_lost_to_a_503_is_traced_for_evals_to_leave_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def instant(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("fastbrowse.clients.validation.asyncio.sleep", instant)
+    responses = iter([httpx.Response(503), httpx.Response(200), httpx.Response(200)])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: next(responses))) as http:
+        with traced() as events:
+            for _ in range(2):
+                await post_with_retry(
+                    http, "https://jev.test/v1", {}, {}, call="jev", attempt_seconds=30.0, hedge_seconds=5.0
+                )
+    lost = [e for e in events if isinstance(e, dict) and e["event"] == "request_transient"]
+    assert len(lost) == 1 and lost[0]["call"] == "jev" and lost[0]["ended"] >= lost[0]["began"]
