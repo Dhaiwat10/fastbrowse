@@ -11,6 +11,13 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A filter put back to a state its page already held is not progress.** On a results page, turning a filter
+  on and off redraws the rows underneath it, so every click reached a page state the run had never seen and
+  nothing counted it: runs toggled one control until the step limit. A setting returned to committed values
+  its document has already held no longer counts as progress, however the results redraw, so three of them
+  reach the no-progress check and the run recovers. A setting given a value its page has not held is
+  untouched.
+
 - **A live eval survives a grader that raises.** The agent chooses where a run ends, so a grader is handed any
   address a page can navigate to, and one that could not be parsed took down the whole suite: 59 of 63 runs
   were discarded after four had finished. A run that ended nowhere parseable now fails its own check, and a

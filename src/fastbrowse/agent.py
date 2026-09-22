@@ -25,6 +25,7 @@ from fastbrowse.effects import (
     Move,
     content_key,
     effect,
+    holding,
     move,
     reversal,
     state_key,
@@ -370,8 +371,8 @@ class Agent:
             observation = await self._observe()
             state.first_url = state.first_url or observation.url
             self._note_effect(state, observation)
-            undone, renews = self._reversal(state)
-            stalled = self._settle(state, observation, renews=renews)
+            undone, renews, put_back = self._reversal(state)
+            stalled = self._settle(state, observation, renews=renews, put_back=put_back)
             if (stalled := undone or stalled) is not None:
                 await self._recover(state, observation, stalled)
                 continue
@@ -785,7 +786,9 @@ class Agent:
             action.model_copy(update={"target_id": twins[0].id}), self._raw_observation or fresh
         )
 
-    def _settle(self, state: _RunState, observation: Observation, *, renews: bool = True) -> str | None:
+    def _settle(
+        self, state: _RunState, observation: Observation, *, renews: bool = True, put_back: bool = False
+    ) -> str | None:
         """Judge the last page-changing action by the state it led to; the reason to recover, if the run is stuck.
 
         Recoveries are spent on being stuck, not on the whole run, so a page state never seen before restores the
@@ -807,6 +810,12 @@ class Agent:
         cycle = state.history[first:] if first is not None else []
         # Going back to a list after reading one of its pages is how a comparison is done, not a wasted round.
         if first is None or key == left or any(entry.operation is Operation.READ for entry in cycle):
+            if put_back:
+                # A setting put back to a state its page already held is not progress, however the results
+                # redraw beneath it. Without this a filter toggled on and off reached a page state never seen
+                # on every click, so nothing counted it and the run toggled until the step limit.
+                state.unchanged += 1
+                return None
             state.unchanged = 0
             state.hint = None
             return None
@@ -822,7 +831,7 @@ class Agent:
         return note
 
     @staticmethod
-    def _reversal(state: _RunState) -> tuple[str | None, bool]:
+    def _reversal(state: _RunState) -> tuple[str | None, bool, bool]:
         """The reason to recover when a setting went back to an earlier value, and whether the state reached may
         renew the recovery budget. Settings put back to values their page already held are not progress, however
         the results redraw: a filter toggled on and off reached a state never seen on every click."""
@@ -836,9 +845,11 @@ class Agent:
             # Scrolling shows and hides controls without changing a setting.
             or state.history[-1].operation in _PAGE_OPERATIONS
         ):
-            return None, True
-        held = made.document, frozenset(made.values_after.items())
+            return None, True, False
+        held = holding(made)
         renews = held not in state.settings_held
+        # Nothing committed means nothing was put anywhere, so there is no earlier state to have returned to.
+        put_back = bool(made.values_after) and not renews
         state.settings_held.update((held, (made.document, frozenset(made.values_before.items()))))
         note = None
         for index, earlier in reversed(state.moves):
@@ -850,7 +861,7 @@ class Agent:
                 note = f"{returned}; intervening actions: {actions}"
                 break
         state.moves.append((at, made))
-        return note, renews
+        return note, renews, put_back
 
     @staticmethod
     def _note_effect(state: _RunState, observation: Observation) -> None:

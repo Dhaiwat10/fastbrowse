@@ -837,6 +837,71 @@ async def test_a_filter_that_keeps_redrawing_the_results_cannot_renew_the_recove
     assert len(llm.calls) == 1
 
 
+def _filtered(checked: bool, nth: int) -> Observation:
+    """A results page whose rows redraw on every toggle, so each page state is one never seen before."""
+    box = _button("Direct only").model_copy(update={"role": "checkbox", "checked": checked})
+    return observation((box, _button(f"{nth} results"))).model_copy(update={"document_key": "results"})
+
+
+async def _toggle(agent: Agent, page: Mock, state: _RunState, here: Observation, there: Observation) -> None:
+    """One click on the setting, settled the way the loop settles it."""
+    page.observe = AsyncMock(return_value=there)
+    await agent._step(state, here, _code_decision(Operation.CLICK, here.controls[0]))
+    agent._note_effect(state, there)
+    _, renews, put_back = agent._reversal(state)
+    agent._settle(state, there, renews=renews, put_back=put_back)
+
+
+async def test_a_filter_put_back_to_a_state_its_page_already_held_is_not_progress() -> None:
+    """A read between the clicks disarms both loop detectors, which is what the toggling runs actually did."""
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    page.screenshot = AsyncMock(return_value=b"")
+    page.artifacts = ()
+    llm = ScriptedLLM([{"diagnosis": "The filter is cycling", "next_subgoal": "Read results", "give_up": False}] * 8)
+    agent = Agent(page, ScriptedJev({}), llm)
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    here = _filtered(False, 0)
+    agent._settle(state, here)
+    for nth in range(1, 6):
+        there = _filtered(nth % 2 == 1, nth)
+        await _toggle(agent, page, state, here, there)
+        # A read between the toggles is what made every earlier check treat the return as a comparison.
+        state.history.append(
+            HistoryEntry(operation=Operation.READ, target=None, outcome=StepOutcome.EXECUTED, page_changed=False)
+        )
+        here = there
+    # The filter only ever holds two states, so every click from the second one puts it back to one seen
+    # before. Three of those reach the no-progress tripwire, and the run recovers instead of toggling on to
+    # its step limit. Before this, each redrawn results page was a state never seen and nothing counted.
+    assert any(purpose is LLMPurpose.RECOVER for purpose, _ in llm.calls)
+
+
+async def test_a_setting_given_a_value_its_page_has_not_held_is_still_progress() -> None:
+    page = Mock(spec=Page)
+    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
+    page.screenshot = AsyncMock(return_value=b"")
+    page.artifacts = ()
+    llm = ScriptedLLM([{"diagnosis": "d", "next_subgoal": "n", "give_up": False}] * 8)
+    agent = Agent(page, ScriptedJev({}), llm)
+    state = await run_state()
+    state.authorization = Authorization(irreversible_actions=True)
+    sort = _button("Sort").model_copy(update={"role": "option", "value": "relevance"})
+    here = observation((sort,)).model_copy(update={"document_key": "results"})
+    agent._settle(state, here)
+    for value in ("price", "rating", "distance"):
+        there = observation((sort.model_copy(update={"value": value}),)).model_copy(update={"document_key": "results"})
+        await _toggle(agent, page, state, here, there)
+        state.history.append(
+            HistoryEntry(operation=Operation.READ, target=None, outcome=StepOutcome.EXECUTED, page_changed=False)
+        )
+        here = there
+    # Each value is one the page has not held, so none of them is a put-back and the run is left alone.
+    assert state.unchanged == 0
+    assert not any(purpose is LLMPurpose.RECOVER for purpose, _ in llm.calls)
+
+
 async def test_scrolling_controls_in_and_out_of_view_is_not_a_reversal() -> None:
     top = observation((_button("1"), _button("Search"))).model_copy(update={"document_key": "doc"})
     below = observation((_button("Search"),)).model_copy(update={"document_key": "doc"})
@@ -849,7 +914,7 @@ async def test_scrolling_controls_in_and_out_of_view_is_not_a_reversal() -> None
         await agent._step(state, before, _code_decision(Operation.SCROLL, None))
         agent._note_effect(state, after)
         agent._settle(state, after)
-        assert agent._reversal(state) == (None, True)
+        assert agent._reversal(state) == (None, True, False)
 
 
 @pytest.mark.parametrize("recoveries", [2, 6])

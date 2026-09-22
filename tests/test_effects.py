@@ -2,9 +2,9 @@
 
 import pytest
 
-from fastbrowse.effects import content_key, effect, move, reversal, state_key
+from fastbrowse.effects import content_key, effect, holding, move, reversal, state_key
 from fastbrowse.models import Operation
-from fastbrowse.page import Control
+from fastbrowse.page import Control, Observation
 from tests.test_policy import observation
 
 
@@ -159,3 +159,22 @@ def test_text_that_rewrites_itself_is_the_same_page_to_a_reader_but_a_new_contro
     assert content_key(here) == content_key(ticking)
     assert content_key(here) != content_key(observation((refresh, control("all", "Show all"))))
     assert content_key(here) != content_key(observation((refresh.model_copy(update={"checked": True}),)))
+
+
+def test_a_document_holds_the_same_state_however_its_results_redraw() -> None:
+    """The point of holding: a filter toggled on and off redraws the rows beneath it every time, so the page
+    state is always one never seen, and only the committed values say the run has been here before."""
+    box = control("stops", "Direct only", "checkbox", checked=False)
+
+    def at(checked: bool, rows: str) -> Observation:
+        return observation((box.model_copy(update={"checked": checked}), control("rows", rows))).model_copy(
+            update={"document_key": "results"}
+        )
+
+    first_on = move(at(False, "0 results"), at(True, "7 results"))
+    again_on = move(at(False, "12 results"), at(True, "5 results"))
+    back_off = move(at(True, "5 results"), at(False, "12 results"))
+    assert first_on is not None and again_on is not None and back_off is not None
+    # The rows differ every time, so only the committed values can say the page has held this before.
+    assert holding(first_on) == holding(again_on)
+    assert holding(back_off) != holding(first_on)
