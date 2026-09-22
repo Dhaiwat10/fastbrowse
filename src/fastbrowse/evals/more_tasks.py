@@ -245,6 +245,28 @@ HELDOUT: tuple[LiveTask, ...] = (
 # The stretch split. Form and date tasks are graded on the controls of the page the run ended on.
 
 
+def _pairs(*pairs: tuple[str, str]) -> Check:
+    """Each value follows a mention of its own name before any other name: "Pixel 2 XL $1399" is not Pixel 2's 399."""
+
+    def check(outcome: Outcome, _: object) -> str | None:
+        answer = _flat(outcome.answer or "")
+        mentions = sorted(
+            (m.start(), m.end(), name) for name, _ in pairs for m in re.finditer(re.escape(_flat(name)), answer)
+        )
+        spans = [
+            (name, answer[end : next((s for s, _, _ in mentions if s >= end), len(answer))])
+            for _, end, name in mentions
+        ]
+        wrong = [
+            f"{name} {value}"
+            for name, value in pairs
+            if not any(said == name and re.search(rf"(?<![\d.]){re.escape(value)}(?!\d)", span) for said, span in spans)
+        ]
+        return f"answer lacks {wrong}: {outcome.answer!r}" if wrong else None
+
+    return check
+
+
 def _controls(outcome: Outcome) -> dict[str, str | None]:
     return {label.strip(): value for label, value in outcome.controls or ()}
 
@@ -260,15 +282,16 @@ async def _next_monday_range(_: httpx.AsyncClient) -> object:
 
 def _date_range_check(outcome: Outcome, truth: object) -> str | None:
     assert isinstance(truth, dict)
+    reported = _has(f"{truth['nights']} days")(outcome, truth)
     values = _controls(outcome)
     if not values:
-        return _has(f"{truth['nights']} day")(outcome, truth)
+        return reported
     wrong = [
         f"{label}={values.get(label)!r}, expected {truth[key]!r}"
         for label, key in (("Start Date", "start"), ("End Date", "end"))
         if values.get(label) != truth[key]
     ]
-    return "; ".join(wrong) or None
+    return "; ".join([*wrong, *([reported] if reported else [])]) or None
 
 
 async def _next_month_first_friday(_: httpx.AsyncClient) -> object:
@@ -288,7 +311,7 @@ def _first_friday_check(outcome: Outcome, truth: object) -> str | None:
     picked = _controls(outcome).get("Click to pick a date:")
     if picked is not None:
         return None if picked == truth["mdy"] else f"date input = {picked!r}, expected {truth['mdy']!r}"
-    return _has(truth["day_name"], truth["month_name"], truth["day"])(outcome, truth)
+    return _has(truth["day_name"])(outcome, truth) or _pairs((truth["month_name"], truth["day"]))(outcome, truth)
 
 
 STRETCH_DEV: tuple[LiveTask, ...] = (
@@ -319,13 +342,10 @@ STRETCH_DEV: tuple[LiveTask, ...] = (
         "Across every page of the Nonfiction category, which three five-star-rated books are the cheapest, "
         "and what does each cost?",
         _fixed(None),
-        _has(
-            "Agnostic: A Spirited Manifesto",
-            "12.51",
-            "Disrupted: My Misadventure in the Start-Up Bubble",
-            "15.28",
-            "Mother, Can You Not?",
-            "16.89",
+        _pairs(
+            ("Agnostic: A Spirited Manifesto", "12.51"),
+            ("Disrupted: My Misadventure in the Start-Up Bubble", "15.28"),
+            ("Mother, Can You Not?", "16.89"),
         ),
         Category.LOOKUP,
     ),
@@ -336,7 +356,7 @@ STRETCH_DEV: tuple[LiveTask, ...] = (
         "remains. Sort by price lowest to highest, and tell me the two cheapest Google phones and their "
         "prices.",
         _fixed(None),
-        _has("Pixel 2", "399", "Pixel 3", "599"),
+        _pairs(("Pixel 2", "399"), ("Pixel 3", "599")),
         Category.WIDGET,
     ),
 )
@@ -369,7 +389,7 @@ STRETCH_HELDOUT: tuple[LiveTask, ...] = (
         "Across every page of this site, which three authors have the most quotes attributed to them, and "
         "how many quotes does each have?",
         _fixed(None),
-        _has("Albert Einstein", "10", "J.K. Rowling", "9", "Marilyn Monroe", "7"),
+        _pairs(("Albert Einstein", "10"), ("J.K. Rowling", "9"), ("Marilyn Monroe", "7")),
         Category.LOOKUP,
     ),
     LiveTask(
@@ -379,7 +399,7 @@ STRETCH_HELDOUT: tuple[LiveTask, ...] = (
         "remains. Sort by price highest to lowest, and tell me the three most expensive phones and their "
         "prices.",
         _fixed(None),
-        _has("Galaxy S20 Ultra", "1399", "Galaxy Note 20 Ultra", "1299", "Galaxy S20+", "1199"),
+        _pairs(("Galaxy S20 Ultra", "1399"), ("Galaxy Note 20 Ultra", "1299"), ("Galaxy S20+", "1199")),
         Category.WIDGET,
     ),
 )
