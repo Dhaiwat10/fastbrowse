@@ -9,9 +9,9 @@ import hashlib
 import json
 import logging
 import time
+from collections import deque
 from collections.abc import Coroutine, Mapping, Sequence, Set
 from dataclasses import dataclass, field
-from typing import Literal
 from urllib.parse import urljoin, urlsplit
 
 from pydantic import BaseModel, Field, JsonValue
@@ -192,16 +192,6 @@ class _RecoveryRecord:
     reason: str
     diagnosis: str
     subgoal: str
-    attempt: int
-    at: int
-    outcome: Literal[
-        "no action taken yet",
-        "awaiting settled page",
-        "no settled progress",
-        "settled progress",
-        "no settled progress: returned to an earlier state",
-    ] = "no action taken yet"
-    evidence: bool = False
 
 
 @dataclass(slots=True)
@@ -224,7 +214,7 @@ class _RunState:
     """Controls a fill or select has written, by document, so only a field's first new value counts as progress by
     itself. A new document restarts control ids, and its fields would otherwise inherit the last page's writes."""
     recoveries: int = 0
-    recovery_log: list[_RecoveryRecord] = field(default_factory=list[_RecoveryRecord])
+    recovery_log: deque[_RecoveryRecord] = field(default_factory=lambda: deque(maxlen=_RECOVERY_RECORDS))
     recovered_at: int = 0
     """`len(history)` when a tripwire last recovered the run. Evidence a recovery already acted on is
     spent: `history` only grows, so a repetition count that reached the limit once would hold forever and
@@ -235,16 +225,14 @@ class _RunState:
     """What became of each action taken from each page state, which is how a cycle is told from progress."""
     last_page: tuple[str, str] | None = None
     reached: dict[str, int] = field(default_factory=dict[str, int])
-    """Each page state's history boundary for judging a return. Evidence and corrections advance the boundary,
-    so one useful read excuses a return without excusing every later loop through that state."""
+    """Each page state the run has been in, with how many actions had been taken when it was first reached. Only
+    reaching a new one restores the recovery budget or counts an action that changed the page as progress."""
     left: str | None = None
     """The state the last action that changed the page was taken from, until the next observation judges it."""
     acted_from: Observation | None = None
     """The page the last action was taken on, until the next observation says what it did."""
     pending_move: Move | None = None
     moves: list[tuple[int, Move]] = field(default_factory=list[tuple[int, Move]])
-    useful_at: int = 0
-    """Last history boundary with new evidence or a field correction; a READ without evidence excuses no loop."""
     ready_plan: Plan | None = None
     read_here: bool = False
     """This page has been read since it last changed."""
@@ -372,7 +360,8 @@ class Agent:
             observation = await self._observe()
             state.first_url = state.first_url or observation.url
             self._note_effect(state, observation)
-            if (stalled := self._settle(state, observation)) is not None:
+            stalled = self._settle(state, observation)
+            if (stalled := self._reversal(state) or stalled) is not None:
                 await self._recover(state, observation, stalled)
                 continue
             # Walking a list is dispatched before Jev is asked, because not asking is the point: the reader asked for
@@ -641,7 +630,6 @@ class Agent:
         label = _describe(decision.target) if decision.target else decision.tab_id
         typed: str | None = None
         effect_now: str | None = None
-        corrected = False
         if decision.operation is Operation.READ:
             progressed, skipped = await self._read(state, capture or await self._capture(), observation)
             state.read_here = True
@@ -673,12 +661,6 @@ class Agent:
             # written-value check had stopped doing so. `changed` decides every other operation.
             written = state.written.setdefault(observation.document_key, set())
             edit = self._edit_progress(decision, action, written)
-            corrected = (
-                act.outcome is StepOutcome.EXECUTED
-                and decision.operation in {Operation.FILL, Operation.SELECT}
-                and action.text is not None
-                and edit is not False
-            )
             if act.outcome is StepOutcome.EXECUTED and edit is not None and decision.target is not None:
                 written.add(decision.target.id)
             progressed = act.outcome is StepOutcome.EXECUTED and (changed if edit is None else edit)
@@ -723,18 +705,6 @@ class Agent:
                 effect=effect_now,
             )
         )
-        if corrected or (decision.operation is Operation.READ and progressed):
-            state.useful_at = len(state.history)
-            state.moves.clear()
-        if state.recovery_log:
-            state.recovery_log[-1].evidence |= decision.operation is Operation.READ and progressed
-            state.recovery_log[-1].outcome = (
-                "awaiting settled page"
-                if state.acted_from is not None or state.pending_move
-                else "settled progress"
-                if progressed
-                else "no settled progress"
-            )
         step = StepResult(
             index=len(state.steps),
             operation=decision.operation,
@@ -758,9 +728,9 @@ class Agent:
         else:
             state.unchanged += 1
         # Progress breaks the stagnation streak even when setup work has not evidenced a requirement yet.
-        if progressed and not changed:
+        if progressed:
             state.plan_marks.clear()
-        elif not progressed:
+        else:
             state.plan_marks.append(self._plan_mark(state))
         for tripped in self._tripwires(state):
             if tripped.tripwire is Tripwire.NO_PROGRESS or self._config.stall.tripwires is TripwireMode.ARMED:
@@ -815,57 +785,17 @@ class Agent:
         """
         key = state_key(observation)
         first = state.reached.get(key)
-        left, state.left = state.left, None
-        made, state.pending_move = state.pending_move, None
-        note = None
-        at = len(state.history)
-        record = state.recovery_log[-1] if state.recovery_log and at > state.recovery_log[-1].at else None
-        state.moves = [(index, m) for index, m in state.moves if index >= max(at - _REVERSAL_WINDOW, state.useful_at)]
-        if (
-            made is not None
-            and state.history
-            and state.history[-1].outcome is StepOutcome.EXECUTED
-            # Scrolling shows and hides controls without changing anything; only a changed setting can be undone.
-            and state.history[-1].operation not in _PAGE_OPERATIONS
-            and state.useful_at < at
-        ):
-            for index, earlier in reversed(state.moves):
-                if (returned := reversal(made, earlier)) is not None:
-                    actions = ", ".join(_described(entry) for entry in state.history[index - 1 :][-_CYCLE_SHOWN:])
-                    note = f"{returned}; intervening actions: {actions}"
-                    break
-            state.moves.append((at, made))
         if first is None:
-            # Remember even a rejected return, so observing it again cannot restore the budget after recovery.
-            state.reached[key] = at
-            # Prices may redraw during recovery too; novelty without an action is not an escape from the stall.
-            if note is None and (left is not None or (made is not None and state.useful_at == at)):
-                state.recoveries = 0
-        if note is not None:
-            if left is not None:
-                state.unchanged += 1
-                state.plan_marks.append(self._plan_mark(state))
-            if record is not None:
-                record.outcome = "no settled progress: returned to an earlier state"
-            # A step tripwire may already have recovered this action before its effects settled.
-            return note if at > state.recovered_at else None
+            state.reached[key] = len(state.history)
+            state.recoveries = 0
+        left, state.left = state.left, None
         if left is None:
-            if record is not None and record.outcome == "awaiting settled page":
-                record.outcome = (
-                    "settled progress"
-                    if state.useful_at == at and made is not None and made.values_before != made.values_after
-                    else "no settled progress"
-                )
             return None
         cycle = state.history[first:] if first is not None else []
         # Going back to a list after reading one of its pages is how a comparison is done, not a wasted round.
-        if first is None or key == left or state.useful_at > first:
-            state.reached[key] = at
+        if first is None or key == left or any(entry.operation is Operation.READ for entry in cycle):
             state.unchanged = 0
             state.hint = None
-            state.plan_marks.clear()
-            if record is not None:
-                record.outcome = "settled progress"
             return None
         undone = ", ".join(_described(entry) for entry in cycle[-_CYCLE_SHOWN:])
         note = (
@@ -874,13 +804,31 @@ class Agent:
         )
         last = state.history[-1]
         state.history[-1] = last.model_copy(update={"effect": f"{last.effect}; {note}" if last.effect else note})
-        state.unchanged += 1
-        state.plan_marks.append(self._plan_mark(state))
-        if record is not None:
-            record.outcome = "no settled progress: returned to an earlier state"
         # One return is already a loop: waiting for the stall count let Search and Done go round three times, with
         # an unsure step's recovery in between sending the run off to re-fill the origin.
-        return note if at > state.recovered_at else None
+        return note
+
+    @staticmethod
+    def _reversal(state: _RunState) -> str | None:
+        made, state.pending_move = state.pending_move, None
+        at = len(state.history)
+        state.moves = [(index, m) for index, m in state.moves if index >= at - _REVERSAL_WINDOW]
+        if (
+            made is None
+            or at <= state.recovered_at
+            or state.history[-1].outcome is not StepOutcome.EXECUTED
+            # Scrolling shows and hides controls without changing a setting.
+            or state.history[-1].operation in _PAGE_OPERATIONS
+        ):
+            return None
+        note = None
+        for index, earlier in reversed(state.moves):
+            if (returned := reversal(made, earlier)) is not None:
+                actions = ", ".join(_described(entry) for entry in state.history[index - 1 :][-_CYCLE_SHOWN:])
+                note = f"{returned}; intervening actions: {actions}"
+                break
+        state.moves.append((at, made))
+        return note
 
     @staticmethod
     def _note_effect(state: _RunState, observation: Observation) -> None:
@@ -1495,8 +1443,8 @@ class Agent:
                         "the observed control it acts on, with no alternatives. A read, scroll, back or escape acts "
                         "on the page and names no control. A read takes in the whole page, so scroll only to reach "
                         "a control or to load more. When the notes already answer every open requirement, the next "
-                        "subgoal is to finish. Recovery memory records earlier diagnoses and their observed "
-                        "outcomes; choose another way when a subgoal led nowhere. "
+                        "subgoal is to finish. Recovery memory records earlier diagnoses and subgoals; "
+                        "use the recent steps to judge whether to try another way. "
                         "Dates are relative to the supplied current date.\n\n"
                         f"# Trust\n{UNTRUSTED}"
                     ),
@@ -1533,11 +1481,8 @@ class Agent:
                 reason=_recovery_text(reason),
                 diagnosis=_recovery_text(self._redactor.redact(generation.data.diagnosis)),
                 subgoal=_recovery_text(state.hint),
-                attempt=state.recoveries,
-                at=len(state.history),
             )
         )
-        del state.recovery_log[:-_RECOVERY_RECORDS]
         trace(
             "recover",
             reason=reason,
@@ -1944,11 +1889,7 @@ def _recovery_memory(state: _RunState, limit: int, redactor: Redactor) -> str:
         return ""
     lines = [f"recovery {state.recoveries} of {limit} in the current stall episode"]
     for record in state.recovery_log:
-        evidence = "added evidence; " if record.evidence else ""
-        lines.append(
-            f"- recovery {record.attempt} of {limit}: {record.reason}. Diagnosis: {record.diagnosis}. "
-            f"Subgoal: {record.subgoal}. Observed outcome: {evidence}{record.outcome}."
-        )
+        lines.append(f"- Reason: {record.reason}. Diagnosis: {record.diagnosis}. Subgoal: {record.subgoal}.")
     return redactor.redact("\n".join(lines))
 
 

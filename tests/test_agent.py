@@ -754,16 +754,12 @@ async def test_going_back_after_reading_a_page_is_progress() -> None:
     page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
     state = await run_state()
     state.authorization = Authorization(irreversible_actions=True)
-    agent = Agent(
-        page,
-        ScriptedJev({}),
-        ScriptedLLM([{"claims": [{"text": "A package", "cite": {"first": "s0", "last": "s0"}}], "answered": True}]),
-    )
+    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
     agent._settle(state, results)
     await _click(agent, state, results, "httpx")
     agent._settle(state, package)
-    await agent._step(
-        state, package, _code_decision(Operation.READ, None), capture=capture((BlockKind.PARAGRAPH, "A package"))
+    state.history.append(
+        HistoryEntry(operation=Operation.READ, target=None, outcome=StepOutcome.EXECUTED, page_changed=False)
     )
     state.history.append(
         HistoryEntry(operation=Operation.BACK, target=None, outcome=StepOutcome.EXECUTED, page_changed=True)
@@ -804,7 +800,8 @@ async def test_a_filter_returning_to_its_prior_value_routes_to_recovery(changed:
     assert "Direct only keeps returning to checked=False" in prompt
     assert "intervening actions: click Direct only, click Direct only" in prompt
     assert agent._settle(state, current) is None
-    assert state.recoveries == 1
+    assert agent._reversal(state) is None
+    assert len(llm.calls) == 1
 
 
 async def test_scrolling_controls_in_and_out_of_view_is_not_a_reversal() -> None:
@@ -818,146 +815,41 @@ async def test_scrolling_controls_in_and_out_of_view_is_not_a_reversal() -> None
     for before, after in ((top, below), (below, top), (top, below)):
         await agent._step(state, before, _code_decision(Operation.SCROLL, None))
         agent._note_effect(state, after)
-        reason = agent._settle(state, after)
-        assert reason is None or "keeps returning" not in reason
+        agent._settle(state, after)
+        assert agent._reversal(state) is None
 
 
-async def test_a_redrawn_panel_recovers_once_and_the_next_recovery_remembers_the_first() -> None:
-    def picker(price: int) -> Observation:
-        return observation(
-            (
-                _button("Done").model_copy(update={"id": f"done-{price}"}),
-                _button(f"Friday fare {price}").model_copy(update={"id": f"day-{price}", "selected": False}),
-            )
-        ).model_copy(update={"document_key": "search"})
-
-    form = observation((_button("Search"),)).model_copy(update={"document_key": "search"})
-    page = Mock(spec=Page)
-    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
-    page.screenshot = AsyncMock(return_value=b"")
-    recovery: JsonValue = {
-        "diagnosis": "Missing a return date hunter2",
-        "next_subgoal": "Set the return date",
-        "give_up": False,
-    }
-    llm = ScriptedLLM([recovery, recovery])
-    agent = Agent(page, ScriptedJev({}), llm)
-    agent._redactor.register("password", "hunter2")
-    state = await run_state()
-    state.authorization = Authorization(irreversible_actions=True)
-    agent._settle(state, picker(10))
-
-    for label, before, after in (("Done", picker(10), form), ("Search", form, picker(20))):
-        target = next(control for control in before.controls if control.label == label)
-        await agent._step(state, before, _code_decision(Operation.CLICK, target))
-        agent._note_effect(state, after)
-        reason = agent._settle(state, after)
-    assert reason is not None and "Done keeps returning to visible" in reason
-    assert state.unchanged == 1
-    await agent._recover(state, picker(20), reason)
-    assert state.steps[-1].decided_by is Decider.LLM
-    assert state.steps[-1].operation is Operation.ESCALATE
-    assert agent._settle(state, picker(20)) is None
-    assert agent._settle(state, picker(21)) is None
-    assert state.recoveries == 1
-
-    await agent._step(state, picker(21), _code_decision(Operation.CLICK, picker(21).controls[0]))
-    agent._note_effect(state, form)
-    reason = agent._settle(state, form)
-    assert reason is not None
-    await agent._recover(state, form, reason)
-    second = llm.calls[1][1][-1].content
-    assert "recovery 2 of 2 in the current stall episode" in second
-    assert "Diagnosis: Missing a return date [secret:password]" in second
-    assert "Subgoal: Set the return date" in second
-    assert "Observed outcome: no settled progress" in second
-    assert "hunter2" not in second
-    assert "hunter2" not in repr(state.recovery_log)
-    ctx = agent._context(state, (), check_login=False, check_bot=False)
-    request = build_request(form, form.controls, ctx, Config())
-    assert isinstance(request.state, dict)
-    assert request.state["recovery_memory"] == ctx.recovery_memory
-    assert "Missing a return date [secret:password]" in ctx.recovery_memory
-    assert all(entry.operation is Operation.CLICK for entry in ctx.history)
-    # A fresh observation after recovery cannot spend the same return again or renew its budget.
-    assert agent._settle(state, form) is None
-    assert state.recoveries == 2
-    with pytest.raises(_Stop):
-        await agent._recover(state, form, "still cycling")
-    assert len(llm.calls) == 2
-
-
-async def test_recovery_memory_is_bounded_and_keeps_evidence_after_a_later_idle_action() -> None:
+@pytest.mark.parametrize("recoveries", [2, 6])
+async def test_recovery_prompts_and_requests_remember_the_last_four_diagnoses_redacted(recoveries: int) -> None:
     page = Mock(spec=Page)
     page.screenshot = AsyncMock(return_value=b"")
-    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=False))
-    recovery: JsonValue = {"diagnosis": "hunter2 " * 100, "next_subgoal": "Read results", "give_up": False}
     llm = ScriptedLLM(
-        [recovery] * 5 + [{"claims": [{"text": "A fare", "cite": {"first": "s0", "last": "s0"}}], "answered": True}]
+        [
+            {"diagnosis": f"Diagnosis {n} hunter2", "next_subgoal": f"Subgoal {n} hunter2", "give_up": False}
+            for n in range(recoveries)
+        ]
     )
-    agent = Agent(page, ScriptedJev({}), llm, config=Config(stall=StallRules(max_recoveries=5)))
+    config = Config(stall=StallRules(max_recoveries=recoveries))
+    agent = Agent(page, ScriptedJev({}), llm, config=config)
     agent._redactor.register("password", "hunter2")
     state = await run_state()
-    state.authorization = Authorization(irreversible_actions=True)
-    obs = observation((_button("Search"),)).model_copy(update={"document_key": "doc"})
-    agent._settle(state, obs)
-    for n in range(5):
-        await agent._recover(state, obs, f"attempt {n}")
-    await agent._step(
-        state, obs, _code_decision(Operation.READ, None), capture=capture((BlockKind.PARAGRAPH, "A fare"))
-    )
-    await _click(agent, state, obs, "Search")
-    agent._note_effect(state, obs)
-    agent._settle(state, obs)
-    memory = agent._context(state, (), check_login=False, check_bot=False).recovery_memory
-    assert len(state.recovery_log) == 4
-    assert all(len(record.diagnosis) <= 240 for record in state.recovery_log)
-    assert "attempt 0" not in memory and "attempt 4" in memory
+    obs = observation((_button("Search"),))
+    for n in range(recoveries):
+        await agent._recover(state, obs, f"Reason {n} hunter2")
+    second = llm.calls[1][1][-1].content
+    assert f"recovery 2 of {recoveries} in the current stall episode" in second
+    for field in ("Reason", "Diagnosis", "Subgoal"):
+        assert f"{field}: {field} 0 [secret:password]" in second
+    assert "hunter2" not in second
+    request = build_request(obs, obs.controls, agent._context(state, (), check_login=False, check_bot=False), config)
+    assert isinstance(request.state, dict)
+    memory = request.state["recovery_memory"]
+    assert isinstance(memory, str)
+    assert f"recovery {recoveries} of {recoveries}" in memory
+    for n in range(recoveries):
+        for field in ("Reason", "Diagnosis", "Subgoal"):
+            assert (f"{field}: {field} {n} [secret:password]" in memory) is (n >= recoveries - 4)
     assert "hunter2" not in memory
-    assert "added evidence; no settled progress" in memory
-
-
-@pytest.mark.parametrize("useful", [False, True])
-async def test_only_a_read_that_gains_evidence_excuses_a_panel_return(useful: bool) -> None:
-    panel = observation((_button("Done"),)).model_copy(update={"document_key": "doc"})
-    form = observation((_button("Search"),)).model_copy(update={"document_key": "doc"})
-    page = Mock(spec=Page)
-    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
-    claims: list[JsonValue] = [{"text": "A fare", "cite": {"first": "s0", "last": "s0"}}] if useful else []
-    agent = Agent(page, ScriptedJev({}), ScriptedLLM([{"claims": claims, "answered": useful}]))
-    state = await run_state()
-    state.authorization = Authorization(irreversible_actions=True)
-    agent._settle(state, panel)
-    await _click(agent, state, panel, "Done")
-    agent._note_effect(state, form)
-    assert agent._settle(state, form) is None
-    await agent._step(
-        state, form, _code_decision(Operation.READ, None), capture=capture((BlockKind.PARAGRAPH, "A fare"))
-    )
-    await _click(agent, state, form, "Search")
-    agent._note_effect(state, panel)
-    assert (agent._settle(state, panel) is None) is useful
-    if useful:
-        await _click(agent, state, panel, "Done")
-        agent._note_effect(state, form)
-        assert agent._settle(state, form) is not None
-
-
-async def test_a_field_correction_can_return_to_a_previously_held_value() -> None:
-    original = observation((field("Origin"),)).model_copy(update={"document_key": "doc"})
-    corrected = original.model_copy(update={"controls": (field("Origin").model_copy(update={"value": "Bristol"}),)})
-    page = Mock(spec=Page)
-    page.act = AsyncMock(return_value=ActResult(outcome=StepOutcome.EXECUTED, page_changed=True))
-    agent = Agent(page, ScriptedJev({}), ScriptedLLM([]))
-    state = await run_state()
-    state.inputs = {"Origin": "Bristol"}
-    agent._settle(state, original)
-    for before, after, value in ((original, corrected, "Bristol"), (corrected, original, "Bath")):
-        state.inputs = {"Origin": value}
-        await agent._step(state, before, _code_decision(Operation.FILL, before.controls[0]))
-        agent._note_effect(state, after)
-        assert agent._settle(state, after) is None
-    assert state.unchanged == 0
 
 
 @pytest.mark.parametrize(

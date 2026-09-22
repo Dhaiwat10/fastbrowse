@@ -144,7 +144,7 @@ class StepContext(Frozen):
     unread_requirements: tuple[str, ...] | None = None
     """None while planning; an empty tuple means no information remains to collect."""
     recovery_memory: str = ""
-    """Recent diagnoses, subgoals and observed outcomes, separate from actions actually taken."""
+    """Recent reasons, diagnoses and subgoals, separate from actions actually taken."""
 
 
 class Decision(Frozen):

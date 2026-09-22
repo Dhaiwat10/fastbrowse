@@ -68,23 +68,45 @@ def test_reversals_do_not_match_a_control_from_another_document_or_context(scope
     assert move(on, off.model_copy(update={"document_key": "new"})) is None
 
 
-def test_reopening_a_panel_after_changing_a_value_is_not_a_reversal() -> None:
+@pytest.mark.parametrize(
+    ("attribute", "before", "after"), [("checked", False, True), ("selected", False, True), ("value", "Price", "Name")]
+)
+@pytest.mark.parametrize("other_returns", [False, True])
+def test_reversal_requires_every_committed_value_to_return(
+    attribute: str, before: str | bool, after: str | bool, other_returns: bool
+) -> None:
+    setting = control("setting", "Setting").model_copy(update={attribute: before})
+    other = control("other", "Other", value="original")
+    original = observation((setting, other)).model_copy(update={"document_key": "doc"})
+    changed = original.model_copy(update={"controls": (setting.model_copy(update={attribute: after}), other)})
+    returned = original.model_copy(
+        update={"controls": (setting, other if other_returns else other.model_copy(update={"value": "new"}))}
+    )
+    earlier, later = move(original, changed), move(changed, returned)
+    assert earlier is not None and later is not None
+    note = reversal(later, earlier)
+    assert note == (f"Setting keeps returning to {attribute}={before}" if other_returns else None)
+
+
+@pytest.mark.parametrize("value", ["Round trip", "One way"])
+def test_reopening_controls_with_new_results_is_not_a_value_reversal(value: str) -> None:
     panel = observation((TRIGGER, control("done", "Done"))).model_copy(update={"document_key": "doc"})
-    form = observation((TRIGGER, control("search", "Search"))).model_copy(update={"document_key": "doc"})
+    form = observation((TRIGGER.model_copy(update={"expanded": False}), control("search", "Search"))).model_copy(
+        update={"document_key": "doc"}
+    )
     earlier = move(panel, form)
     later = move(
         form,
-        panel.model_copy(update={"controls": (TRIGGER.model_copy(update={"value": "One way"}), panel.controls[1])}),
+        panel.model_copy(
+            update={
+                "controls": (
+                    TRIGGER.model_copy(update={"value": value}),
+                    panel.controls[1],
+                    control("result", "New result"),
+                )
+            }
+        ),
     )
-    assert earlier is not None and later is not None and reversal(later, earlier) is None
-
-
-def test_a_shared_label_prefix_does_not_identify_a_returned_panel() -> None:
-    prefix = "Choose an outbound journey "
-    old = observation((control("old", prefix + "date"),)).model_copy(update={"document_key": "doc"})
-    form = observation((control("search", "Search"),)).model_copy(update={"document_key": "doc"})
-    new = observation((control("new", prefix + "destination"),)).model_copy(update={"document_key": "doc"})
-    earlier, later = move(old, form), move(form, new)
     assert earlier is not None and later is not None and reversal(later, earlier) is None
 
 
