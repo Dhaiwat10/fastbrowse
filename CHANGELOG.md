@@ -11,6 +11,10 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **Relevance passes send small requests in parallel.** Packing a page's Noul questions into as few requests as
+  Jev's 64k limit allows made each one about 26k tokens, and the gateway answered most of those with 503 until
+  the retries ran out, adding up to 25s a pass or ending the run `unavailable`. Questions now go in requests of
+  about 8k tokens, sent together.
 - **A dense results page is compacted rather than refused.** Amazon's signed-in search results offered Jev 112
   products with ~200-character titles and ~480-character tracking links, and the run stopped at
   `observation_limit` before it could pick one. When a page does not fit even on-screen only, its elements are now

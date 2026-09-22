@@ -62,6 +62,9 @@ class TokenBudget(Frozen):
     """Conservative target under Jev's 32k limit, since tokens are estimated locally."""
     state_plus_all_questions: int = Field(default=48_000, gt=0)
     """Conservative target under Jev's 64k limit."""
+    batch_tokens: int = Field(default=8000, gt=0)
+    """Target for one request among many independent questions. The gateway sheds large requests with 503s (a 26k
+    token request failed five of eight times, 4k never), so a batch of questions is split small and sent in parallel."""
     chars_per_token: float = Field(default=3.0, gt=0)
     """Allow more tokens per character than ordinary English to cover JSON and identifiers."""
     read_output_tokens: int = Field(default=8000, gt=0)

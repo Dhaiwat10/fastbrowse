@@ -70,8 +70,8 @@ and where fastbrowse follows it:
   unmet actions and whether a draft needs rewriting.
 - **Filter before choosing on a dense page.** The Jev 1.13 jaggedness notes say accuracy falls with a large
   state full of irrelevant detail, and suggest a Noul to filter for relevance. Past `max_offered_controls` (160,
-  **ours**) the policy asks one Noul per control, packed into as few requests as the token budget allows and
-  sent together, and offers the highest-scoring controls. A Noul is used rather than ranking one Choice's
+  **ours**) the policy asks one Noul per control, packed into requests of about 8k tokens (**ours**) and sent
+  together, and offers the highest-scoring controls. A Noul is used rather than ranking one Choice's
   probabilities: a Choice ranks alternatives against each other, and its two-decimal probabilities leave all but
   a handful of 240 options tied at zero. The rubric sits once in the shared state, so each question carries only
   its control. Protected controls skip the check and an unanswered one is kept.
@@ -79,6 +79,8 @@ and where fastbrowse follows it:
   text than its input allows: one Noul per window of about 1,500 characters (**ours**), a longer block asked about
   in pieces. Jev chooses only when every window was answered and every one at 0.6 or above (**ours**; Jev scores a passage it cannot place near 0.5) fits in the
   choice; otherwise the LLM reader reads the whole page. An `absent` answer from a narrowed page is not trusted.
+  Requests stay small because the gateway sheds large ones: measured on Wikipedia windows, a 26k-token Noul
+  batch returned 503 until its retries ran out on five of eight tries, a 4k-token batch on none.
 - **Match state to the question.** Navigation uses the redacted viewport, controls and working notes;
   short-fact selection sees the full capture. Counts and comparisons go to the LLM reader.
 

@@ -41,7 +41,7 @@ async def evaluate_batches(
             or state_size + size > tokens.state_plus_all_questions
         ):
             continue
-        if batch and state_size + batch_size + size > tokens.state_plus_all_questions:
+        if batch and state_size + batch_size + size > min(tokens.batch_tokens, tokens.state_plus_all_questions):
             batches.append(batch)
             batch = {}
             batch_size = 0.0

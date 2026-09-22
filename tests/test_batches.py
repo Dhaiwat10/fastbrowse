@@ -44,3 +44,25 @@ async def test_a_pass_the_call_limit_cannot_cover_counts_no_call() -> None:
     with pytest.raises(BudgetExceeded):
         await evaluate_batches(jev, {}, _QUESTIONS, tokens=_ONE_PER_BATCH, ledger=ledger)
     assert jev.sent == [] and ledger.jev_calls == 0
+
+
+class _Answers:
+    def __init__(self) -> None:
+        self.sent: list[Mapping[str, Question]] = []
+
+    async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        self.sent.append(questions)
+        return Evaluation(
+            model="test",
+            answers={key: NoulAnswer(probability=0.5) for key in questions},
+            input_tokens=10,
+            cost=CostLine(component=CostComponent.JEV, basis=CostBasis.ESTIMATED, dollars=0.01),
+        )
+
+
+async def test_many_questions_go_as_small_requests_even_when_one_would_fit() -> None:
+    jev = _Answers()
+    questions = {f"q{i}": NoulQuestion(instructions="x" * 300) for i in range(40)}
+    answered = await evaluate_batches(jev, {}, questions, tokens=TokenBudget(batch_tokens=1000), ledger=None)
+    assert answered is not None and len(answered.answers) == 40
+    assert len(jev.sent) > 1 and all(len(sent) < 40 for sent in jev.sent)
