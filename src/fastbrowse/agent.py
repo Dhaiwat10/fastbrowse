@@ -1078,11 +1078,16 @@ class Agent:
         }
         criteria |= {f"secret:{name}": f"The stored secret named {name} (value hidden)" for name in secrets}
         criteria[GENERATE] = "None of these; write new text stated in the task or notes."
-        choice = (
-            await self._ask_choice(state, observation, f"What should be typed into {target.label!r}?", criteria)
-            if len(criteria) > 1
-            else GENERATE
+        # Amazon labels its sign-in field "Enter mobile number or email", and Jev, seeing only a secret named
+        # `username`, chose to write new text; the task gives no email, so the run stopped needs_input.
+        # Only for signing in: a checkout's contact email is the task's value, not the login.
+        question = (
+            f"What should be typed into {target.label!r}? Stored secrets are this site's sign-in credentials, "
+            "named by role, and are only for signing in to the account: when this field is a sign-in field, the "
+            "username is also the account's email address or phone number. Any other field takes a value the task "
+            "gives."
         )
+        choice = await self._ask_choice(state, observation, question, criteria) if len(criteria) > 1 else GENERATE
         if choice.startswith("input:"):
             return state.inputs[choice.removeprefix("input:")]
         if choice.startswith("secret:"):
