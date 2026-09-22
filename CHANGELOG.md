@@ -11,6 +11,14 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A dense page keeps the controls the task needs, not the first ones in the document.** The browser now
+  indexes up to 320 controls, and when a page offers more than 160, Jev is asked in one batched pass whether each
+  could serve the task's next actions; the step sees the most relevant 160. Before, a page was cut at its first
+  160 controls, so a result or filter drawn after a long header and sidebar never reached the choice. Pagers,
+  blocking fields and controls holding a value or selection are always kept, and a control Jev did not answer
+  for is kept rather than dropped. A dense page costs one more Jev round trip; a page under the limit costs
+  nothing more.
+
 - **Every step is credited to Jev or the LLM, never to "code".** A step code dispatches carries out a model's
   choice, and is now recorded as that model's: the next page of a list is the reader's, since the reader asked for
   the rest of the list, and the read taken before an interaction is Jev's, since Jev judged the page to be

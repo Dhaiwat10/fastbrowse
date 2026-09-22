@@ -10,7 +10,7 @@ evals rather than taken from Typesafe.
 |:--|:--|:--|
 | Direct API | `POST https://api.typesafe.ai/v1/systemone`, bearer key, body `{model, state, questions}`; response `{model, answers, usage}` ([API](https://docs.typesafe.ai/api), [OpenAPI](https://api.typesafe.ai/openapi.json)) | `clients/typesafe.py`, used when `TYPESAFE_API_KEY` is set, unless `FASTBROWSE_JEV_SOURCE=gateway` |
 | Gateway | Model `typesafe-ai/jev` via `https://ai-gateway.vercel.sh/v4/ai/evaluation-model`, body `{state, questions}` ([Gateway](https://vercel.com/docs/ai-gateway/modalities/evaluation), [transport source](https://github.com/vercel/ai/blob/main/packages/gateway/src/gateway-evaluation-model.ts)) | `clients/vercel.py`, used with `AI_GATEWAY_API_KEY`; `FASTBROWSE_JEV_BASE_URL` retargets either |
-| Yes/no (Noul) | Direct returns `{type: "noul", noul: P(yes)}`; the gateway returns `probability`. Optional `true`/`false` criteria define the boundary ([Noul](https://docs.typesafe.ai/primitives/noul), [v1 migration](https://docs.typesafe.ai/migrating-to-v1)) | `clients/validation.py` decodes each shape separately |
+| Yes/no (Noul) | Direct returns `{type: "noul", noul: P(yes)}`; the gateway returns `probability`. Optional `true`/`false` criteria define the boundary ([Noul](https://docs.typesafe.ai/primitives/noul), [v1 migration](https://docs.typesafe.ai/migrating-to-v1)) | `clients/validation.py` decodes each shape separately; `policy.py` asks one per control to filter a dense page |
 | Choice | The top `choice`, every option's probability, and a `confidence` ([Choice](https://docs.typesafe.ai/primitives/choice)) | `policy.py` (operation and target), `retrieval.py` (field and short-fact reads) |
 | Score | Ordered levels, returning a probability-weighted index ([Score](https://docs.typesafe.ai/primitives/score)) | Modelled in `jev.py`, not yet called |
 | Options | At most 255 per Choice ([Choice](https://docs.typesafe.ai/primitives/choice)) | `MAX_CHOICE_OPTIONS = 255`; the 240 cap and group-then-element selection are **ours** |
@@ -68,6 +68,13 @@ and where fastbrowse follows it:
   operation and target choices, read assessment and applicable sign-in and bot checks. Grouped targets need
   a second choice; code-selected pagination needs no policy call. The done check batches completion,
   unmet actions and whether a draft needs rewriting.
+- **Filter before choosing on a dense page.** The Jev 1.13 jaggedness notes say accuracy falls with a large
+  state full of irrelevant detail, and suggest a Noul to filter for relevance. Past `max_offered_controls` (160,
+  **ours**) the policy asks one Noul per control, packed into as few requests as the token budget allows and
+  sent together, and offers the highest-scoring controls. A Noul is used rather than ranking one Choice's
+  probabilities: a Choice ranks alternatives against each other, and its two-decimal probabilities leave all but
+  a handful of 240 options tied at zero. The rubric sits once in the shared state, so each question carries only
+  its control. Protected controls skip the check and an unanswered one is kept.
 - **Match state to the question.** Navigation uses the redacted viewport, controls and working notes;
   short-fact selection sees the full capture. Counts and comparisons go to the LLM reader.
 

@@ -202,3 +202,91 @@ async def test_a_bot_check_is_asked_on_its_own_where_a_credential_answers_the_si
     assert "login_required" not in jev.requests[0]
     assert decision.login_required is None
     assert decision.bot_check == 0.9
+
+
+class RelevanceJev(ScriptedJev):
+    """Scores a relevance question high when its element names one of `relevant`; `fail` rejects every one."""
+
+    def __init__(self, pick: Mapping[str, str], relevant: set[str], *, fail: bool = False) -> None:
+        super().__init__(pick)
+        self.relevant = relevant
+        self.fail = fail
+
+    async def evaluate(self, state: JsonValue, questions: Mapping[str, Question]) -> Evaluation:
+        if "operation" in questions:
+            return await super().evaluate(state, questions)
+        self.requests.append(questions)
+        if self.fail:
+            raise JevInputTooLarge("max_tokens_exceeded")
+        answers: dict[str, Answer] = {
+            key: NoulAnswer(probability=0.9 if any(f'"{label}"' in str(q) for label in self.relevant) else 0.1)
+            for key, q in questions.items()
+        }
+        return Evaluation(model="test", answers=answers, input_tokens=10, cost=FREE)
+
+
+def _dense(count: int) -> tuple[Control, ...]:
+    return tuple(button(i) for i in range(count))
+
+
+def _offered(jev: ScriptedJev) -> set[str]:
+    return set(jev.requests[-1]["click_target"].criteria)  # ty: ignore[unresolved-attribute]
+
+
+async def test_a_dense_page_offers_the_relevant_control_past_the_document_order_cut() -> None:
+    # The target sits after every control a document-order cut keeps, as a result below a long header does.
+    config = Config(observation=ObservationLimits(max_offered_controls=10))
+    jev = RelevanceJev({"operation": "click", "click_target": "b30"}, {"Button 30"})
+    decision = await decide(jev, observation(_dense(40)), context(), config)
+    assert decision.reduction is Reduction.RELEVANCE
+    assert decision.target is not None and decision.target.id == "b30"
+    assert decision.offered_controls == 10
+    assert len(decision.cost) == 2  # the relevance pass is on the step's bill
+
+
+async def test_protected_controls_skip_the_filter_and_survive_it() -> None:
+    config = Config(observation=ObservationLimits(max_offered_controls=5))
+    filled = button(35).model_copy(update={"label": "Destination", "value": "Paris"})
+    blocking = button(36).model_copy(update={"blocking": True})
+    jev = RelevanceJev({"operation": "click"}, set())
+    await decide(jev, observation((*_dense(35), filled, blocking)), context(), config)
+    assert {"b35", "b36"} <= _offered(jev)
+    assert not any("Destination" in str(q) or "Button 36" in str(q) for q in jev.requests[0].values())
+
+
+async def test_unset_options_do_not_crowd_out_the_button_that_applies_them() -> None:
+    config = Config(observation=ObservationLimits(max_offered_controls=10))
+    options = tuple(button(i).model_copy(update={"role": "checkbox", "checked": False}) for i in range(40))
+    apply = button(40).model_copy(update={"label": "Apply filters"})
+    jev = RelevanceJev({"operation": "click", "click_target": "b40"}, {"Apply filters"})
+    decision = await decide(jev, observation((*options, apply)), context(), config)
+    assert decision.target is not None and decision.target.id == "b40"
+
+
+async def test_a_failed_relevance_pass_falls_back_to_document_order() -> None:
+    config = Config(observation=ObservationLimits(max_offered_controls=10))
+    jev = RelevanceJev({"operation": "click"}, {"Button 30"}, fail=True)
+    decision = await decide(jev, observation(_dense(40)), context(), config)
+    assert decision.reduction is Reduction.NONE
+    assert _offered(jev) == {f"b{i}" for i in range(10)}
+
+
+async def test_a_relevance_pass_over_budget_sends_nothing() -> None:
+    from fastbrowse.models import Limits
+    from fastbrowse.telemetry import BudgetExceeded, Ledger
+
+    # A small request budget splits the pass into more batches than the calls left.
+    config = Config(
+        observation=ObservationLimits(max_offered_controls=10),
+        tokens=TokenBudget(state_plus_all_questions=600),
+    )
+    jev = RelevanceJev({"operation": "click"}, set())
+    with pytest.raises(BudgetExceeded):
+        await decide(jev, observation(_dense(40)), context(), config, ledger=Ledger(Limits(max_jev_calls=2)))
+    assert jev.requests == []
+
+
+async def test_a_page_under_the_limit_costs_no_relevance_pass() -> None:
+    jev = RelevanceJev({"operation": "click"}, set())
+    await decide(jev, observation(_dense(20)), context(), Config())
+    assert len(jev.requests) == 1
