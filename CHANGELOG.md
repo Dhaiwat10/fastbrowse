@@ -11,6 +11,7 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **`fastbrowse --version`** prints the installed version, which bug reports now ask for.
 - **A field the task has no value for is skipped before it ends the run.** Most such fields are optional: Google
   Flights opens a "Where else?" box beside the origin, and a run that picked it stopped `needs_input` with
   nothing searched. The first time, recovery is told the task gives no value and chooses another step; a field

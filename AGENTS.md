@@ -9,7 +9,7 @@ controls it actually has, and [Jev](https://typesafe.ai), a choice model, picks 
 reads and writes prose. Deterministic code owns everything that must not be argued with: authorization gates,
 secret resolution, cost limits, and whether a run may call itself finished.
 
-Read [README.md](README.md) for the product, [docs/design.md](docs/design.md) for the browser layer,
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for what a PR needs, [README.md](README.md) for the product, [docs/design.md](docs/design.md) for the browser layer,
 [docs/evals.md](docs/evals.md) for how it is measured, and [docs/jev.md](docs/jev.md) for every Jev
 assumption checked against Typesafe's documentation.
 
@@ -28,7 +28,7 @@ uv run ruff check . && uv run ruff format --check .
 uv run ty check                                     # ty, not pyright
 uv run python scripts/changelog.py --check "$(uv version --short)"
 uv run python scripts/no_slop.py
-uv run vale sync && uv run vale README.md CHANGELOG.md AGENTS.md docs src scripts tests
+uv run vale sync && uv run vale README.md CHANGELOG.md AGENTS.md CONTRIBUTING.md docs src scripts tests
 uv run pytest -q
 ```
 

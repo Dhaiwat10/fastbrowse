@@ -40,7 +40,7 @@ jobs:
       - run: uv run python scripts/changelog.py --check "$(uv version --short)"
       - run: uv run python scripts/no_slop.py
       - run: uv run vale sync
-      - run: uv run vale README.md CHANGELOG.md AGENTS.md docs src scripts tests
+      - run: uv run vale README.md CHANGELOG.md AGENTS.md CONTRIBUTING.md docs src scripts tests
       - run: uv run pytest -q
 
   # `check` is the required status check, so its name must not move when the matrix gains a version.
