@@ -55,7 +55,6 @@ from fastbrowse.page import (
     Observation,
     Page,
     pager_link,
-    pages_forward,
 )
 from fastbrowse.planner import Plan, Requirement, RequirementKind, make_plan
 from fastbrowse.policy import (
@@ -424,7 +423,7 @@ class Agent:
             if await self._read_before_interaction(state, observation, decision, decided_by):
                 continue
             pager = (
-                decision.operation is Operation.CLICK and decision.target is not None and pages_forward(decision.target)
+                decision.operation is Operation.CLICK and decision.target is not None and pager_link(decision.target)
             )
             # Only a pager waits for the plan: the clicks that set a search up run while it is still being written.
             plan = await state.await_plan() if pager else state.ready_plan
