@@ -64,6 +64,9 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   answer's claim that version 0.1.0 shipped that day still has the version in its citation.
   A batched Jev pass cut short by the time limit now keeps the cost of the requests that had already answered,
   and one the call limit cannot cover counts none of its calls.
+- **`stretch-dev` and `stretch-heldout` eval suites.** `dev` and `heldout` now pass almost every run, so these
+  harder tasks (a multi-step form with a correction, a date relative to today, a list aggregated across pages, a
+  filter applied and partly undone) are what show whether an agent change helps.
 - **Every step is credited to Jev or the LLM, never to "code".** A step code dispatches carries out a model's
   choice, and is now recorded as that model's: the next page of a list is the reader's, since the reader asked for
   the rest of the list, and the read taken before an interaction is Jev's, since Jev judged the page to be

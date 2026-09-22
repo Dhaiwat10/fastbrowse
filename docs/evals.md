@@ -115,6 +115,21 @@ score is no longer a clean before-and-after.
 
 **Why not a public benchmark.** Online-Mind2Web (live sites) and BU Bench are graded by an LLM judge, WebVoyager's answers have drifted with the sites, and WebArena-Verified is deterministic but needs its self-hosted sites. None covers a password manager or a confirmation stop. This suite trades breadth for grades that cannot be argued with; see [External benchmarks](#external-benchmarks) to compare on the others.
 
+## Stretch tasks
+
+`dev` and `heldout` now pass almost every run, so they can no longer show whether a change helped.
+`stretch-dev` and `stretch-heldout` are a harder split, paired by skill in the same way: a multi-step form with a
+correction, a date relative to today, a list that has to be aggregated across pages, and a filter that is
+applied and then partly undone.
+
+```sh
+uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse --suite stretch-dev stretch-heldout --repeat 3
+```
+
+Each task was kept only if the agent at the time failed it at least once in three runs, for a reason other than
+the site or the network; a candidate that passed every run was dropped. Date truth is computed when the attempt
+runs, and form and date tasks are graded on the controls of the page the run ended on.
+
 ## Results
 
 Both suites write per-run `would_fire` counts for shadow tripwires. The live summary reports passing runs

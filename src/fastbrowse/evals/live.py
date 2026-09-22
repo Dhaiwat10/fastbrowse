@@ -50,7 +50,7 @@ from fastbrowse.browser.recording import Recording
 from fastbrowse.clients.environment import load_settings
 from fastbrowse.clients.validation import RETRYABLE_STATUS, TRANSIENT_TRANSPORT
 from fastbrowse.evals.live_tasks import TASKS, Category, LiveTask, Outcome
-from fastbrowse.evals.more_tasks import DEV, HELDOUT
+from fastbrowse.evals.more_tasks import DEV, HELDOUT, STRETCH_DEV, STRETCH_HELDOUT
 from fastbrowse.models import Authorization, BrowserEvent, Limits, RunResult, Status, StepEvent, Unavailable
 from fastbrowse.page import Observation
 from fastbrowse.run import run_task
@@ -548,8 +548,14 @@ async def _fast_report(
     )
 
 
-SUITES: dict[str, tuple[LiveTask, ...]] = {"core": TASKS, "dev": DEV, "heldout": HELDOUT}
-"""`core` is the published suite; `dev` and `heldout` are the split in `more_tasks`."""
+SUITES: dict[str, tuple[LiveTask, ...]] = {
+    "core": TASKS,
+    "dev": DEV,
+    "heldout": HELDOUT,
+    "stretch-dev": STRETCH_DEV,
+    "stretch-heldout": STRETCH_HELDOUT,
+}
+"""`core` is the published suite; the others are the splits in `more_tasks`."""
 
 
 def summarize(rows: list[EvalRow], arms: list[str]) -> None:

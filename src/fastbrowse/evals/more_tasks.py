@@ -7,10 +7,17 @@ pages, server-rendered forms) on sites the agent was never tuned against. Agent 
 measure of whether a round improved the agent or only its dev score. Each pair of tasks across the split
 exercises the same skill.
 
-Truth is fixed by a practice site, or fetched from a live API at run time, as in `live_tasks`.
+`STRETCH_DEV` and `STRETCH_HELDOUT` are a harder split, kept because the two above now pass almost every run.
+Each stretch task failed at least once in three runs of the unmodified agent, for a reason other than
+infrastructure, when it was chosen; a candidate that passed every run was dropped. They cover a multi-step form
+with a correction, a date relative to today, a list aggregated across pages, and a filter changed and then undone.
+
+Truth is fixed by a practice site, fetched from a live API at run time as in `live_tasks`, or computed from the
+date an attempt runs on.
 """
 
 import re
+from datetime import date, timedelta
 from urllib.parse import unquote, urlparse
 
 import httpx
@@ -231,5 +238,148 @@ HELDOUT: tuple[LiveTask, ...] = (
         _fixed(None),
         _has("man of success", "man of value"),
         Category.LOOKUP,
+    ),
+)
+
+
+# The stretch split. Form and date tasks are graded on the controls of the page the run ended on.
+
+
+def _controls(outcome: Outcome) -> dict[str, str | None]:
+    return {label.strip(): value for label, value in outcome.controls or ()}
+
+
+async def _next_monday_range(_: httpx.AsyncClient) -> object:
+    """Strictly after today: a run that lands on a Monday books the one seven days out, not the same day."""
+    today = date.today()
+    days_ahead = (0 - today.weekday()) % 7 or 7
+    start = today + timedelta(days=days_ahead)
+    end = start + timedelta(days=9)
+    return {"start": start.isoformat(), "end": end.isoformat(), "nights": "9"}
+
+
+def _date_range_check(outcome: Outcome, truth: object) -> str | None:
+    assert isinstance(truth, dict)
+    values = _controls(outcome)
+    if not values:
+        return _has(f"{truth['nights']} day")(outcome, truth)
+    wrong = [
+        f"{label}={values.get(label)!r}, expected {truth[key]!r}"
+        for label, key in (("Start Date", "start"), ("End Date", "end"))
+        if values.get(label) != truth[key]
+    ]
+    return "; ".join(wrong) or None
+
+
+async def _next_month_first_friday(_: httpx.AsyncClient) -> object:
+    today = date.today()
+    first_of_next = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+    friday = first_of_next + timedelta(days=(4 - first_of_next.weekday()) % 7)
+    return {
+        "mdy": f"{friday.month:02d}/{friday.day:02d}/{friday.year}",
+        "day_name": "Friday",
+        "month_name": f"{friday:%B}",
+        "day": str(friday.day),
+    }
+
+
+def _first_friday_check(outcome: Outcome, truth: object) -> str | None:
+    assert isinstance(truth, dict)
+    picked = _controls(outcome).get("Click to pick a date:")
+    if picked is not None:
+        return None if picked == truth["mdy"] else f"date input = {picked!r}, expected {truth['mdy']!r}"
+    return _has(truth["day_name"], truth["month_name"], truth["day"])(outcome, truth)
+
+
+STRETCH_DEV: tuple[LiveTask, ...] = (
+    LiveTask(
+        "stretch-wizard-review",
+        "https://qapracticehub.com/#practice-lab",
+        "In the Automation Practice Lab section, fill out the Multi-Step Wizard: Full Name 'Ada Lovelace', "
+        "Email 'ada.lovelace@example.com', City 'London', ZIP Code 'SW1A 1AA'. Review your details, submit, "
+        "and tell me what the page says.",
+        _fixed(None),
+        _has("Wizard submitted successfully"),
+        Category.CHECKOUT,
+        authorize=True,
+    ),
+    LiveTask(
+        "stretch-date-range-monday",
+        "https://testautomationpractice.blogspot.com/",
+        "Find Date Picker 3, the date range picker. Book a stay starting the next Monday that is strictly "
+        "after today, for nine nights, then submit and tell me what the page reports the length of the stay "
+        "as.",
+        _next_monday_range,
+        _date_range_check,
+        Category.WIDGET,
+    ),
+    LiveTask(
+        "stretch-books-nonfiction-five-star",
+        "https://books.toscrape.com/catalogue/category/books/nonfiction_13/index.html",
+        "Across every page of the Nonfiction category, which three five-star-rated books are the cheapest, "
+        "and what does each cost?",
+        _fixed(None),
+        _has(
+            "Agnostic: A Spirited Manifesto",
+            "12.51",
+            "Disrupted: My Misadventure in the Start-Up Bubble",
+            "15.28",
+            "Mother, Can You Not?",
+            "16.89",
+        ),
+        Category.LOOKUP,
+    ),
+    LiveTask(
+        "stretch-bstack-apple-google",
+        "https://bstackdemo.com/",
+        "Filter the product list to Apple and Google together. Then remove the Apple filter, so only Google "
+        "remains. Sort by price lowest to highest, and tell me the two cheapest Google phones and their "
+        "prices.",
+        _fixed(None),
+        _has("Pixel 2", "399", "Pixel 3", "599"),
+        Category.WIDGET,
+    ),
+)
+
+STRETCH_HELDOUT: tuple[LiveTask, ...] = (
+    LiveTask(
+        "stretch-wizard-correction",
+        "https://lab.hakdogan.com/practice/form-multi-step/",
+        "In the Live Interactive Form widget, fill First Name 'Priya Sharma', Email "
+        "'priya.sharma@example.com', Address '221B Baker Street', City 'Manchester', Language 'Turkish', and "
+        "check the QA newsletter box. Reach the Review step, then go back and correct the first name to "
+        "'Priya Sharman' before continuing through Submit. Tell me what the confirmation says.",
+        _fixed(None),
+        _has("Priya Sharman", "submitted successfully"),
+        Category.CHECKOUT,
+        authorize=True,
+    ),
+    LiveTask(
+        "stretch-calendar-first-friday",
+        "https://practice.softwaretestingmentor.com/calendar/",
+        "Using the jQuery UI Datepicker (the calendar popup, not the native date input), navigate to next "
+        "month and select its first Friday. Tell me the date, day, and month it shows.",
+        _next_month_first_friday,
+        _first_friday_check,
+        Category.WIDGET,
+    ),
+    LiveTask(
+        "stretch-quotes-top-authors",
+        "https://quotes.toscrape.com/",
+        "Across every page of this site, which three authors have the most quotes attributed to them, and "
+        "how many quotes does each have?",
+        _fixed(None),
+        _has("Albert Einstein", "10", "J.K. Rowling", "9", "Marilyn Monroe", "7"),
+        Category.LOOKUP,
+    ),
+    LiveTask(
+        "stretch-bstack-apple-samsung",
+        "https://bstackdemo.com/",
+        "Filter the product list to Apple and Samsung together, then remove the Apple filter so only Samsung "
+        "remains. Sort by price highest to lowest, and tell me the three most expensive phones and their "
+        "prices.",
+        _fixed(None),
+        _has("Galaxy S20 Ultra", "1399", "Galaxy Note 20 Ultra", "1299", "Galaxy S20+", "1199"),
+        Category.WIDGET,
     ),
 )
