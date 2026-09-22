@@ -19,6 +19,7 @@ import logging
 import os
 import shutil
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -78,6 +79,7 @@ def _secrets(
 
 def _parse(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="fastbrowse", description="Run one browser task.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {version('fastbrowse')}")
     parser.add_argument("task")
     parser.add_argument(
         "--start", default=None, help="URL to open before the task starts; worked out from the task if omitted"

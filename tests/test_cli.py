@@ -59,3 +59,11 @@ def test_a_credential_without_a_start_page_is_refused_rather_than_dropped(
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "error" and "--start" in result["error"]
     assert "--start" in str(exit_.value.code)
+
+
+def test_version_prints_the_installed_version_without_a_task(capsys: pytest.CaptureFixture[str]) -> None:
+    """Bug reports ask for it, and a task is a required argument everywhere else."""
+    with pytest.raises(SystemExit) as exited:
+        cli._parse(["--version"])
+    assert exited.value.code == 0
+    assert capsys.readouterr().out.startswith("fastbrowse 0.")
