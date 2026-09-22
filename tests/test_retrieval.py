@@ -1065,6 +1065,74 @@ async def test_a_record_naming_blocks_the_page_did_not_offer_is_counted_not_cred
     assert [fact.evidence.quote for fact in notes.facts if fact.evidence is not None] == ["Sharp Objects 47.82"]
 
 
+async def test_a_page_that_states_its_own_order_settles_a_superlative_on_the_leading_record() -> None:
+    """Three reads of a filtered results page returned nothing while the cheapest row was on screen, because
+    the reader saw the list go on and never assigned the requirement. A site that sorts by the quantity being
+    compared has already answered: the rest of the list cannot beat the leading row."""
+    from tests.test_policy import ScriptedJev
+
+    page = capture(
+        (BlockKind.PARAGRAPH, "Sorted by price, lowest first"),
+        (BlockKind.PARAGRAPH, "From 1061 US dollars. Nonstop flight"),
+    )
+    requirement = Requirement(id="r1", text="The cheapest nonstop fare", kind=RequirementKind.INFORMATION)
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {
+                        "cite": {"first": "s1", "last": "s1"},
+                        "orders_list": {"first": "s0", "last": "s0"},
+                        "text": "The cheapest nonstop fare is 1061 US dollars.",
+                        "requirement_id": "r1",
+                    }
+                ],
+                "answered": True,
+            }
+        ]
+    )
+    notes = Notes()
+    outcome = await read(
+        llm, page, "Cheapest nonstop?", ["r1"], notes, jev=ScriptedJev({"r1": "none"}), requirements=[requirement]
+    )
+    assert outcome.continues == ()
+    assert notes.evidenced("r1")
+    # The page's own statement of its order is kept, so the claim rests on it and the check can judge it.
+    assert any(f.evidence is not None and f.evidence.quote == "Sorted by price, lowest first" for f in notes.facts)
+
+
+async def test_an_order_the_page_does_not_state_cannot_settle_a_superlative() -> None:
+    from tests.test_policy import ScriptedJev
+
+    page = capture((BlockKind.PARAGRAPH, "From 1061 US dollars. Nonstop flight"))
+    requirement = Requirement(id="r1", text="The cheapest nonstop fare", kind=RequirementKind.INFORMATION)
+    llm = ScriptedLLM(
+        [
+            {
+                "claims": [
+                    {
+                        "cite": {"first": "s0", "last": "s0"},
+                        "orders_list": {"first": "s7", "last": "s7"},
+                        "text": "The cheapest nonstop fare is 1061 US dollars.",
+                        "requirement_id": "r1",
+                    }
+                ],
+                "answered": False,
+                "continues": [
+                    {"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}], "expands": "View more"}
+                ],
+            }
+        ]
+    )
+    notes = Notes()
+    outcome = await read(
+        llm, page, "Cheapest nonstop?", ["r1"], notes, jev=ScriptedJev({"r1": "none"}), requirements=[requirement]
+    )
+    assert outcome.continues == ("r1",)
+    assert not notes.evidenced("r1")
+    assert outcome.expands == "View more"
+
+
 async def test_a_read_that_settles_a_list_carries_no_records() -> None:
     """Records are the price of a page that cannot conclude. A read that concludes pays nothing for them."""
     from tests.test_policy import ScriptedJev

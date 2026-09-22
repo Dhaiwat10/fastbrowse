@@ -1236,6 +1236,56 @@ async def test_a_list_goes_on_to_jev_with_a_hint_when_code_finds_no_next_page() 
     assert state.hint is not None
 
 
+async def test_the_control_the_reader_names_opens_the_rest_of_the_list() -> None:
+    """A reader that can name the control showing the rest gives the run a way forward, where a hint alone
+    sent Flights runs round their recovery budget looking for View more flights."""
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="The cheapest fare", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    here = _at("https://example.test/flights/", _button("View more flights"))
+    reads: list[JsonValue] = [
+        {
+            "claims": [],
+            "answered": False,
+            "continues": [
+                {
+                    "requirement_id": "r1",
+                    "records": [{"first": "s0", "last": "s0"}],
+                    "expands": "View more flights",
+                }
+            ],
+        }
+    ]
+    agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "none"}), ScriptedLLM(reads))
+    await agent._read(state, capture((BlockKind.PARAGRAPH, "From 1061 US dollars")), here)
+    assert state.directed == (Operation.CLICK, here.controls[0].id)
+    assert not state.next_page
+
+
+async def test_a_control_the_reader_invents_directs_nothing() -> None:
+    state = await run_state()
+    state.ready_plan = Plan(
+        requirements=(Requirement(id="r1", text="The cheapest fare", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    here = _at("https://example.test/flights/", _button("Filters"))
+    reads: list[JsonValue] = [
+        {
+            "claims": [],
+            "answered": False,
+            "continues": [
+                {"requirement_id": "r1", "records": [{"first": "s0", "last": "s0"}], "expands": "Show all 240"}
+            ],
+        }
+    ]
+    agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "none"}), ScriptedLLM(reads))
+    await agent._read(state, capture((BlockKind.PARAGRAPH, "From 1061 US dollars")), here)
+    assert state.directed is None
+    assert state.hint is not None
+
+
 async def test_the_pages_code_opens_are_capped() -> None:
     """Past the cap the reader's continuation goes to Jev with a hint, rather than another silent hop."""
     state = await run_state()

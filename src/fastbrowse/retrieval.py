@@ -267,6 +267,16 @@ class _ReadClaim(Frozen):
             "claim:N for an earlier claim in this response's claims array, indexed from zero."
         ),
     )
+    orders_list: _Cite | None = Field(
+        default=None,
+        description=(
+            "For a superlative the page itself settles: the source blocks where the page states how the list is "
+            "ordered or filtered, by the very quantity being compared (a sort control reading 'price, low to "
+            "high', a heading naming the filter in force). Only when the page says it; never inferred from the "
+            "order the records happen to appear in. With this, the leading record answers even though the list "
+            "goes on."
+        ),
+    )
     text: str
     requirement_id: str | None = None
 
@@ -339,6 +349,13 @@ class _Continuation(Frozen):
             "on further pages or behind a load-more control, and the collected evidence does not cover the rest."
         )
     )
+    expands: str | None = Field(
+        default=None,
+        description=(
+            "The exact label of the control on this page that shows the rest of the list, when one is offered. "
+            "Null when nothing on the page expands it."
+        ),
+    )
     records: tuple[_Cite, ...] = Field(
         min_length=1,
         max_length=_MAX_CONTINUING_RECORDS,
@@ -366,6 +383,9 @@ class ReadOutcome(Frozen):
     uncovered: int = 0
     """Records a continuation named that no run of offered blocks resolved, so this page's comparison is
     incomplete in the notes even though the reader believed it had listed them."""
+    expands: str | None = None
+    """The label the reader gave for the control that shows the rest of the list, so the run can open it
+    instead of being told only that the list goes on."""
 
 
 def _notes_room(tokens: TokenBudget, messages: Sequence[Message], response: type[Frozen]) -> int:
@@ -425,6 +445,8 @@ async def read(
     found: list[Fact] = []
     rejected = 0
     uncovered = 0
+    ordered: set[str] = set()
+    expands: str | None = None
     wanted = [
         r
         for r in requirements
@@ -476,6 +498,10 @@ async def read(
                     "on past this capture and the collected evidence does not cover the rest, add an entry to "
                     "continues naming the requirement, and give in its records every record this capture adds "
                     "to that comparison, each as the blocks holding it and the value compared. "
+                    "Name in expands the control on this page that shows the rest, when one is offered. "
+                    "If instead the page states that the list is ordered or filtered by the very quantity "
+                    "being compared, the leading record answers: give the claim its requirement id and cite "
+                    "that statement in orders_list rather than listing the requirement in continues. "
                     "Once the collected evidence and this capture cover every page, the "
                     "conclusion takes the requirement id and draws on each record once. A task that bounds the "
                     "pages it covers ends at the last page it names.\n\n"
@@ -514,12 +540,30 @@ async def read(
                 continue
             references[f"claim:{index}"] = fact_id(fact)
             requirement_id = claim.requirement_id if claim.requirement_id in requirement_ids else None
+            # A site that sorts or filters its own list by the quantity compared settles the superlative on its
+            # leading record: the rest of the list cannot beat it. The page has to say so, in its own text, and
+            # that statement is kept as a fact so the claim rests on it and the claim check can judge it.
+            if requirement_id is not None and claim.orders_list is not None:
+                ordering = _cited(capture, part, claim.orders_list)
+                if ordering is not None:
+                    stated = Fact(
+                        requirement_id=None,
+                        text=ordering.quote,
+                        evidence=ordering,
+                        basis=(),
+                        reader=FactReader.LLM,
+                    )
+                    so_far.add(stated)
+                    found.append(stated)
+                    fact = fact.model_copy(update={"basis": (*fact.basis, fact_id(stated))})
+                    ordered.add(requirement_id)
             found.append(fact.model_copy(update={"requirement_id": requirement_id}))
             accepted += 1
         # The records a continuing page compared, kept as facts so a later page's winner can show what it beat.
         # Code copies each quote from the blocks named, exactly as it does for a claim, so a record is the
         # page's own text and never the reader's retyping of it.
         for continuation in carried:
+            expands = expands or continuation.expands
             for cite in continuation.records:
                 evidence = _cited(capture, part, cite)
                 if evidence is None:
@@ -546,6 +590,9 @@ async def read(
     # cheapest on page one of two is only the cheapest so far. The fact is kept for the comparison; the
     # requirement stays open. The notes take the claims here rather than per chunk, which is also why the
     # collected evidence above stays separate from this read's final requirement assignments.
+    # A requirement the page settled by stating its own order is not reopened by the list going on.
+    for key in ordered:
+        continues.pop(key, None)
     for fact in found:
         if fact.requirement_id in continues:
             fact = fact.model_copy(update={"requirement_id": None})
@@ -559,6 +606,7 @@ async def read(
         cost_lines=tuple(costs),
         continues=tuple(continues),
         uncovered=uncovered,
+        expands=expands if continues else None,
     )
 
 

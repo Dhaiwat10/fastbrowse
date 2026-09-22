@@ -11,6 +11,13 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A reader can settle a superlative the site has already ordered, or name the control that shows the rest.**
+  Three reads of a filtered results page returned nothing while the cheapest row was on screen: the reader saw
+  the list go on and never assigned the requirement, so the done check refused and the run stuck. A page that
+  states it is ordered or filtered by the quantity being compared now settles the superlative on its leading
+  record, citing that statement so the claim rests on it. Where the list really does go on, the reader names
+  the control that shows the rest, and the run opens it when the page offers that label.
+
 - **A page that cannot settle a list now has to say what it compared.** The reader's prompt asked a continuing
   page to quote every record it compared, and about half the time it quoted only the leading one, so the
   winner on a later page could not show the values it beat and the claim check scored it unsupported. The

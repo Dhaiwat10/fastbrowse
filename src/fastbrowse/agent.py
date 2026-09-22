@@ -1448,11 +1448,19 @@ class Agent:
         )
         spent(progressed)
         if observation is not None:
-            self._follow_pages(state, continues, following)
+            self._follow_pages(state, continues, following, observation, outcome.expands)
         return progressed, False
 
-    def _follow_pages(self, state: _RunState, continues: Sequence[str], following: Control | None) -> None:
-        """Arrange for the rest of a list the reader says it needs: the next page by code, or a word to Jev."""
+    def _follow_pages(
+        self,
+        state: _RunState,
+        continues: Sequence[str],
+        following: Control | None,
+        observation: Observation | None = None,
+        expands: str | None = None,
+    ) -> None:
+        """Arrange for the rest of a list the reader says it needs: the next page by code, the control the
+        reader named, or a word to Jev."""
         state.continuing = set(continues)
         if not continues:
             return
@@ -1460,6 +1468,13 @@ class Agent:
             # Deciding each hop costs a Jev call to pick a link code has already found, on every page of the list.
             state.next_page = True
             return
+        # The reader saw which control shows the rest. Matched against the page's own labels rather than
+        # trusted, so a label the reader invented directs nothing and the hint below still applies.
+        if expands is not None and observation is not None:
+            named = [c for c in observation.controls if c.label == expands and Operation.CLICK in c.operations]
+            if len(named) == 1:
+                state.directed = (Operation.CLICK, named[0].id)
+                return
         # "Otherwise finish" was a dead end: the reader withholds a list it has not seen the end of, so the done check
         # refused every such finish, and Flights runs spent their recoveries finding "View more flights" instead.
         state.hint = (
