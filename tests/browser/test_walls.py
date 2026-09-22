@@ -7,7 +7,8 @@ from pydantic import JsonValue
 
 from fastbrowse import agent as agent_module
 from fastbrowse.agent import Agent
-from fastbrowse.browser import CdpPage
+from fastbrowse.browser import BrowserSession, CdpPage
+from fastbrowse.config import Config, ObservationLimits
 from fastbrowse.jev import Answer, Evaluation, NoulAnswer, NoulQuestion, Question
 from fastbrowse.models import Status
 from tests.browser.test_browser import observe_until
@@ -52,8 +53,10 @@ async def test_a_sign_in_form_is_still_a_sign_in(page: CdpPage, main_site: str) 
 
 
 async def test_the_pager_and_load_more_at_the_foot_of_a_long_listing_are_still_offered(
-    page: CdpPage, main_site: str
+    browser_session: BrowserSession, main_site: str
 ) -> None:
+    # The listing is sized against a 40-control offscreen cap; the default pool now holds all of it.
+    page = CdpPage(browser_session, Config(observation=ObservationLimits(max_offscreen_controls=40)))
     await page.navigate(f"{main_site}/long-list.html")
     observation = await observe_until(page, "Book 1")
     labels = [control.label for control in observation.controls]
