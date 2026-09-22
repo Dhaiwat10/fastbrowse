@@ -28,14 +28,17 @@ class Ledger:
     jev_calls: int = 0
     llm_calls: int = 0
 
-    def reserve(self, component: CostComponent, estimate_dollars: float = 0.0) -> None:
-        """Raise before a call that would break a limit; `record` the actual line afterwards."""
+    def reserve(self, component: CostComponent, estimate_dollars: float = 0.0, calls: int = 1) -> None:
+        """Raise before calls that would break a limit; `record` the actual lines afterwards.
+
+        Calls sent together are reserved together, so a limit reached partway counts none of them.
+        """
         match component:
             case CostComponent.JEV:
-                if self.jev_calls >= self.limits.max_jev_calls:
+                if self.jev_calls + calls > self.limits.max_jev_calls:
                     raise BudgetExceeded(f"Jev call limit {self.limits.max_jev_calls} reached")
             case CostComponent.LLM:
-                if self.llm_calls >= self.limits.max_llm_calls:
+                if self.llm_calls + calls > self.limits.max_llm_calls:
                     raise BudgetExceeded(f"LLM call limit {self.limits.max_llm_calls} reached")
             case CostComponent.BROWSER | CostComponent.PROXY:
                 pass
@@ -44,9 +47,9 @@ class Ledger:
             raise BudgetExceeded(f"spend limit ${_dollars(self.limits.max_dollars)} reached")
         # Failed requests still consume a call, including retries after an input-size rejection.
         if component is CostComponent.JEV:
-            self.jev_calls += 1
+            self.jev_calls += calls
         elif component is CostComponent.LLM:
-            self.llm_calls += 1
+            self.llm_calls += calls
 
     def check(self, extra_dollars: float = 0.0) -> None:
         limits = self.limits

@@ -22,6 +22,16 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   blocking fields and controls holding a value or selection are always kept, and a control Jev did not answer
   for is kept rather than dropped. A dense page costs one more Jev round trip; a page under the limit costs
   nothing more.
+- **Jev reads short facts on long pages too.** Jev's quick read of a fact, such as a version or a date, gave
+  up on any page with more than 253 quotable spans or more text than its input allows, which was six of ten real
+  pages measured, from Wikipedia articles to GitHub releases, and the LLM reader then read the page a chunk at a
+  time. Jev now first judges which passages bear on the requirements, one batched pass, and picks the fact from
+  those. A requirement Jev calls absent from a narrowed page still goes to the LLM reader, since the evidence may
+  sit in a passage it set aside.
+  A field Jev picks from a listing record, such as a release date, now quotes the record up to it, so the
+  answer's claim that version 0.1.0 shipped that day still has the version in its citation.
+  A batched Jev pass cut short by the time limit now keeps the cost of the requests that had already answered,
+  and one the call limit cannot cover counts none of its calls.
 - **Every step is credited to Jev or the LLM, never to "code".** A step code dispatches carries out a model's
   choice, and is now recorded as that model's: the next page of a list is the reader's, since the reader asked for
   the rest of the list, and the read taken before an interaction is Jev's, since Jev judged the page to be

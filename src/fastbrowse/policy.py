@@ -6,7 +6,6 @@ Choices beyond Jev's option limit use a group choice followed by a separate elem
 A relevance filter shortlists dense pages before the action choice so late controls can still be offered.
 """
 
-import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -15,14 +14,13 @@ from typing import assert_never
 
 from pydantic import JsonValue
 
+from fastbrowse.batches import evaluate_batches
 from fastbrowse.config import Config
 from fastbrowse.jev import (
-    JEV_DOLLARS_PER_INPUT_TOKEN,
     ChoiceAnswer,
     ChoiceQuestion,
     Evaluation,
     JevClient,
-    JevError,
     JevInputTooLarge,
     NoulAnswer,
     NoulQuestion,
@@ -243,64 +241,18 @@ async def _shortlist(
         "recent_actions": [entry.model_dump(mode="json", exclude_none=True) for entry in context.history],
         "page": {"url": observation.url, "title": observation.title},
     }
-    ratio = config.tokens.chars_per_token
-    state_size = len(json.dumps(state)) / ratio
-    batches: list[dict[str, Question]] = []
-    batch: dict[str, Question] = {}
-    batch_size = 0.0
-    for i in candidates:
-        # The rubric sits once in the state; repeating it in every question would pack a third as many per request.
-        question = NoulQuestion(instructions=f"Is this element relevant? {json.dumps(_relevance_element(controls[i]))}")
-        size = len(question.model_dump_json()) / ratio
-        if (
-            state_size + size > config.tokens.state_plus_largest_question
-            or state_size + size > config.tokens.state_plus_all_questions
-        ):
-            # An oversized element cannot be scored safely, so leave it unscored rather than drop it.
-            continue
-        if batch and state_size + batch_size + size > config.tokens.state_plus_all_questions:
-            batches.append(batch)
-            batch = {}
-            batch_size = 0.0
-        batch[f"r{i}"] = question
-        batch_size += size
-    if batch:
-        batches.append(batch)
-
-    # Every batch is reserved, and the whole pass priced against the spend limit, before any is sent: the batches
-    # run together, so a limit checked per batch would pass them all and learn of the overrun only once billed.
-    if ledger is not None:
-        questions_size = sum(len(q.model_dump_json()) for b in batches for q in b.values()) / ratio
-        ledger.check((len(batches) * state_size + questions_size) * JEV_DOLLARS_PER_INPUT_TOKEN)
-        for _ in batches:
-            ledger.reserve(CostComponent.JEV)
-
-    async def evaluate(questions: Mapping[str, Question]) -> Evaluation | None:
-        try:
-            evaluation = await jev.evaluate(state, questions)
-        except JevError:
-            return None
-        return evaluation
-
-    evaluations = await asyncio.gather(*(evaluate(batch) for batch in batches))
-    answered = [evaluation for evaluation in evaluations if evaluation is not None]
-    if ledger is not None and answered:
-        # Recorded once every batch has returned, so a spend limit it breaks leaves no request still running.
-        ledger.record(*(evaluation.cost for evaluation in answered))
-    if not answered:
+    # The rubric sits once in the state; repeating it in every question would pack a third as many per request.
+    questions: dict[str, Question] = {
+        f"r{i}": NoulQuestion(instructions=f"Is this element relevant? {json.dumps(_relevance_element(controls[i]))}")
+        for i in candidates
+    }
+    # An element too large to score is left unscored rather than dropped.
+    answered = await evaluate_batches(jev, state, questions, tokens=config.tokens, ledger=ledger)
+    if answered is None:
         return None
-    cost: list[CostLine] = []
-    tokens = 0
-    scores: dict[int, float] = {}
-    for batch, evaluation in zip(batches, evaluations, strict=True):
-        if evaluation is None:
-            continue
-        cost.append(evaluation.cost)
-        tokens += evaluation.input_tokens
-        for key in batch:
-            answer = evaluation.answers.get(key)
-            if isinstance(answer, NoulAnswer):
-                scores[int(key[1:])] = answer.probability
+    scores = {
+        int(key[1:]): answer.probability for key, answer in answered.answers.items() if isinstance(answer, NoulAnswer)
+    }
     # A failed answer says nothing about relevance, so keep unscored controls ahead of equally scored ones.
     ranked = sorted(candidates, key=lambda i: (-scores.get(i, 1.0), i in scores, i))
 
@@ -315,8 +267,8 @@ async def _shortlist(
             low = middle
         else:
             high = middle - 1
-    trace("shortlist", pool=len(controls), offered=len(protected) + low, scored=len(scores), requests=len(batches))
-    return kept(low), cost, tokens
+    trace("shortlist", pool=len(controls), offered=len(protected) + low, scored=len(scores), requests=answered.requests)
+    return kept(low), list(answered.cost), answered.input_tokens
 
 
 def _index_controls(controls: Sequence[Control]) -> dict[Operation, tuple[Control, ...]]:

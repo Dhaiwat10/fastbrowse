@@ -75,6 +75,10 @@ and where fastbrowse follows it:
   probabilities: a Choice ranks alternatives against each other, and its two-decimal probabilities leave all but
   a handful of 240 options tied at zero. The rubric sits once in the shared state, so each question carries only
   its control. Protected controls skip the check and an unanswered one is kept.
+  The short-fact read does the same when a page has more quotable spans than a Choice can offer or more
+  text than its input allows: one Noul per window of about 1,500 characters (**ours**), a longer block asked about
+  in pieces. Jev chooses only when every window was answered and every one at 0.6 or above (**ours**; Jev scores a passage it cannot place near 0.5) fits in the
+  choice; otherwise the LLM reader reads the whole page. An `absent` answer from a narrowed page is not trusted.
 - **Match state to the question.** Navigation uses the redacted viewport, controls and working notes;
   short-fact selection sees the full capture. Counts and comparisons go to the LLM reader.
 
