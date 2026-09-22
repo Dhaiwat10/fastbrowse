@@ -36,14 +36,14 @@ DEFAULT_LLM = "google/gemini-3.8-flash"
 FIELD_TEXT_LLM = "google/gemini-3.5-flash-lite"
 
 # Each of these fails visibly rather than into the answer: field text is typed and seen to work or not, a
-# shortcut is an address confined to the start origin, and the done check and VERIFY judge the task text
-# itself, so a requirement the plan drops is still caught. VERIFY only sees what Jev's done check doubted,
-# and on flash-lite it took 3.2s to 1.2s a call with no wrong accept in 17 live verdicts (docs/evals.md).
+# shortcut is an address confined to the start origin, and the done check judges the task text itself, so a
+# requirement the plan drops is still caught. VERIFY is the last word on what the done check doubted, so it
+# stays on the default: on flash-lite it passed a Google Flights search with no nonstop filter ten times in ten,
+# reading the "Nonstop" rows as the filter, where gemini-3.8-flash refused all ten and passed the filtered page.
 DEFAULT_MODELS = dict.fromkeys(LLMPurpose, DEFAULT_LLM) | {
     LLMPurpose.FIELD_TEXT: FIELD_TEXT_LLM,
     LLMPurpose.SHORTCUT: FIELD_TEXT_LLM,
     LLMPurpose.PLAN: FIELD_TEXT_LLM,
-    LLMPurpose.VERIFY: FIELD_TEXT_LLM,
 }
 
 # gemini-3.8-flash rejects disabled reasoning but accepts less of it: `low` took plan 4.6s to 3.2s and

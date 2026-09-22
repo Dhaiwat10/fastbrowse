@@ -156,8 +156,7 @@ uv run fastbrowse "Add a UGREEN USB-A to USB-C cable, 2m, to my cart." \
 ### Models
 
 The LLM defaults to `google/gemini-3.8-flash` at low reasoning effort, with
-`google/gemini-3.5-flash-lite` for planning, proposing a direct address, typing field text and the
-done check's verdict.
+`google/gemini-3.5-flash-lite` for planning, proposing a direct address and typing field text.
 Override with `FASTBROWSE_LLM_MODEL` (every purpose), `FASTBROWSE_LLM_MODEL_<PURPOSE>` (`PLAN`,
 `READ`, `FIELD_TEXT`, `SHORTCUT`, `RECOVER`, `COMPOSE`, `VERIFY`) and `FASTBROWSE_LLM_REASONING`
 (`low`, `medium`, `high`).
