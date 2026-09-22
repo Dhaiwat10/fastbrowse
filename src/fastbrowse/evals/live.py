@@ -60,7 +60,7 @@ from fastbrowse.safety import ScopedSecrets, origin_of
 from fastbrowse.telemetry import TRACE
 
 ARMS = ("fastbrowse", "jev-ultrafast", "browser-use")
-MAX_STEPS = 30
+MAX_STEPS = 50
 LIMITS = Limits(max_steps=MAX_STEPS)
 """No arm has a dollar or time cap: a cap one arm reaches measures the budget, not the arm, so every run ends
 when its agent does. fastbrowse and jev-ultrafast share a step limit; the Browser Use agent has none to set."""

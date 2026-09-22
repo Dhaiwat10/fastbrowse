@@ -11,6 +11,18 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A field the task has no value for is skipped before it ends the run.** Most such fields are optional: Google
+  Flights opens a "Where else?" box beside the origin, and a run that picked it stopped `needs_input` with
+  nothing searched. The first time, recovery is told the task gives no value and chooses another step; a field
+  it sends the run back to is a required one, and the run still stops `needs_input` rather than invent a value.
+- **A finished search is checked on the stronger model.** When Jev doubts a run is done, the verifier that has
+  the last word now runs on `google/gemini-3.8-flash` rather than flash-lite. On a Google Flights search with
+  every field right and no nonstop filter, flash-lite took the "Nonstop" rows for the filter and passed it ten
+  times in ten; the default model refused all ten and passed the filtered search every time. A doubted finish
+  costs about two seconds more.
+- **The evals allow 50 steps.** A fare search on Google Flights took up to 29 steps, one short of the old limit,
+  so a run that needed a recovery or two could run out of steps rather than fail on its merits.
+
 ## [0.5.2] - 2026-09-22
 
 - **A page is read before it is scrolled.** A read takes in the whole page, so scrolling one nobody has read only
