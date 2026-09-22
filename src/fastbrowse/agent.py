@@ -246,6 +246,10 @@ class _RunState:
     )
     """Each document's committed control values seen so far, which a setting put back to cannot renew recovery."""
     ready_plan: Plan | None = None
+    invented: set[str] = field(default_factory=set[str])
+    """Addresses this run built from the task rather than reached by clicking: an accepted shortcut, or a start
+    page worked out from the task. These are the ones that can land on a page of the right shape and the wrong
+    search, so the verifier is told which they were."""
     interacted: bool = False
     """An interaction has executed and changed the page since the last read, so what it did has not been
     observed. A done check made now would judge the page as it was before the change settled."""
@@ -341,13 +345,17 @@ class Agent:
                 # from a page it opened itself wants. `choose_start` is the other case: a caller with a goal
                 # and no page at all, who wants the first address worked out from the task.
                 opening = start if start is not None or not choose_start else await self._first_page(task, ledger)
-                history = [] if opening is None else await self._open(task, opening, ledger)
+                history, invented = ([], set[str]()) if opening is None else await self._open(task, opening, ledger)
+                if start is None and opening is not None:
+                    # The caller gave a goal and no page, so this address was worked out from the task too.
+                    invented.add(opening)
                 if start is None and opening is not None:
                     await self._front_page_if_blank(opening)
                 state = _RunState(
                     task, inputs or {}, tuple(attachments), authorization or Authorization(), ledger, planning
                 )
                 state.history.extend(history)
+                state.invented = invented
                 return await self._loop(state, output_schema, until)
         except _Stop as stop:
             return self._result(state, ledger, stop.status, error=stop.error)
@@ -580,7 +588,7 @@ class Agent:
         trace("start_page_blank", proposed=opened, front=front)
         await self._page.navigate(front)
 
-    async def _open(self, task: str, start: str, ledger: Ledger) -> list[HistoryEntry]:
+    async def _open(self, task: str, start: str, ledger: Ledger) -> tuple[list[HistoryEntry], set[str]]:
         """Open `start`, or a direct address for the task on its site when one is proposed in time.
 
         The proposal is written while the start page loads, so it costs no wall time unless it outlasts the load,
@@ -591,12 +599,12 @@ class Agent:
             await self._page.navigate(start)
             proposal = await asyncio.wait_for(asyncio.shield(proposing), _SHORTCUT_GRACE_SECONDS)
         except (TimeoutError, LLMError):
-            return []
+            return [], set()
         finally:
             await _discard(proposing)
         shortcut = accept(proposal.url, start)
         if shortcut is None:
-            return []
+            return [], set()
         try:
             await self._page.navigate(shortcut)
             # `accept` saw only the proposed address; a redirect can still land on another site.
@@ -607,15 +615,16 @@ class Agent:
         if landed != origin_of(start):
             logger.warning("shortcut %s did not stay on %s; returning to the start page", shortcut, start)
             await self._page.navigate(start)
-            return []
+            return [], set()
         if status is not None and status >= 400:
             # A proposed address is a guess, and a guess can name a path the site does not serve: books-mystery
             # opened `mysteryfile_3/`, read a 404 and spent a BACK leaving it, every run. The start page is known good.
             logger.info("shortcut %s answered HTTP %s; staying on the start page", shortcut, status)
             await self._page.navigate(start)
-            return []
+            return [], set()
         note = f"opened {shortcut} directly instead of clicking there; the start page {start} is one BACK away"
-        return [HistoryEntry(operation=None, target=None, outcome=StepOutcome.EXECUTED, page_changed=True, note=note)]
+        opened = HistoryEntry(operation=None, target=None, outcome=StepOutcome.EXECUTED, page_changed=True, note=note)
+        return [opened], {shortcut}
 
     async def _propose(self, task: str, start: str, ledger: Ledger) -> Shortcut:
         # Recorded here, not by the caller: a proposal that finished is billed even when the run ends first.
@@ -1665,12 +1674,18 @@ class Agent:
                     state.notes,
                     state.steps,
                     doubted=check.doubted,
+                    invented=sorted(state.invented),
                     config=self._config,
                     ledger=state.ledger,
                 )
                 state.ledger.record(verdict.cost)
                 accepted = _verified(verdict.data, state.plan, state.notes)
-                trace("verify", complete=verdict.data.complete, missing=list(verdict.data.missing))
+                trace(
+                    "verify",
+                    complete=verdict.data.complete,
+                    missing=list(verdict.data.missing),
+                    ungrounded=list(verdict.data.ungrounded),
+                )
             if accepted and until is not None:
                 accepted = await until((self._raw_observation or fresh).url)
             if not accepted:
@@ -1957,7 +1972,11 @@ def _verified(verdict: LLMVerdict, plan: Plan, notes: Notes) -> bool:
     """
     cited = {r.id for r in plan.requirements if r.kind is RequirementKind.INFORMATION and notes.evidenced(r.id)}
     doubted = set(verdict.missing) - cited
-    return not doubted and (verdict.complete or bool(verdict.missing))
+    # Evidence cannot excuse a requirement the verifier says was read off the wrong page: that is the case the
+    # excusal above cannot see. A proposed address opened a flights summary, the reader quoted a price from it,
+    # and the requirement counted as cited, so even a verifier naming it missing was overruled.
+    ungrounded = {key for key in verdict.ungrounded if key in {r.id for r in plan.requirements}}
+    return not doubted and not ungrounded and (verdict.complete or bool(verdict.missing))
 
 
 def _described(entry: HistoryEntry) -> str:

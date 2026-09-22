@@ -210,3 +210,38 @@ def test_controls_without_state_give_way_to_the_evidence_before_the_run_ends() -
     assert total_text in state["notes"]
     assert state["controls"] == [{"label": "Nonstop only", "role": "checkbox", "checked": True}]
     assert state["controls_omitted"] == 300
+
+
+async def test_the_verifier_is_told_where_each_requirement_was_read_and_which_addresses_were_guessed() -> None:
+    """The verifier could not tell a search the task asked for from a summary page of the same shape, because
+    nothing told it which page a fact came from or that the address had been built from the task."""
+    notes = Notes()
+    fare = Fact(
+        reader=FactReader.LLM,
+        requirement_id="r1",
+        text="From 727 US dollars",
+        evidence=evidence().model_copy(update={"url": "https://flights.test/summary", "quote": "From 727 US dollars"}),
+    )
+    notes.add(fare)
+    plan = Plan(
+        requirements=(Requirement(id="r1", text="The cheapest nonstop fare", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    guessed = "https://flights.test/?q=flights+from+london"
+    llm = ScriptedLLM([{"complete": True, "missing": [], "ungrounded": ["r1"]}])
+    verdict = await llm_verify(llm, "Cheapest nonstop?", plan, _PAGE, (), notes, (), invented=[guessed])
+    prompt = llm.calls[0][1][-1].content
+    assert "https://flights.test/summary" in prompt
+    assert guessed in prompt
+    assert verdict.data.ungrounded == ("r1",)
+
+
+async def test_a_verifier_told_of_no_guessed_address_is_asked_nothing_extra() -> None:
+    notes = Notes()
+    plan = Plan(
+        requirements=(Requirement(id="r1", text="The cheapest nonstop fare", kind=RequirementKind.INFORMATION),),
+        answer_expected=True,
+    )
+    llm = ScriptedLLM([{"complete": True, "missing": []}])
+    await llm_verify(llm, "Cheapest nonstop?", plan, _PAGE, (), notes, ())
+    assert "## Addresses this run built from the task" not in llm.calls[0][1][-1].content

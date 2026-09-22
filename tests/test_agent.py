@@ -1040,6 +1040,38 @@ def test_the_verifier_cannot_hold_open_a_requirement_the_notes_cite(
     assert _verified(LLMVerdict(complete=complete, missing=missing), plan, notes) is accepted
 
 
+@pytest.mark.parametrize(
+    ("ungrounded", "accepted"),
+    [
+        ((), True),
+        # The citing excusal above cannot see this: the requirement has evidence, from the wrong page.
+        (("compare",), False),
+        (("httpx",), False),
+        # A verdict naming something the plan never asked for says nothing about this run.
+        (("invented-id",), True),
+    ],
+)
+def test_evidence_does_not_excuse_a_requirement_read_off_the_wrong_page(
+    ungrounded: tuple[str, ...], accepted: bool
+) -> None:
+    """A proposed address opened a flights summary, the reader quoted a price from it, and the requirement
+    counted as cited, so the verifier could not hold it open however plainly it was the wrong search."""
+    info = RequirementKind.INFORMATION
+    plan = Plan(
+        requirements=(
+            Requirement(id="httpx", text="Find httpx's latest release date", kind=info),
+            Requirement(id="compare", text="Compare the two dates", kind=info),
+        ),
+        answer_expected=True,
+    )
+    notes = Notes(
+        Fact(reader=FactReader.LLM, requirement_id=r, text=r, evidence=evidence(start=i))
+        for i, r in enumerate(("httpx", "compare"))
+    )
+    verdict = LLMVerdict(complete=True, missing=(), ungrounded=ungrounded)
+    assert _verified(verdict, plan, notes) is accepted
+
+
 @pytest.mark.parametrize("draws", [True, False])
 async def test_a_read_waits_for_an_empty_page_to_draw_and_never_reads_nothing(
     monkeypatch: pytest.MonkeyPatch, draws: bool
@@ -1523,10 +1555,12 @@ async def test_a_shortcut_the_site_does_not_serve_returns_to_the_start_page(stat
     page.response_status = AsyncMock(return_value=status)
     agent = Agent(page, ScriptedJev({}), ScriptedLLM([{"url": guessed}]))
 
-    history = await agent._open("Which is the cheapest mystery book?", start, Ledger(Limits()))
+    history, invented = await agent._open("Which is the cheapest mystery book?", start, Ledger(Limits()))
 
     assert bool(history) is stays
     assert page.navigate.await_args_list[-1].args == ((guessed,) if stays else (start,))
+    # Only an address the run actually stayed on is one the verifier has to weigh.
+    assert invented == ({guessed} if stays else set())
 
 
 @pytest.mark.parametrize(

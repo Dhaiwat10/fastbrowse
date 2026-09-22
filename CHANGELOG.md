@@ -11,6 +11,13 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **Evidence from the wrong page no longer counts as an answer.** A proposed address opened a flights summary
+  rather than the search the task described, the reader quoted a price from it, and the requirement counted as
+  evidenced, so the verifier could not hold it open however plainly it was the wrong page. The verifier is now
+  told where each requirement's facts were read and which addresses the run built from the task rather than
+  reached by clicking, and it can name a requirement whose evidence came from the wrong page. Such a
+  requirement is not excused by having evidence.
+
 - **A reader can settle a superlative the site has already ordered, or name the control that shows the rest.**
   Three reads of a filtered results page returned nothing while the cheapest row was on screen: the reader saw
   the list go on and never assigned the requirement, so the done check refused and the run stuck. A page that
