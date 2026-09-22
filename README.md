@@ -343,7 +343,7 @@ uv run --extra browser-use python -m fastbrowse.evals.live                     #
 uv run --extra browser-use python -m fastbrowse.evals.live --arms fastbrowse        # ours alone
 uv run --extra browser-use python -m fastbrowse.evals.live --suite heldout   # the held-out split
 uv run ruff format . && uv run ruff check . && uv run ty check && uv run pytest
-uv run python scripts/no_slop.py && uv run vale sync && uv run vale README.md CHANGELOG.md AGENTS.md docs src scripts tests
+uv run python scripts/no_slop.py && uv run vale sync && uv run vale README.md CHANGELOG.md AGENTS.md CONTRIBUTING.md docs src scripts tests
 ```
 
 Grades use recorded requests, API truth, final page state or captured quotes where the arm exposes them.

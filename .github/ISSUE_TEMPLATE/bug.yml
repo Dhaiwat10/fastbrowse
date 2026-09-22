@@ -1,0 +1,40 @@
+name: Bug report
+description: A run that failed, stopped, or answered wrongly
+labels: [bug]
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: Task and start page
+      description: The exact task text and the `--start` URL, or the `run_task` call.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What happened
+      description: The status the run ended with, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: trace
+    attributes:
+      label: Step trace
+      description: The `steps` from `--json` output, if you can share them. Remove anything private first.
+      render: json
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The installed version (`uv pip show fastbrowse`), or the commit.
+    validations:
+      required: true
+  - type: dropdown
+    id: browser
+    attributes:
+      label: Browser
+      options:
+        - Browser Use Cloud (default)
+        - Local Chrome (--local)
+        - Attached over CDP
+        - Other
