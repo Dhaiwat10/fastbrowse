@@ -91,7 +91,18 @@ class Reduction(StrEnum):
     NONE = "none"
     RELEVANCE = "relevance"
     ONSCREEN_ONLY = "onscreen_only"
+    COMPACT = "compact"
+    """On-screen elements with long labels shortened and links cut to their path. Amazon's signed-in results
+    page offered 112 products with ~200-character titles and ~480-character tracking links, twice over (state
+    and target question), and the run stopped at `observation_limit` before it could pick one."""
     CAPPED = "capped"
+    """Compacted, and only the elements that fit offered; the rest are counted as omitted for a scroll to reach."""
+
+
+COMPACT_CHARS = 80
+COMPACT_HREF_CHARS = 120
+"""Longer than a label: a link's identity can sit in its query (`/item?id=123`), so it is trimmed, not cut to the
+path. Amazon's product id sits in the path's first 70 characters, ahead of the tracking query."""
 
 
 class ReadAssessment(StrEnum):
@@ -186,24 +197,32 @@ async def decide(
             room = max(0, config.observation.max_offered_controls - len(keep))
             keep.update([i for i in range(len(controls)) if i not in keep][:room])
             controls = tuple(control for i, control in enumerate(controls) if i in keep)
+    # Shortening text loses nothing a choice needs, so it is tried before any control is dropped, and kept for every
+    # rung after it.
+    compact = False
     while True:
-        request = build_request(observation, controls, context, config)
+        request = build_request(observation, controls, context, config, compact=compact)
         if fits(request, config):
             try:
-                decision = await _evaluate(jev, request, controls, reduction, ledger)
+                decision = await _evaluate(jev, request, controls, reduction, ledger, compact=compact)
                 return decision.model_copy(
                     update={"cost": (*cost, *decision.cost), "input_tokens": tokens + decision.input_tokens}
                 )
             except JevInputTooLarge:
                 pass
-        if reduction is Reduction.NONE and not shortlist_tried:
+        if not compact:
+            compact = True
+            if reduction is Reduction.NONE:
+                reduction = Reduction.COMPACT
+            continue
+        if not shortlist_tried:
             shortlist_tried = True
-            shortlist = await _shortlist(jev, observation, controls, context, config, ledger)
+            shortlist = await _shortlist(jev, observation, controls, context, config, ledger, compact=True)
             if shortlist is not None:
                 controls, cost, tokens = shortlist
                 reduction = Reduction.RELEVANCE
                 continue
-        if reduction in (Reduction.NONE, Reduction.RELEVANCE) and any(c.offscreen for c in controls):
+        if reduction not in (Reduction.ONSCREEN_ONLY, Reduction.CAPPED) and any(c.offscreen for c in controls):
             controls = tuple(c for c in controls if not c.offscreen)
             reduction = Reduction.ONSCREEN_ONLY
             continue
@@ -225,12 +244,12 @@ def _cap(
         indices = set(order[:prefix])
         return tuple(control for i, control in enumerate(controls) if i in indices)
 
-    if below <= 0 or not fits(build_request(observation, kept(0), context, config), config):
+    if below <= 0 or not fits(build_request(observation, kept(0), context, config, compact=True), config):
         return None
     low, high = 0, below - 1
     while low < high:
         middle = (low + high + 1) // 2
-        if fits(build_request(observation, kept(middle), context, config), config):
+        if fits(build_request(observation, kept(middle), context, config, compact=True), config):
             low = middle
         else:
             high = middle - 1
@@ -258,6 +277,8 @@ async def _shortlist(
     context: StepContext,
     config: Config,
     ledger: Ledger | None,
+    *,
+    compact: bool = False,
 ) -> tuple[tuple[Control, ...], list[CostLine], int] | None:
     protected = {i for i, control in enumerate(controls) if _protected(control)}
     candidates = [i for i in range(len(controls)) if i not in protected]
@@ -292,7 +313,7 @@ async def _shortlist(
     low, high = 0, min(len(ranked), max(0, config.observation.max_offered_controls - len(protected)))
     while low < high:
         middle = (low + high + 1) // 2
-        if fits(build_request(observation, kept(middle), context, config), config):
+        if fits(build_request(observation, kept(middle), context, config, compact=compact), config):
             low = middle
         else:
             high = middle - 1
@@ -338,7 +359,12 @@ def _offered_operations(
 
 
 def build_request(
-    observation: Observation, controls: Sequence[Control], context: StepContext, config: Config
+    observation: Observation,
+    controls: Sequence[Control],
+    context: StepContext,
+    config: Config,
+    *,
+    compact: bool = False,
 ) -> _Request:
     indexed = _index_controls(controls)
     offered = _offered_operations(observation, indexed, context)
@@ -381,14 +407,17 @@ def build_request(
         head = f"{operation.value}_target"
         if len(candidates) <= limit:
             targets[operation] = candidates
-            questions[head] = _target_question(operation, candidates)
+            questions[head] = _target_question(operation, candidates, compact)
             continue
         size = config.observation.group_size
         chunks = tuple(candidates[i : i + size] for i in range(0, len(candidates), size))
         groups[operation] = chunks
         questions[f"{operation.value}_group"] = ChoiceQuestion(
             instructions=json.dumps({"rules": [TARGET, GROUP], "operation": operation.value}),
-            criteria={str(i): " | ".join(c.label for c in chunk) for i, chunk in enumerate(chunks)},
+            criteria={
+                str(i): " | ".join(_shortened(c.label) if compact else c.label for c in chunk)
+                for i, chunk in enumerate(chunks)
+            },
         )
     if Operation.SWITCH_TAB in offered:
         questions["switch_tab_target"] = ChoiceQuestion(
@@ -408,7 +437,7 @@ def build_request(
             "The page is a CAPTCHA, a browser verification or a similar bot check.",
             "The page is a sign-in form or an ordinary page.",
         )
-    return _Request(_state(observation, controls, context), questions, targets, groups)
+    return _Request(_state(observation, controls, context, compact), questions, targets, groups)
 
 
 def fits(request: _Request, config: Config) -> bool:
@@ -427,6 +456,8 @@ async def _evaluate(
     controls: Sequence[Control],
     reduction: Reduction,
     ledger: Ledger | None,
+    *,
+    compact: bool = False,
 ) -> Decision:
     if ledger is not None:
         ledger.reserve(CostComponent.JEV)
@@ -451,7 +482,7 @@ async def _evaluate(
             ledger.reserve(CostComponent.JEV)
         inner = await jev.evaluate(
             request.state,
-            {f"{operation.value}_target": _target_question(operation, group)},
+            {f"{operation.value}_target": _target_question(operation, group, compact)},
         )
         if ledger is not None:
             ledger.record(inner.cost)
@@ -485,7 +516,7 @@ async def _evaluate(
     )
 
 
-def _state(observation: Observation, controls: Sequence[Control], context: StepContext) -> JsonValue:
+def _state(observation: Observation, controls: Sequence[Control], context: StepContext, compact: bool) -> JsonValue:
     state: dict[str, JsonValue] = {
         "task": context.task,
         "subgoal": context.subgoal,
@@ -494,7 +525,7 @@ def _state(observation: Observation, controls: Sequence[Control], context: StepC
         "unread_requirements": (list(context.unread_requirements) if context.unread_requirements is not None else None),
         "notes": context.notes,
         "recent_actions": [entry.model_dump(mode="json", exclude_none=True) for entry in context.history],
-        "elements": [_element(c) for c in controls],
+        "elements": [_element(c, compact=compact) for c in controls],
     }
     if context.secrets:
         state["stored_secrets"] = list(context.secrets)
@@ -523,17 +554,26 @@ def _relevance_element(control: Control) -> dict[str, JsonValue]:
     return element
 
 
-def _element(control: Control) -> dict[str, JsonValue]:
+def _shortened(text: str, limit: int = COMPACT_CHARS) -> str:
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _element(control: Control, *, compact: bool = False) -> dict[str, JsonValue]:
+    label, context, href = control.label, control.context, control.href
+    if compact:
+        label = _shortened(label)
+        context = None if context is None else _shortened(context)
+        href = None if href is None else _shortened(href, COMPACT_HREF_CHARS)
     element: dict[str, JsonValue] = {
         "id": control.id,
-        "label": control.label,
+        "label": label,
         "role": control.role,
         "operations": [op.value for op in sorted(control.operations)],
     }
     optional: dict[str, JsonValue] = {
-        "context": control.context,
+        "context": context,
         "value": control.value,
-        "href": control.href,
+        "href": href,
         "checked": control.checked,
         "selected": control.selected,
         "expanded": control.expanded,
@@ -549,7 +589,7 @@ def _element(control: Control) -> dict[str, JsonValue]:
     return element
 
 
-def _target_question(operation: Operation, candidates: Sequence[Control]) -> ChoiceQuestion:
+def _target_question(operation: Operation, candidates: Sequence[Control], compact: bool) -> ChoiceQuestion:
     return ChoiceQuestion(
         instructions=json.dumps(
             {
@@ -561,19 +601,19 @@ def _target_question(operation: Operation, candidates: Sequence[Control]) -> Cho
         # on a dense page, and it was tried. It bought no measured latency, because the request was never
         # the slow part, and a criterion the model has to go and look up is a worse criterion: the choice
         # is what this whole design rests on, so it gets the attributes in front of it.
-        criteria={c.id: _target_element(c, operation) for c in candidates},
+        criteria={c.id: _target_element(c, operation, compact) for c in candidates},
     )
 
 
-def _target_element(control: Control, operation: Operation) -> JsonValue:
+def _target_element(control: Control, operation: Operation, compact: bool) -> JsonValue:
     # Ported from browser-use/jev-ultrafast (MIT), snapshot.js: name opening a field separately
     # from typing in it so a picker is a useful click target even when its value is already filled.
-    element = _element(control)
+    element = _element(control, compact=compact)
     if Operation.FILL in control.operations:
         if operation is Operation.CLICK:
-            element["label"] = f"Open {control.label}"
+            element["label"] = f"Open {element['label']}"
         elif operation is Operation.ENTER:
-            element["label"] = f"Press Enter in {control.label}"
+            element["label"] = f"Press Enter in {element['label']}"
     return element
 
 
