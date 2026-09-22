@@ -286,6 +286,18 @@ async def test_a_relevance_pass_over_budget_sends_nothing() -> None:
     assert jev.requests == []
 
 
+async def test_a_relevance_pass_the_spend_limit_cannot_cover_sends_nothing() -> None:
+    from fastbrowse.models import Limits
+    from fastbrowse.telemetry import BudgetExceeded, Ledger
+
+    # The batches run together, so the limit is checked against the whole pass before any is billed.
+    config = Config(observation=ObservationLimits(max_offered_controls=10))
+    jev = RelevanceJev({"operation": "click"}, set())
+    with pytest.raises(BudgetExceeded):
+        await decide(jev, observation(_dense(40)), context(), config, ledger=Ledger(Limits(max_dollars=1e-9)))
+    assert jev.requests == []
+
+
 async def test_a_page_under_the_limit_costs_no_relevance_pass() -> None:
     jev = RelevanceJev({"operation": "click"}, set())
     await decide(jev, observation(_dense(20)), context(), Config())

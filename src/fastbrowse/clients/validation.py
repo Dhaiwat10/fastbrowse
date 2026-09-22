@@ -12,6 +12,7 @@ import httpx
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from fastbrowse.jev import (
+    JEV_DOLLARS_PER_INPUT_TOKEN,
     Answer,
     ChoiceAnswer,
     ChoiceQuestion,
@@ -440,7 +441,7 @@ def estimated_cost(input_tokens: int, output_tokens: int = 0) -> CostLine:
     return CostLine(
         component=CostComponent.JEV,
         basis=CostBasis.ESTIMATED,
-        dollars=input_tokens * 0.042 / 1_000_000,
+        dollars=input_tokens * JEV_DOLLARS_PER_INPUT_TOKEN,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
     )

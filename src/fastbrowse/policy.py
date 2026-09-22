@@ -17,6 +17,7 @@ from pydantic import JsonValue
 
 from fastbrowse.config import Config
 from fastbrowse.jev import (
+    JEV_DOLLARS_PER_INPUT_TOKEN,
     ChoiceAnswer,
     ChoiceQuestion,
     Evaluation,
@@ -266,9 +267,11 @@ async def _shortlist(
     if batch:
         batches.append(batch)
 
-    # Every batch is reserved before any is sent: a budget refused mid-gather would leave its siblings
-    # billing the provider after the run had already stopped.
+    # Every batch is reserved, and the whole pass priced against the spend limit, before any is sent: the batches
+    # run together, so a limit checked per batch would pass them all and learn of the overrun only once billed.
     if ledger is not None:
+        questions_size = sum(len(q.model_dump_json()) for b in batches for q in b.values()) / ratio
+        ledger.check((len(batches) * state_size + questions_size) * JEV_DOLLARS_PER_INPUT_TOKEN)
         for _ in batches:
             ledger.reserve(CostComponent.JEV)
 
