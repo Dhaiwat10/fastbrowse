@@ -64,8 +64,16 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
   answer's claim that version 0.1.0 shipped that day still has the version in its citation.
   A batched Jev pass cut short by the time limit now keeps the cost of the requests that had already answered,
   and one the call limit cannot cover counts none of its calls.
-- Returning a filter or panel to an earlier state now triggers recovery, so toggles and redrawn panels cannot keep renewing the stall budget.
-- Recovery and action choices now share recent diagnoses, subgoals and observed outcomes, so a failed approach is remembered on the next attempt.
+- **A setting switched back to where it was is caught as a loop.** A run on a results page could turn a filter
+  on and off until it ran out of steps: each click changed the page, so no two steps looked alike. When every
+  control on a page returns to the values it held before an earlier action, the run now stops and asks the
+  recovery model for a different approach, naming the control and the actions in between.
+- **Recovery remembers its earlier attempts.** The recovery model and Jev now see the last few diagnoses and
+  subgoals of the current stall, and which attempt this is, so a second recovery does not propose the plan the
+  first one already tried.
+- **A form's Next button no longer ends the run.** A click on a "Next" that was not a link to another address
+  was treated as paging to the next part of a list, and the run stopped on a multi-step form's first step. Only
+  a link to another page counts as a pager now.
 - **`stretch-dev` and `stretch-heldout` eval suites.** `dev` and `heldout` now pass almost every run, so these
   harder tasks (a multi-step form with a correction, a date relative to today, a list aggregated across pages, a
   filter applied and partly undone) are what show whether an agent change helps.
