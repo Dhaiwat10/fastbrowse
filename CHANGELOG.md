@@ -11,6 +11,12 @@ release. Older entries are kept verbatim rather than rewritten as the product mo
 
 ## [Unreleased]
 
+- **A page that rewrites its own text cannot be read for ever.** Reads were remembered by the page's exact
+  content, so a ticker, a rotating advert or a live counter minted a key the run had never seen on every
+  observation, and the agent could read one page until its step budget ran out instead of acting. Reads are
+  now also budgeted by what the page lets you do rather than by its text, and two reads of one page state
+  that add no fact make the run act instead. A read that does add a fact restores the budget.
+
 - **A value is still the page's when the model retypes its punctuation.** A field the page writes with a curly
   apostrophe, an en dash or an ellipsis was dropped when the model quoted it with a straight apostrophe, a
   hyphen or three dots, so the fact never landed, the requirement stayed open, and the run read the same page

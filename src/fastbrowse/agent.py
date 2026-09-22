@@ -18,7 +18,17 @@ from pydantic import BaseModel, Field, JsonValue
 
 from fastbrowse.citations import ANSWER_LINK, text_fragment
 from fastbrowse.config import Config, ObservationLimits
-from fastbrowse.effects import SETTING_ROLES, ControlKey, ControlValue, Move, effect, move, reversal, state_key
+from fastbrowse.effects import (
+    SETTING_ROLES,
+    ControlKey,
+    ControlValue,
+    Move,
+    content_key,
+    effect,
+    move,
+    reversal,
+    state_key,
+)
 from fastbrowse.jev import ChoiceAnswer, ChoiceQuestion, JevClient, JevError, NoulAnswer, NoulQuestion
 from fastbrowse.llm import Generation, LLMClient, LLMError, Message
 from fastbrowse.memory import Fact, Notes, NotesTooLarge
@@ -237,6 +247,9 @@ class _RunState:
     """Page states where an unsure pick has been acted on instead of recovering; the next one there recovers."""
     reads: set[ReadKey] = field(default_factory=set)
     """Attempted reads by document, exact content and outstanding requirements, independent of URL edits."""
+    barren: dict[ReadKey, int] = field(default_factory=dict[ReadKey, int])
+    """Reads by document, page state and outstanding requirements that added no fact. Keyed by what can be done
+    on the page rather than by its exact text, so a page rewriting itself cannot mint a fresh key for ever."""
     next_page: bool = False
     """Open this page's next page, set when the reader says a list the run needs goes on past the page it read."""
     paged_from: str | None = None
@@ -1334,12 +1347,30 @@ class Agent:
         capture = capture or await self._capture()
         plan = await state.await_plan()
         wanted = [r for r in state.notes.unresolved(plan) if r.kind is RequirementKind.INFORMATION]
+        budget: ReadKey | None = None
         if observation is not None:
-            key = observation.document_key, capture.sha256, tuple(r.id for r in wanted)
+            wanted_ids = tuple(r.id for r in wanted)
+            budget = observation.document_key, content_key(observation), wanted_ids
+            if state.barren.get(budget, 0) >= self._config.stall.barren_reads:
+                # The page keeps rewriting its own text, so the exact-content key below never matches and the
+                # run could read it until the step budget ran out. What it can do here has paid out nothing.
+                trace("read_skipped", reason="no_new_facts_from_this_page_state")
+                return False, True
+            key = observation.document_key, capture.sha256, wanted_ids
             if key in state.reads:
                 trace("read_skipped", reason="unchanged_content_and_requirements")
                 return False, True
             state.reads.add(key)
+
+        def spent(progressed: bool) -> None:
+            """A read that paid out clears the budget, so a page that starts answering again is readable."""
+            if budget is None:
+                return
+            if progressed:
+                state.barren.pop(budget, None)
+            else:
+                state.barren[budget] = state.barren.get(budget, 0) + 1
+
         if not capture.text.strip():
             # An empty page may still be rendering; only new content warrants another read.
             if observation is not None and await self._outwait(observation):
@@ -1348,6 +1379,7 @@ class Agent:
                     return await self._read(state, drawn, observation)
             # Nothing on the page can evidence anything, so the reader is not asked.
             trace("read", url=self._redactor.redact(capture.url), chars=0, wanted=[r.id for r in wanted])
+            spent(False)
             return False, False
         following = next_page_control(observation) if observation is not None else None
         began = state.first_url if following is not None or state.pages else None
@@ -1379,6 +1411,7 @@ class Agent:
             evidenced=[r.id for r in wanted if state.notes.evidenced(r.id)],
             continues=continues,
         )
+        spent(progressed)
         if observation is not None:
             self._follow_pages(state, continues, following)
         return progressed, False

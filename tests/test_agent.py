@@ -40,7 +40,7 @@ from fastbrowse.models import (
     StepEvent,
     StepOutcome,
 )
-from fastbrowse.page import Action, ActResult, BlockKind, Control, Observation, Page
+from fastbrowse.page import Action, ActResult, BlockKind, Capture, Control, Observation, Page
 from fastbrowse.planner import Plan, Requirement, RequirementKind
 from fastbrowse.policy import Decision, HistoryEntry, ReadAssessment, build_request, decide
 from fastbrowse.retrieval import ComposedAnswer
@@ -1462,6 +1462,85 @@ def test_a_secret_is_compared_by_the_length_the_page_reveals() -> None:
 def test_an_upload_is_judged_by_the_page_not_by_a_value() -> None:
     """A file input's value is not the file, so every upload after the first read as the same nothing."""
     assert Agent._edit_progress(*edit("a.pdf", holds=None, operation=Operation.UPLOAD), set()) is None
+
+
+def _ticker(nth: int) -> Capture:
+    """One observation of a page that rewrites its own text every time it is looked at."""
+    return capture((BlockKind.PARAGRAPH, f"Live results, updated {nth} seconds ago"))
+
+
+async def _reading_state() -> tuple[_RunState, Requirement]:
+    state = await run_state()
+    requirement = Requirement(id="r1", text="Find the total", kind=RequirementKind.INFORMATION)
+    state.ready_plan = Plan(requirements=(requirement,), answer_expected=True)
+    return state, requirement
+
+
+async def test_a_page_that_rewrites_its_own_text_is_read_only_while_it_pays_out() -> None:
+    """The exact-content key never matches on a ticker, so without a budget the run reads it for ever."""
+    state, _ = await _reading_state()
+    here = _at("https://example.test/live/", _button("Refresh"))
+    llm = ScriptedLLM([{"claims": [], "answered": False}] * 6)
+    agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "synthesis"}), llm)
+    skipped = []
+    for nth in range(5):
+        _, was_skipped = await agent._read(state, _ticker(nth), here)
+        skipped.append(was_skipped)
+    assert len(llm.calls) == Config().stall.barren_reads
+    assert skipped == [False, False, True, True, True]
+
+
+async def test_a_read_that_pays_out_restores_the_budget_of_the_page_state_it_read() -> None:
+    state, _ = await _reading_state()
+    here = _at("https://example.test/live/", _button("Refresh"))
+    paid: JsonValue = {"claims": [{"text": "Total: 12", "cite": {"first": "s0", "last": "s0"}}], "answered": False}
+    llm = ScriptedLLM([{"claims": [], "answered": False}, paid, {"claims": [], "answered": False}])
+    agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "synthesis"}), llm)
+    await agent._read(state, _ticker(0), here)
+    await agent._read(state, _ticker(1), here)
+    assert state.notes.facts, "the second read added a fact"
+    # The budget the first barren read spent is cleared, so the page is readable again.
+    _, was_skipped = await agent._read(state, _ticker(2), here)
+    assert not was_skipped
+    assert len(llm.calls) == 3
+
+
+async def test_a_spent_read_budget_belongs_to_one_page_state_not_to_the_run() -> None:
+    state, _ = await _reading_state()
+    llm = ScriptedLLM([{"claims": [], "answered": False}] * 4)
+    agent = Agent(Mock(spec=Page), ScriptedJev({"r1": "synthesis"}), llm)
+    here = _at("https://example.test/live/", _button("Refresh"))
+    for nth in range(3):
+        await agent._read(state, _ticker(nth), here)
+    assert len(llm.calls) == Config().stall.barren_reads
+    # A control the earlier state did not offer is a page state of its own, with a budget of its own.
+    changed = _at("https://example.test/live/", _button("Refresh"), _button("Show all"))
+    _, was_skipped = await agent._read(state, _ticker(3), changed)
+    assert not was_skipped
+    assert len(llm.calls) == Config().stall.barren_reads + 1
+
+
+async def test_a_starved_read_lets_the_interaction_jev_chose_proceed() -> None:
+    """The point of the budget: the run stops reading the ticker and does the thing the task needs."""
+    state, _ = await _reading_state()
+    refresh = _button("Refresh")
+    here = _at("https://example.test/live/", refresh)
+    jev = ScriptedJev(
+        {"operation": "click", "click_target": refresh.id, "read_assessment": "evidence", "r1": "synthesis"}
+    )
+    llm = ScriptedLLM([{"claims": [], "answered": False}] * 6)
+    page = Mock(spec=Page)
+    page.observe = AsyncMock(return_value=here)
+    page.capture = AsyncMock(return_value=_ticker(99))
+    page.screenshot = AsyncMock(return_value=b"")
+    page.artifacts = ()
+    agent = Agent(page, jev, llm)
+    for nth in range(Config().stall.barren_reads):
+        await agent._read(state, _ticker(nth), here)
+    clicking = await decide(jev, here, context(), Config())
+    assert clicking.read_assessment is ReadAssessment.EVIDENCE
+    # A forced read here would be the third barren one on this page state, so the click goes ahead instead.
+    assert await agent._read_before_interaction(state, here, clicking) is False
 
 
 async def test_same_text_can_be_read_for_a_new_document_or_new_requirement() -> None:

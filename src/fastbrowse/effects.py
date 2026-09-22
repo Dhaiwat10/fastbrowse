@@ -80,13 +80,24 @@ def _control_name(key: ControlKey) -> str:
     return f"{key[3]} ({key[4]})" if key[4] else key[3]
 
 
-def state_key(observation: Observation) -> str:
-    """Identify a page state by what can be done on it, ignoring text that changes on its own (clocks, ads)."""
-    controls = sorted(
+def _controls(observation: Observation) -> list[str]:
+    return sorted(
         json.dumps([c.role, c.label, c.context, c.value, c.checked, c.selected, c.expanded])
         for c in observation.controls
     )
-    return hashlib.sha256(json.dumps([observation.url, controls]).encode()).hexdigest()
+
+
+def state_key(observation: Observation) -> str:
+    """Identify a page state by what can be done on it, ignoring text that changes on its own (clocks, ads)."""
+    return hashlib.sha256(json.dumps([observation.url, _controls(observation)]).encode()).hexdigest()
+
+
+def content_key(observation: Observation) -> str:
+    """What a reader would find here, without the address: a page that rewrites its own text between
+    observations (a ticker, rotating ads, a live counter) keys the same, so reading it again is the same read.
+    The address is left out because a site rewrites its own query as a list is paged or filtered, which is why
+    a read has always been kept by document rather than by URL."""
+    return hashlib.sha256(json.dumps(_controls(observation)).encode()).hexdigest()
 
 
 def _short(value: object) -> str:
