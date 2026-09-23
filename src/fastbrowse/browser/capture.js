@@ -56,6 +56,7 @@
 
   const renderTable = table => {
     const rows = [...table.querySelectorAll(':scope > tr, :scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr')]
+      .filter(row => !hidden(row) && !hidden(row.parentElement))
       .map(row => ({ row, cells: [...row.querySelectorAll(':scope > th, :scope > td')] }))
       .filter(({ cells }) => cells.length);
     if (!rows.length) return [];
