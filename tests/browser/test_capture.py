@@ -73,8 +73,40 @@ async def test_each_table_row_repeats_its_header(page: CdpPage, main_site: str) 
         ("<tr><td>A</td><td>1</td></tr><tr><th>B</th><td>2</td></tr>", ["| A | 1 |", "| B | 2 |"]),
         ("<thead><tr><th>Name</th></tr><tr><th>Person</th></tr></thead>", ["| Name |\n| Person |\n| --- |"]),
         ("<tr><th>Name | alias</th></tr>", ["| Name \\| alias |\n| --- |"]),
+        (
+            "<thead><tr hidden><th>Group</th></tr><tr><th>Name</th></tr></thead>"
+            "<tbody><tr style='display:none'><td>X</td></tr><tr><td>A</td></tr>"
+            "<tr style='visibility:collapse'><td>Y</td></tr></tbody>"
+            "<tfoot><tr style='visibility:hidden'><td>Z</td></tr><tr><td>Total</td></tr></tfoot>",
+            ["| Name |\n| --- |\n| A |", "| Name |\n| --- |\n| Total |"],
+        ),
+        (
+            "<thead style='display:none'><tr><th>Name</th></tr></thead><tbody><tr><td>A</td></tr></tbody>"
+            "<tfoot style='visibility:collapse'><tr><td>Total</td></tr></tfoot>",
+            ["| A |"],
+        ),
+        (
+            "<tr><th>Name</th></tr><tr hidden><td>Ada</td></tr><tr style='display:none'><td>Grace</td></tr>",
+            ["| Name |\n| --- |"],
+        ),
+        ("<tr hidden><td>Ada</td></tr>", []),
+        (
+            "<tr><th>Name</th><th style='display:none'>Id</th></tr>"
+            "<tr><td>Ada</td><td style='display:none'>7</td></tr>",
+            ["| Name |\n| --- |\n| Ada |"],
+        ),
     ],
-    ids=["multiple-header-rows", "no-header", "header-only", "leading-header-only"],
+    ids=[
+        "multiple-header-rows",
+        "no-header",
+        "header-only",
+        "leading-header-only",
+        "hidden-rows",
+        "hidden-sections",
+        "every-data-row-hidden",
+        "every-row-hidden",
+        "hidden-column",
+    ],
 )
 async def test_table_header_variants(
     page: CdpPage, browser_session: BrowserSession, main_site: str, rows: str, expected: list[str]
@@ -88,76 +120,6 @@ async def test_table_header_variants(
     capture = await page.capture()
     assert [capture.text[block.start : block.end] for block in capture.blocks] == expected
     assert all(block.kind is BlockKind.TABLE for block in capture.blocks)
-
-
-@pytest.mark.parametrize("hiding", ["hidden", 'style="display:none"'], ids=["hidden", "display-none"])
-async def test_hidden_table_rows_are_not_captured(
-    page: CdpPage, browser_session: BrowserSession, main_site: str, hiding: str
-) -> None:
-    await page.navigate(f"{main_site}/icons.html")
-    markup = (
-        f"<table><thead><tr {hiding}><th>Hidden header</th></tr><tr><th>Name | alias</th></tr></thead>"
-        f"<tbody><tr {hiding}><td>Hidden first</td></tr><tr><td>A | B</td></tr>"
-        f"<tr {hiding}><td>Hidden last</td></tr></tbody>"
-        f"<tfoot><tr {hiding}><td>Hidden footer</td></tr><tr><td>Total</td></tr></tfoot></table>"
-    )
-    await eval_value(
-        browser_session, browser_session.active_session_id, f"document.body.innerHTML = {json.dumps(markup)}"
-    )
-    capture = await page.capture()
-    expected = ["| Name \\| alias |\n| --- |\n| A \\| B |", "| Name \\| alias |\n| --- |\n| Total |"]
-    assert [capture.text[block.start : block.end] for block in capture.blocks] == expected
-    assert capture.text == "".join(f"{text}\n\n" for text in expected)
-    assert all(block.kind is BlockKind.TABLE for block in capture.blocks)
-
-
-@pytest.mark.parametrize("hiding", ["hidden", 'style="display:none"'], ids=["hidden", "display-none"])
-@pytest.mark.parametrize("section", ["thead", "tbody", "tfoot"])
-async def test_hidden_table_sections_are_not_captured(
-    page: CdpPage, browser_session: BrowserSession, main_site: str, hiding: str, section: str
-) -> None:
-    await page.navigate(f"{main_site}/icons.html")
-    markup = (
-        f"<table><{section} {hiding}><tr><th>Hidden heading</th></tr><tr><td>Hidden section</td></tr>"
-        f"</{section}><tbody><tr><td>Visible</td></tr></tbody></table>"
-    )
-    await eval_value(
-        browser_session, browser_session.active_session_id, f"document.body.innerHTML = {json.dumps(markup)}"
-    )
-    capture = await page.capture()
-    assert [capture.text[block.start : block.end] for block in capture.blocks] == ["| Visible |"]
-    assert capture.text == "| Visible |\n\n"
-    assert all(block.kind is BlockKind.TABLE for block in capture.blocks)
-
-
-@pytest.mark.parametrize("hiding", ["hidden", "display"], ids=["hidden", "display-none"])
-@pytest.mark.parametrize("with_header", [True, False], ids=["with-header", "without-header"])
-async def test_table_capture_follows_filter_changes(
-    page: CdpPage, browser_session: BrowserSession, main_site: str, hiding: str, with_header: bool
-) -> None:
-    await page.navigate(f"{main_site}/icons.html")
-    header = "<tr><th>Name</th></tr>" if with_header else ""
-    markup = f"<table>{header}<tr data-result><td>Ada</td></tr><tr data-result><td>Grace</td></tr></table>"
-    await eval_value(
-        browser_session, browser_session.active_session_id, f"document.body.innerHTML = {json.dumps(markup)}"
-    )
-    for names in (["Ada", "Grace"], ["Ada"], [], ["Ada", "Grace"]):
-        await eval_value(
-            browser_session,
-            browser_session.active_session_id,
-            "document.querySelectorAll('tr[data-result]').forEach(row => {"
-            f"const excluded = !{json.dumps(names)}.includes(row.innerText.trim());"
-            + ("row.hidden = excluded;" if hiding == "hidden" else "row.style.display = excluded ? 'none' : '';")
-            + "})",
-        )
-        capture = await page.capture()
-        prefix = "| Name |\n| --- |\n" if with_header else ""
-        expected = [f"{prefix}| {name} |" for name in names]
-        if with_header and not names:
-            expected = [prefix.rstrip()]
-        assert [capture.text[block.start : block.end] for block in capture.blocks] == expected
-        assert capture.text == "".join(f"{text}\n\n" for text in expected)
-        assert all(block.kind is BlockKind.TABLE for block in capture.blocks)
 
 
 async def test_table_rows_below_the_viewport_are_captured(
