@@ -58,11 +58,11 @@
     // A table filter hides what it excludes with `hidden`, display or visibility (`collapse` is the one CSS made
     // for rows), and a column toggle hides cells; read as rows, a filtered table answered from rows not shown.
     // Visibility inherits, so the row's own style covers a collapsed section; display does not, so its section
-    // is checked too.
-    const gone = e => hidden(e) || getComputedStyle(e).visibility !== 'visible';
+    // is checked too. A cell hidden by visibility still holds its column, so it stays, blank, and the cells
+    // after it keep their headers.
     const rows = [...table.querySelectorAll(':scope > tr, :scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr')]
-      .filter(row => !gone(row) && !hidden(row.parentElement))
-      .map(row => ({ row, cells: [...row.querySelectorAll(':scope > th, :scope > td')].filter(c => !gone(c)) }))
+      .filter(row => !hidden(row) && getComputedStyle(row).visibility === 'visible' && !hidden(row.parentElement))
+      .map(row => ({ row, cells: [...row.querySelectorAll(':scope > th, :scope > td')].filter(c => !hidden(c)) }))
       .filter(({ cells }) => cells.length);
     if (!rows.length) return [];
     let headers = rows.filter(({ row }) => row.parentElement.tagName === 'THEAD');

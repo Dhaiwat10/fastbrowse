@@ -95,6 +95,11 @@ async def test_each_table_row_repeats_its_header(page: CdpPage, main_site: str) 
             "<tr><td>Ada</td><td style='display:none'>7</td></tr>",
             ["| Name |\n| --- |\n| Ada |"],
         ),
+        (
+            "<tr><th>Name</th><th>Id</th><th>Team</th></tr>"
+            "<tr><td>Ada</td><td style='visibility:hidden'>7</td><td>North</td></tr>",
+            ["| Name | Id | Team |\n| --- | --- | --- |\n| Ada |  | North |"],
+        ),
     ],
     ids=[
         "multiple-header-rows",
@@ -106,6 +111,7 @@ async def test_each_table_row_repeats_its_header(page: CdpPage, main_site: str) 
         "every-data-row-hidden",
         "every-row-hidden",
         "hidden-column",
+        "invisible-cell-keeps-its-column",
     ],
 )
 async def test_table_header_variants(
